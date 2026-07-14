@@ -92,7 +92,7 @@ pub fn Sieve(comptime W: type, comptime Store: type, comptime seg_bytes: u64) ty
                 for (st.primes) |*pr| {
                     var idx = pr.idx;
                     var spoke = pr.spoke;
-                    const d = pr.d;
+                    const d = &pr.d; // pointer, not a copy — the delta table can be 46 KB (mod-30030)
                     while (idx < hi) {
                         Store.set(&st.seg, idx - lo);
                         idx += d[spoke];

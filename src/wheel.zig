@@ -33,6 +33,7 @@ pub fn Wheel(comptime wheel_primes: []const u64) type {
 
         /// φ(M): number of residues coprime to M = spokes of the wheel.
         pub const spokes: usize = blk: {
+            @setEvalBranchQuota(1 << 26); // big wheels loop to M (30030 for mod-30030)
             var c: usize = 0;
             var r: u64 = 0;
             while (r < M) : (r += 1) if (gcd(r, M) == 1) {
@@ -45,6 +46,7 @@ pub fn Wheel(comptime wheel_primes: []const u64) type {
 
         /// Sorted residues in [0, M) coprime to M (R[0] == 1 for M≥2, == 0 for M==1).
         const R: [spokes]u64 = blk: {
+            @setEvalBranchQuota(1 << 26);
             var arr: [spokes]u64 = undefined;
             var n: usize = 0;
             var r: u64 = 0;
@@ -57,6 +59,7 @@ pub fn Wheel(comptime wheel_primes: []const u64) type {
 
         /// gap[i] = distance from residue R[i] to the next coprime residue (wrapping +M).
         const gap: [spokes]u64 = blk: {
+            @setEvalBranchQuota(1 << 26);
             var g: [spokes]u64 = undefined;
             for (0..spokes) |i| {
                 const nxt = if (i + 1 < spokes) R[i + 1] else R[0] + M;
@@ -67,6 +70,7 @@ pub fn Wheel(comptime wheel_primes: []const u64) type {
 
         /// rank[r] = spoke index of residue r, or `spokes` (sentinel) if not coprime.
         const rank: [M]usize = blk: {
+            @setEvalBranchQuota(1 << 26);
             var t: [M]usize = undefined;
             for (&t) |*x| x.* = spokes;
             for (R, 0..) |res, i| t[@intCast(res)] = i;
@@ -93,7 +97,7 @@ pub fn Wheel(comptime wheel_primes: []const u64) type {
         pub fn slotCount(n: u64) u64 {
             var c = (n / M) * S;
             const r = n % M;
-            inline for (R) |res| {
+            for (R) |res| { // plain loop: φ can be thousands for big wheels
                 if (res <= r) c += 1;
             }
             return c;

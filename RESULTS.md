@@ -77,6 +77,34 @@ pure cache penalty segmentation buys back.
   was a huge-page/L3-occupancy artifact. Clean signals here = segmented flatness
   + the DRAM cliff. For intra-cache structure, the segment sweep is the instrument.
 
+## Wheel sweep: diminishing returns → regression (fixed N=1e9, []u64, 32 KiB)
+Sweep p_n = largest wheel prime = 1(all),2,3,5,7,11,13 → M = 1,2,6,30,210,2310,30030.
+
+| p_n | M | φ | desc B | M ints/s |
+|-----|---|---|--------|---------:|
+| 1 | 1 | 1 | 32 | ~500 |
+| 2 | 2 | 1 | 32 | 1423 |
+| 3 | 6 | 2 | 40 | 2377 |
+| **5** | **30** | **8** | 88 | **3637 ← peak** |
+| 7 | 210 | 48 | 408 | 1415 |
+| 11 | 2310 | 480 | 3864 | 1500 |
+| 13 | 30030 | 5760 | 46104 | 1670 |
+
+- **Peak at mod-30; mod-210+ regresses ~2.2–2.6×.** Four factors, all turning at
+  mod-210: (1) φ=8 is the last power-of-2 spoke count → `%φ` is a free AND (48
+  needs magic-multiply); (2) desc 88 B keeps the ~300 KB of delta tables in L2,
+  mod-210's 1.4 MB spills to L3 — the *wheel's own bookkeeping* becomes a
+  memory-bound working set (cache story, recursively, on metadata); (3) 8
+  residues = 1 byte (packing sweet spot); (4) the Mertens gain past mod-30
+  (~1.28×) is too small to pay for 1–3.
+- Our **general delta-table** wheel caps at mod-30 on this box; production sieves
+  reach mod-210 only by hard-coding unrolled per-residue loops (no per-prime
+  delta table). So the sweet spot is part hardware (φ=8, L2), part our honesty
+  about bookkeeping cost.
+- Perf bug the sweep exposed & fixed: the strike loop copied the whole per-prime
+  delta array (`const d = pr.d`, up to 46 KB) every prime every segment → now a
+  pointer. mod-30030: 212 → 1670 M/s (8×).
+
 ## Architecture notes
 - Three orthogonal comptime axes (wheel × store × traversal-via-seg-size) +
   a runtime interval. Segmentation = repeated **range sieve** over [lo,hi);

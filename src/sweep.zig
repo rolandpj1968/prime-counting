@@ -10,6 +10,41 @@
 const std = @import("std");
 const common = @import("common.zig");
 const sieve = @import("sieve.zig");
+const wheel = @import("wheel.zig");
+
+/// Sweep the wheel (p_n = largest wheel prime), fixed store/segment/N. Shows the
+/// diminishing Mertens returns and where the wheel's own bookkeeping (φ spokes,
+/// per-prime delta table) starts to overwhelm the shrinking gain.
+pub fn wheelSweep(
+    comptime wheels: anytype,
+    comptime Store: type,
+    comptime seg: u64,
+    gpa: std.mem.Allocator,
+    n: u64,
+    repeats: usize,
+) !void {
+    std.debug.print("\n# wheel sweep — store {s}, seg {d} KiB, N={d}\n", .{ Store.name, seg / 1024, n });
+    std.debug.print("{s:>4}  {s:>7}  {s:>6}  {s:>8}  {s:>9}  {s:>10}\n", .{ "p_n", "M", "spokes", "density", "desc B", "M ints/s" });
+    inline for (wheels) |wp| {
+        const W = wheel.Wheel(wp);
+        const S = sieve.Sieve(W, Store, seg);
+        var st = try S.init(gpa, n);
+        defer S.deinit(&st, gpa);
+        var best: u64 = std.math.maxInt(u64);
+        var r: usize = 0;
+        while (r < repeats) : (r += 1) {
+            const t0 = common.nowNs();
+            S.sieve(&st, n);
+            best = @min(best, common.nowNs() - t0);
+        }
+        const pi = S.count(&st, n);
+        const ok = if (common.expectedPi(n)) |e| pi == e else true;
+        const rate = @as(f64, @floatFromInt(n)) / (@as(f64, @floatFromInt(best)) / 1e9) / 1e6;
+        const pn: u64 = if (wp.len == 0) 1 else wp[wp.len - 1];
+        const density = @as(f64, @floatFromInt(W.spokes)) / @as(f64, @floatFromInt(W.M));
+        std.debug.print("{d:>4}  {d:>7}  {d:>6}  {d:>8.4}  {d:>9}  {d:>10.0}  {s}\n", .{ pn, W.M, W.spokes, density, @sizeOf(W.Prime), rate, if (ok) "OK" else "PI FAIL" });
+    }
+}
 
 fn level(seg: u64) []const u8 {
     if (seg <= 32 * 1024) return "L1d";
