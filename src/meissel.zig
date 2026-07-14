@@ -91,28 +91,28 @@ fn prefixPi(gpa: std.mem.Allocator, limit: u64) ![]u32 {
 
 pub fn pi(gpa: std.mem.Allocator, x: u64) !u64 {
     if (x < 2) return 0;
-    const x13 = icbrt(x);
-    const x12 = common.isqrt(x);
-    const primes = try rs.basePrimes(gpa, x12); // primes ≤ √x (need up to √x for P₂)
+    const cbrt_x = icbrt(x); // ⌊x^(1/3)⌋
+    const sqrt_x = common.isqrt(x); // ⌊x^(1/2)⌋
+    const primes = try rs.basePrimes(gpa, sqrt_x); // primes ≤ √x (need up to √x for P₂)
     defer gpa.free(primes);
 
     // a = π(x^(1/3))
     var a: usize = 0;
     for (primes) |p| {
-        if (p <= x13) a += 1 else break;
+        if (p <= cbrt_x) a += 1 else break;
     }
 
     // prefix-π up to x^(2/3): used by both the φ leaf cutoff and P₂.
-    const pref = try prefixPi(gpa, x / x13);
+    const pref = try prefixPi(gpa, x / cbrt_x);
     defer gpa.free(pref);
 
     const phi_val = phi(x, a, primes, pref);
 
-    // P₂(x,a) = Σ_{x13 < p ≤ x12} (π(x/p) − π(p) + 1)
+    // P₂(x,a) = Σ_{cbrt_x < p ≤ sqrt_x} (π(x/p) − π(p) + 1)
     var p2: i64 = 0;
     for (primes, 0..) |p, j| {
-        if (p <= x13) continue;
-        if (p > x12) break;
+        if (p <= cbrt_x) continue;
+        if (p > sqrt_x) break;
         const pi_xp: i64 = pref[@intCast(x / p)];
         const pi_p: i64 = @intCast(j + 1); // p is the (j+1)-th prime
         p2 += pi_xp - pi_p + 1;
