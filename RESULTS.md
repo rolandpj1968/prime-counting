@@ -1,7 +1,7 @@
 # Empirical results
 
-Detailed benchmark findings for the sieve. See [README.md](README.md) for framing;
-open/future work is tracked as tasks, not here.
+Detailed findings for the sieve and the combinatorial π(x). See [README.md](README.md)
+for framing and references; open/future work is tracked as tasks, not here.
 
 Default benchmark: **N = 10⁹**, π(N) = 50,847,534. Best-of-3, sieve timed
 separately from count. Machine: AVX2 (no AVX-512), L1d 32 KiB / L2 512 KiB /
@@ -186,6 +186,29 @@ noise ~1/√count. Δ=1e8, base primes to 5e9:
   no overflow + this code validated at low N).
 - Practical wall is base primes to √N (memory), ~1e20; past that needs the
   combinatorial (non-enumerating) methods. u128 buys the strip just past 2^64.
+
+## Combinatorial π(x): Meissel–Lehmer (meissel.zig)
+Counts primes *without enumerating them*: π(x) = φ(x,a) + a − 1 − P₂(x,a),
+a = π(x^(1/3)). φ(x,a) is the recursive partial sieve φ(x,a)=φ(x,a−1)−φ(x/p_a,a−1)
+with a mod-30 wheel base and the **leaf cutoff** φ(x,a)=1+max(0,π(x)−a) when
+p_a²≥x (no coprime composites) — which drops it from exponential to O(x^(2/3)).
+P₂ and the cutoff share a prefix-π table up to x^(2/3).
+
+| x | π(x) | time | exponent |
+|---|------|-----:|:--------:|
+| 10⁹ | 50,847,534 | 4 ms | 0.71 |
+| 10¹⁰ | 455,052,511 | 22 ms | 0.72 |
+| 10¹¹ | 4,118,054,813 | 162 ms | 0.87 |
+| 10¹² | 37,607,912,018 | 1.18 s | 0.86 |
+| 10¹³ | 346,065,536,839 | 7.25 s | 0.79 |
+
+- All exact (matches OEIS A006880). **exponent** = log₁₀ of the time ratio per
+  ×10 in x → **~0.8, sub-linear** (sieving is 1.0). Theoretical Meissel–Lehmer is
+  2/3; the extra is the O(x^(2/3)) prefix-π table, memory-bound at scale.
+  Removing that table is exactly what LMO does (task #6).
+- vs sieving (~3.6 G ints/s): 10¹² is ~236× faster, 10¹³ ~383× — and the gap
+  *widens* with x (O(x) vs O(x^0.8)). Sieving 10¹³ would take ~46 min; Meissel,
+  7.25 s. This is why records go to 10³⁰ combinatorially, never by sieving.
 
 ## Architecture notes
 - Three orthogonal comptime axes (wheel × store × traversal-via-seg-size) +

@@ -37,6 +37,7 @@ const smallphi: [30]u64 = blk: {
     }
     break :blk t;
 };
+
 fn gcd(a: u64, b: u64) u64 {
     var x = a;
     var y = b;
