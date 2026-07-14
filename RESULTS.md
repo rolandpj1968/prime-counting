@@ -105,6 +105,39 @@ Sweep p_n = largest wheel prime = 1(all),2,3,5,7,11,13 → M = 1,2,6,30,210,2310
   delta array (`const d = pr.d`, up to 46 KB) every prime every segment → now a
   pointer. mod-30030: 212 → 1670 M/s (8×).
 
+## Bucket sieve: a large-N / small-segment instrument
+Two-tier PrimeSource (bucket_sieve.zig): SMALL primes (min delta ≤ seg_slots,
+strike a segment ≥ once) stay in the cursor loop; LARGE primes (min delta >
+seg_slots, strike ≤ once) are bucketed by next-strike segment (intrusive linked
+list, one node/prime; drain-strike-refile). Avoids iterating + cache-streaming
+every large prime on every segment.
+
+**Only helps when √N > seg_slots** — else every prime is SMALL and there's
+nothing to bucket. Inert (or negative) at our headline N=1e9/L1 config, because
+√N=31623 ≪ 262144 slots.
+
+Bucket vs naive, mod-30 []u64, **N=1e10** (√N=1e5), sweeping the segment down:
+
+| seg | seg_slots | naive M/s | bucket M/s | speedup |
+|-----|-----------|----------:|-----------:|:-------:|
+| 1 KiB | 8192 | 1161 | 1414 | **1.22×** |
+| 2 KiB | 16384 | 1527 | 1747 | 1.14× |
+| 4 KiB | 32768 | 2086 | 2126 | 1.02× |
+| 8 KiB | 65536 | 2588 | 2455 | **0.95×** |
+| 16 KiB | 131072 | 2887 | 2825 | 0.98× |
+
+- Win **grows as the segment shrinks** (√N/seg_slots ↑ → more large primes → more
+  skip-work + cursor-streaming the bucket cuts). 1.22× at 1 KiB, still climbing.
+- 8 KiB is **slower** (0.95×): threshold p>~124k > √N → *zero* large primes, so
+  the bucket machinery (alloc + memset heads[] per run) is pure overhead. Honest
+  cost of bucketing with nothing to bucket; a `n_large==0` fast path would fix it.
+- Extrapolates to the record regime (N=1e18 → √N/seg_slots ~ 1e4, nearly all
+  primes large, naive streams MB of cursors/segment from DRAM) where it's
+  decisive — but that's a days-long run, not benchmarkable here. The monotonic
+  climb is the proof of shape.
+- Verified π(1e10)=455,052,511 for both. Current bucket uses a full per-segment
+  heads[] array (fine to ~1e12 / ~1e6 segments); record N needs a circular window.
+
 ## Architecture notes
 - Three orthogonal comptime axes (wheel × store × traversal-via-seg-size) +
   a runtime interval. Segmentation = repeated **range sieve** over [lo,hi);

@@ -11,6 +11,43 @@ const std = @import("std");
 const common = @import("common.zig");
 const sieve = @import("sieve.zig");
 const wheel = @import("wheel.zig");
+const bucket_sieve = @import("bucket_sieve.zig");
+
+fn timeSieve(comptime S: type, gpa: std.mem.Allocator, n: u64, repeats: usize) !f64 {
+    var st = try S.init(gpa, n);
+    defer S.deinit(&st, gpa);
+    var best: u64 = std.math.maxInt(u64);
+    var r: usize = 0;
+    while (r < repeats) : (r += 1) {
+        const t0 = common.nowNs();
+        S.sieve(&st, n);
+        best = @min(best, common.nowNs() - t0);
+    }
+    const pi = S.count(&st, n);
+    if (common.expectedPi(n)) |e| {
+        if (pi != e) std.debug.print("  !! PI FAIL: {d} != {d}\n", .{ pi, e });
+    }
+    return @as(f64, @floatFromInt(n)) / (@as(f64, @floatFromInt(best)) / 1e9) / 1e6;
+}
+
+/// Naive (all-cursor) vs bucketed, across segment sizes. Bucket win grows as the
+/// segment shrinks (more primes become "large" → more skip-work the bucket cuts).
+pub fn bucketCompare(
+    comptime W: type,
+    comptime Store: type,
+    comptime segs: []const u64,
+    gpa: std.mem.Allocator,
+    n: u64,
+    repeats: usize,
+) !void {
+    std.debug.print("\n# bucket vs naive — wheel M={d}, store {s}, N={d}\n", .{ W.M, Store.name, n });
+    std.debug.print("{s:>8}  {s:>9}  {s:>10}  {s:>9}  {s:>8}\n", .{ "seg", "seg_slots", "naive M/s", "bkt M/s", "speedup" });
+    inline for (segs) |seg| {
+        const naive = try timeSieve(sieve.Sieve(W, Store, seg), gpa, n, repeats);
+        const bkt = try timeSieve(bucket_sieve.BucketSieve(W, Store, seg), gpa, n, repeats);
+        std.debug.print("{d:>6} B  {d:>9}  {d:>10.0}  {d:>9.0}  {d:>7.2}x\n", .{ seg, seg * Store.flags_per_byte, naive, bkt, bkt / naive });
+    }
+}
 
 /// Sweep the wheel (p_n = largest wheel prime), fixed store/segment/N. Shows the
 /// diminishing Mertens returns and where the wheel's own bookkeeping (φ spokes,
