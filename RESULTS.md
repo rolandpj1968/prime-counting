@@ -159,6 +159,31 @@ convergent series. All π exact through 1e11 (=4,118,054,813).
 The engineering built the engine; the engine demonstrates the theory we opened
 with (PNT, Li, RH). Bucket engine so the harness scales into the large-N regime.
 
+## Beyond u64: Int-parameterized range sieve + density validation
+The coordinate/value type is orthogonal to the store word: `rangesieve.countInRange
+(comptime Int, lo, hi, base_primes)` sieves [lo,hi) with positions/multiples in
+`Int` (u64 or u128), base primes stay u64 (√(1e38) ≪ 2^64). `BitPacked(Word)`
+separately parameterizes the store word (u8..u64), verified by unit test.
+
+Validating high ranges where no exact oracle exists: use **theory**. A window
+[N, N+Δ) holds ≈ Δ/ln N primes (local density li′=1/ln N), matched to Poisson
+noise ~1/√count. Δ=1e8, base primes to 5e9:
+
+| N | type | observed | Δ/ln N | ratio |
+|---|------|---------:|-------:|:-----:|
+| 1e12 | u64 | 3,618,282 | 3,619,114 | 0.9998 |
+| 1e15 | u64 | 2,893,937 | 2,895,297 | 0.9995 |
+| 1e18 | u64 | 2,414,886 | 2,412,747 | 1.0009 |
+| **2e19** | **u128** | **2,249,954** | 2,250,110 | 0.9999 |
+
+- Every ratio ≈ 1.000 within √count Poisson noise — sieve validated by PNT across
+  7 orders of magnitude, no table needed.
+- The 2e19 row is **past 2^64** — a tally primesieve can't produce, verified
+  against theory alone. u128 works; arithmetic is trusted (provable algorithm +
+  no overflow + this code validated at low N).
+- Practical wall is base primes to √N (memory), ~1e20; past that needs the
+  combinatorial (non-enumerating) methods. u128 buys the strip just past 2^64.
+
 ## Architecture notes
 - Three orthogonal comptime axes (wheel × store × traversal-via-seg-size) +
   a runtime interval. Segmentation = repeated **range sieve** over [lo,hi);
