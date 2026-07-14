@@ -1,6 +1,9 @@
-# Sieve benchmark ladder
+# Empirical results
 
-Fixed benchmark: **N = 10⁹**, π(N) = 50,847,534. Best-of-3, sieve timed
+Detailed benchmark findings for the sieve. See [README.md](README.md) for framing;
+open/future work is tracked as tasks, not here.
+
+Default benchmark: **N = 10⁹**, π(N) = 50,847,534. Best-of-3, sieve timed
 separately from count. Machine: AVX2 (no AVX-512), L1d 32 KiB / L2 512 KiB /
 L3 16 MiB per core, 28 GiB RAM. Build: `zig build-exe -O ReleaseFast -mcpu=native`.
 
@@ -192,10 +195,5 @@ noise ~1/√count. Δ=1e8, base primes to 5e9:
   segments; completeness limit L carried and asserted **L² ≥ top** (active in
   ReleaseSafe/Debug). A partial/P_n source would skip the check.
 - Counting folds into the segmented sieve (segments discarded); count() ~0.
-
-## TODO / open threads
-- Runtime N (scaling study: π(N)/N, rate vs N).
-- Segment-byte sweep on an idle box (find L1/L2/L3 crossover per store).
-- Bucket `PrimeSource` for large primes (hybrid with cursor for small) — the
-  co-habitation payoff; slots into the range-sieve seam without touching the core.
-- Numbers still contention-affected; re-verify absolutes on a quiet machine.
+- Coordinate/value type parameterized (`Int` = u64/u128) for ranges past 2⁶⁴;
+  store word parameterized (`BitPacked(Word)`); both orthogonal.
