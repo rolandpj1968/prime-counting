@@ -90,6 +90,29 @@ fn level(seg: u64) []const u8 {
     return "DRAM";
 }
 
+/// Pure-π(N) scaling study: compute π(N) across N and tabulate the asymptotics.
+/// Duck-typed over any Impl with init/sieve/count/deinit.
+pub fn piScaling(comptime Impl: type, ns: []const u64, gpa: std.mem.Allocator) !void {
+    std.debug.print("\n# π(N) scaling — {s}\n", .{Impl.name});
+    std.debug.print("{s:>14}  {s:>15}  {s:>9}  {s:>7}  {s:>7}  {s:>9}  {s:>12}\n", .{ "N", "pi(N)", "pi/N", "gap", "lnN", "pi*lnN/N", "li(N)-pi(N)" });
+    for (ns) |n| {
+        var st = try Impl.init(gpa, n);
+        Impl.sieve(&st, n);
+        const pi = Impl.count(&st, n);
+        Impl.deinit(&st, gpa);
+
+        if (common.expectedPi(n)) |e| {
+            if (pi != e) std.debug.print("  !! PI FAIL {d} != {d}\n", .{ pi, e });
+        }
+        const nf: f64 = @floatFromInt(n);
+        const pf: f64 = @floatFromInt(pi);
+        const lnN = @log(nf);
+        std.debug.print("{d:>14}  {d:>15}  {d:>9.6}  {d:>7.3}  {d:>7.3}  {d:>9.5}  {d:>12.1}\n", .{
+            n, pi, pf / nf, nf / pf, lnN, pf * lnN / nf, common.li(nf) - pf,
+        });
+    }
+}
+
 /// Sweep N (powers of 2). `whole=true`: one segment = the whole array, so the
 /// working set grows with N and crosses cache levels (memory mountain in N).
 /// `whole=false`: fixed 32 KiB segment → working set pinned in L1, so no cache

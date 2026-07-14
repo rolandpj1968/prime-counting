@@ -138,6 +138,27 @@ Bucket vs naive, mod-30 []u64, **N=1e10** (√N=1e5), sweeping the segment down:
 - Verified π(1e10)=455,052,511 for both. Current bucket uses a full per-segment
   heads[] array (fine to ~1e12 / ~1e6 segments); record N needs a circular window.
 
+## π(N) scaling — the sieve as a lens on the number theory
+Pure-π(N) driver (sweep.piScaling) over the engine; li(x)=Ei(ln x) via Ei's
+convergent series. All π exact through 1e11 (=4,118,054,813).
+
+| N | pi(N) | gap=N/pi | lnN | pi·lnN/N | li−pi |
+|---|-------|---------:|----:|---------:|------:|
+| 1e6 | 78,498 | 12.74 | 13.82 | 1.084 | 130 |
+| 1e9 | 50,847,534 | 19.67 | 20.72 | 1.054 | 1,701 |
+| 1e11 | 4,118,054,813 | 24.28 | 25.33 | 1.043 | 11,588 |
+
+- **gap ≈ lnN − 1.08** — the second-order PNT (π ~ N/(lnN−1) beats N/lnN); the
+  ~1.07 offset is the "−1", drifting toward 1.
+- **pi·lnN/N = 1 + ~1/lnN** — crude PNT crawls to 1, always high by ~1/lnN (4.3%
+  at 1e11). x/lnx is the bad approximation.
+- **li−pi ~ √N/lnN** (RH error scale; 12.5k predicted vs 11.6k at 1e11), always
+  positive (Li overshoots; Littlewood sign-flip only past Skewes ~1e316).
+  Relative error 2.8 ppm — Li is ~15000× better than x/lnx.
+
+The engineering built the engine; the engine demonstrates the theory we opened
+with (PNT, Li, RH). Bucket engine so the harness scales into the large-N regime.
+
 ## Architecture notes
 - Three orthogonal comptime axes (wheel × store × traversal-via-seg-size) +
   a runtime interval. Segmentation = repeated **range sieve** over [lo,hi);

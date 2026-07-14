@@ -24,13 +24,34 @@ pub fn ms(ns: u64) f64 {
     return @as(f64, @floatFromInt(ns)) / 1e6;
 }
 
+/// Logarithmic integral li(x) = ∫₀ˣ dt/ln t = Ei(ln x), via Ei's convergent
+/// series Ei(z) = γ + ln z + Σ_{k≥1} z^k/(k·k!). Accurate to f64 for our range.
+pub fn li(x: f64) f64 {
+    const gamma = 0.5772156649015329;
+    const z = @log(x);
+    var sum = gamma + @log(z);
+    var t: f64 = 1.0; // running z^k / k!
+    var k: f64 = 1.0;
+    while (k < 400) : (k += 1) {
+        t *= z / k;
+        const add = t / k;
+        sum += add;
+        if (k > z and add < 1e-15 * sum) break;
+    }
+    return sum;
+}
+
 pub const KnownPi = struct { n: u64, pi: u64 };
 
 pub const known = [_]KnownPi{
     .{ .n = 10, .pi = 4 },
     .{ .n = 100, .pi = 25 },
     .{ .n = 1000, .pi = 168 },
+    .{ .n = 10_000, .pi = 1229 },
+    .{ .n = 100_000, .pi = 9592 },
     .{ .n = 1_000_000, .pi = 78498 },
+    .{ .n = 10_000_000, .pi = 664579 },
+    .{ .n = 100_000_000, .pi = 5761455 },
     .{ .n = 1_000_000_000, .pi = 50_847_534 },
     .{ .n = 10_000_000_000, .pi = 455_052_511 },
     .{ .n = 100_000_000_000, .pi = 4_118_054_813 },
