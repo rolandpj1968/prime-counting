@@ -129,6 +129,7 @@ Foundations:
 - Prime Number Theorem — Hadamard and de la Vallée Poussin (1896).
 
 Tools & systems:
+- T. Oliveira e Silva, [Fast implementation of the segmented sieve of Eratosthenes](http://sweet.ua.pt/tos/) — the **bucket sieve** for large primes; also prime-gap tables and Goldbach verified to 4×10¹⁸.
 - K. Walisch, [primesieve](https://github.com/kimwalisch/primesieve) & [primecount](https://github.com/kimwalisch/primecount) — the modern reference sieve / combinatorial π(x).
 - R. Bryant, D. O'Hallaron, *Computer Systems: A Programmer's Perspective* — the "memory mountain."
 - [OEIS A006880](https://oeis.org/A006880) — π(10ⁿ). [Zig](https://ziglang.org) 0.16.

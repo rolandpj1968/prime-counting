@@ -109,7 +109,9 @@ Sweep p_n = largest wheel prime = 1(all),2,3,5,7,11,13 → M = 1,2,6,30,210,2310
   pointer. mod-30030: 212 → 1670 M/s (8×).
 
 ## Bucket sieve: a large-N / small-segment instrument
-Two-tier PrimeSource (bucket_sieve.zig): SMALL primes (min delta ≤ seg_slots,
+The bucket sieve is due to [Tomás Oliveira e Silva](http://sweet.ua.pt/tos/)
+(and is what `primesieve` uses for large primes). Two-tier PrimeSource
+(bucket_sieve.zig): SMALL primes (min delta ≤ seg_slots,
 strike a segment ≥ once) stay in the cursor loop; LARGE primes (min delta >
 seg_slots, strike ≤ once) are bucketed by next-strike segment (intrusive linked
 list, one node/prime; drain-strike-refile). Avoids iterating + cache-streaming
