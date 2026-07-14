@@ -11,6 +11,7 @@ const bench = @import("bench.zig");
 
 const naive = @import("naive_sieve.zig");
 const segmented = @import("segmented_sieve.zig");
+const segmented_odds = @import("segmented_odds.zig");
 
 const store_flat_bool = @import("stores/flat_bool.zig");
 const store_bit_packed = @import("stores/bit_packed.zig");
@@ -18,7 +19,7 @@ const store_bit_set_std = @import("stores/bit_set_std.zig");
 
 const N: u64 = 1_000_000_000;
 const REPEATS: usize = 3;
-const SPAN: u64 = 262144; // integers per segment (2^18); []u64 => 32 KiB (L1d)
+const SEG_BYTES: u64 = 32 * 1024; // store byte size per segment — the cache-critical knob (L1d)
 
 pub fn main() !void {
     const gpa = std.heap.page_allocator;
@@ -28,9 +29,13 @@ pub fn main() !void {
     try bench.run(naive.NaiveSieve(store_bit_set_std), gpa, N, REPEATS);
     try bench.run(naive.NaiveSieve(store_bit_packed), gpa, N, REPEATS);
 
-    // Segmented traversal, SAME span, three stores — the L1-residency experiment.
-    // []u64 / bitset segments are 32 KiB (L1d); []bool segment is 256 KiB (L2).
-    try bench.run(segmented.SegmentedSieve(store_bit_packed, SPAN), gpa, N, REPEATS);
-    try bench.run(segmented.SegmentedSieve(store_bit_set_std, SPAN), gpa, N, REPEATS);
-    try bench.run(segmented.SegmentedSieve(store_flat_bool, SPAN), gpa, N, REPEATS);
+    // Segmented, all numbers — knob is store BYTES, so every store has the SAME
+    // 32 KiB cache footprint (bit stores cover 8× more integers/segment).
+    try bench.run(segmented.SegmentedSieve(store_bit_packed, SEG_BYTES), gpa, N, REPEATS);
+    try bench.run(segmented.SegmentedSieve(store_bit_set_std, SEG_BYTES), gpa, N, REPEATS);
+    try bench.run(segmented.SegmentedSieve(store_flat_bool, SEG_BYTES), gpa, N, REPEATS);
+
+    // Segmented, odds only (wheel-2) — same 32 KiB store footprint.
+    try bench.run(segmented_odds.SegmentedOdds(store_bit_packed, SEG_BYTES), gpa, N, REPEATS);
+    try bench.run(segmented_odds.SegmentedOdds(store_flat_bool, SEG_BYTES), gpa, N, REPEATS);
 }

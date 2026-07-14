@@ -1,15 +1,15 @@
-//! SegmentedSieve — the segmented traversal, generic over a backing Store AND a
-//! segment span. A segment is just a small bit-array (a Store sized to `span`
-//! integers, reused per block), so segmentation composes with the same stores
-//! the naive sieve uses. Three orthogonal axes: coordinate map × traversal ×
-//! store.
+//! SegmentedSieve — the segmented traversal, generic over a backing Store and a
+//! segment size. A segment is just a small bit-array (a Store sized to `slots`
+//! flags, reused per block), so segmentation composes with the same stores the
+//! naive sieve uses. Three orthogonal axes: coordinate map × traversal × store.
 //!
-//! The knob is `span` = integers per segment (NOT bytes) — so the store decides
-//! its own footprint. That makes the []u64-vs-[]bool comparison fair and turns
-//! it into a direct measurement of cache residency:
-//!   span 262144 integers  =>  []u64 segment 32 KiB (fits L1d)
-//!                             []bool segment 256 KiB (spills to L2)
-//! Same algorithm, same span; the gap is purely "does the segment fit in L1".
+//! The knob is `slots` = the store's flag count (NOT integers, NOT bytes). This
+//! is the coordinate-independent, cache-critical quantity: equal `slots` means
+//! equal store bytes for a given store type, so comparisons hold cache footprint
+//! constant. For all-numbers, 1 flag/integer, so slots == integers per segment.
+//!   slots 262144  =>  []u64 store 32 KiB (fits L1d), covers 262144 integers
+//!                     []bool store 256 KiB (spills L2), covers 262144 integers
+//! (odds-only, at the same `slots`, has the same store bytes but covers 2×.)
 //!
 //! Counting is folded in (segments are discarded as we go). The segment Store
 //! only needs clearAll/set/countComposites — `get` is unused here (base primes
@@ -20,12 +20,13 @@ const common = @import("common.zig");
 
 const Prime = struct { p: u64, next: u64 };
 
-pub fn SegmentedSieve(comptime Store: type, comptime span: u64) type {
+pub fn SegmentedSieve(comptime Store: type, comptime seg_bytes: u64) type {
     return struct {
-        const cap: u64 = span - 1; // store "max index" for a span-slot store
-        const seg_bytes = Store.footprintBytes(cap); // comptime-known segment size
+        const slots: u64 = seg_bytes * Store.flags_per_byte; // flags that fit in the target bytes
+        const cap: u64 = slots - 1;
+        const store_bytes = Store.footprintBytes(cap); // actual footprint (~ seg_bytes)
 
-        pub const name = std.fmt.comptimePrint("segmented[{s}], span {d}, seg {d} KiB", .{ Store.name, span, seg_bytes / 1024 });
+        pub const name = std.fmt.comptimePrint("segmented[{s}], {d} KiB store, {d} slots", .{ Store.name, store_bytes / 1024, slots });
 
         pub const State = struct {
             seg: Store.State,
@@ -36,7 +37,7 @@ pub fn SegmentedSieve(comptime Store: type, comptime span: u64) type {
         pub fn footprintBytes(n: u64) usize {
             const lim = common.isqrt(n);
             const est_primes: usize = if (lim < 3) 2 else @intFromFloat(1.2 * @as(f64, @floatFromInt(lim)) / @log(@as(f64, @floatFromInt(lim))));
-            return seg_bytes + est_primes * @sizeOf(Prime);
+            return store_bytes + est_primes * @sizeOf(Prime);
         }
 
         pub fn init(gpa: std.mem.Allocator, n: u64) !State {
@@ -54,8 +55,8 @@ pub fn SegmentedSieve(comptime Store: type, comptime span: u64) type {
             for (st.primes) |*pr| pr.next = pr.p * pr.p; // reset cursors for this run
             var comp: u64 = 0;
             var lo: u64 = 0;
-            while (lo <= n) : (lo += span) {
-                const hi = @min(lo + span, n + 1); // exclusive integer bound
+            while (lo <= n) : (lo += slots) {
+                const hi = @min(lo + slots, n + 1); // exclusive integer bound
                 Store.clearAll(&st.seg, cap);
                 for (st.primes) |*pr| {
                     const p = pr.p;

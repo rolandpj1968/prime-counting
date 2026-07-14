@@ -5,6 +5,8 @@ const std = @import("std");
 
 pub const name = "hand-rolled []u64";
 
+pub const flags_per_byte: u64 = 8; // store-size knob converts bytes -> flags
+
 pub const State = struct { w: []u64 };
 
 fn numWords(n: u64) usize {

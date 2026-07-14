@@ -5,6 +5,8 @@ const std = @import("std");
 
 pub const name = "std.DynamicBitSet";
 
+pub const flags_per_byte: u64 = 8; // store-size knob converts bytes -> flags
+
 pub const State = struct { bits: std.DynamicBitSet };
 
 pub fn footprintBytes(n: u64) usize {

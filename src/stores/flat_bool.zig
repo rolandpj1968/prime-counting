@@ -5,6 +5,8 @@ const std = @import("std");
 
 pub const name = "flat []bool";
 
+pub const flags_per_byte: u64 = 1; // store-size knob converts bytes -> flags
+
 pub const State = struct { b: []bool };
 
 pub fn footprintBytes(n: u64) usize {
