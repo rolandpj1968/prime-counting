@@ -85,12 +85,15 @@ sieving *widens* with x:
 
 | x | π(x) | Meissel | vs sieving |
 |---|------|--------:|:----------:|
-| 10¹² | 37,607,912,018 | 1.18 s | ~236× |
-| 10¹³ | 346,065,536,839 | 7.25 s | ~383× |
+| 10¹² | 37,607,912,018 | 0.89 s | ~310× |
+| 10¹³ | 346,065,536,839 | 5.68 s | ~490× |
+| 10¹⁴ | 3,204,941,750,802 | 41 s | ~660× |
 
-Sieving 10¹³ would take ~46 minutes; Meissel does it in 7 seconds. This is why
-records reach 10³⁰ combinatorially and never by sieving. Meissel computed π(10⁹)
-*by hand* in 1885 (off by 56); the same identity is exact here in 4 ms.
+Sieving 10¹⁴ would take ~8 hours; Meissel does it in 41 seconds, and the lead
+widens with x. This is why records reach 10³⁰ combinatorially and never by
+sieving. Meissel computed π(10⁹) *by hand* in 1885 (off by 56); the same identity
+is exact here in milliseconds. (A compact bit-sieve+checkpoints π-table keeps the
+whole thing cache-resident — memory *and* speed; the special-leaf sieve is next.)
 
 ## Build & run
 

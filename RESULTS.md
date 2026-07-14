@@ -198,19 +198,25 @@ P₂ and the cutoff share a prefix-π table up to x^(2/3).
 
 | x | π(x) | time | exponent |
 |---|------|-----:|:--------:|
-| 10⁹ | 50,847,534 | 4 ms | 0.71 |
-| 10¹⁰ | 455,052,511 | 22 ms | 0.72 |
-| 10¹¹ | 4,118,054,813 | 162 ms | 0.87 |
-| 10¹² | 37,607,912,018 | 1.18 s | 0.86 |
-| 10¹³ | 346,065,536,839 | 7.25 s | 0.79 |
+| 10¹⁰ | 455,052,511 | 0.03 s | — |
+| 10¹¹ | 4,118,054,813 | 0.15 s | 0.71 |
+| 10¹² | 37,607,912,018 | 0.89 s | 0.77 |
+| 10¹³ | 346,065,536,839 | 5.68 s | 0.81 |
+| 10¹⁴ | 3,204,941,750,802 | 41.3 s | 0.86 |
 
 - All exact (matches OEIS A006880). **exponent** = log₁₀ of the time ratio per
   ×10 in x → **~0.8, sub-linear** (sieving is 1.0). Theoretical Meissel–Lehmer is
-  2/3; the extra is the O(x^(2/3)) prefix-π table, memory-bound at scale.
-  Removing that table is exactly what LMO does (task #6).
-- vs sieving (~3.6 G ints/s): 10¹² is ~236× faster, 10¹³ ~383× — and the gap
-  *widens* with x (O(x) vs O(x^0.8)). Sieving 10¹³ would take ~46 min; Meissel,
-  7.25 s. This is why records go to 10³⁰ combinatorially, never by sieving.
+  2/3; the extra is the O(x^(2/3)) special-leaves / π structure.
+- **LMO Stage A (memory):** the π-per-integer table is replaced by a compact
+  bit-sieve + per-word count checkpoints (π(y) = `ckpt[y/64] + popcount`, O(1)).
+  ~16× less memory (0.5 GB vs 8.6 GB at 10¹⁴) — moving the wall from ~10¹⁴ to
+  ~10¹⁶ — *and faster*, because the small table is cache-resident where the fat
+  one was DRAM-bound (10¹² 1.18→0.89 s, 10¹³ 7.25→5.68 s). Same algorithm, so the
+  ~0.8 exponent is unchanged; **Stage B** (special-leaf sieve) targets O(x^(1/3))
+  memory and the 2/3 exponent.
+- vs sieving (~3.6 G ints/s): 10¹³ in 5.7 s where sieving needs ~46 min; the gap
+  *widens* with x (O(x) vs O(x^0.8)). This is why records go to 10³⁰
+  combinatorially, never by sieving.
 
 ## Architecture notes
 - Three orthogonal comptime axes (wheel × store × traversal-via-seg-size) +
