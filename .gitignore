@@ -1,0 +1,7 @@
+# Zig build system artifacts
+.zig-cache/
+zig-out/
+
+# Ad-hoc benchmark binaries (built with `zig build-exe -femit-bin=...`)
+/sieve
+/sieve-*
