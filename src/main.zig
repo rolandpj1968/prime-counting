@@ -1,39 +1,43 @@
 //! Prime sieve benchmark ladder — entry point.
 //!
-//! Everything is now ONE generic sieve, `Sieve(Wheel, Store, seg_bytes)`:
-//!   - Wheel(wheel_primes): coordinate map (all / odds / mod-6 / mod-30 / …)
-//!   - Store: backing bits (flat []bool / hand-rolled []u64 / std.DynamicBitSet)
-//!   - seg_bytes: segment size; ≥ N ⇒ whole-array
-//! Every earlier rung is a point in this space.
+//! Everything is one generic sieve, `Sieve(Wheel, Store, seg_bytes)`. This entry
+//! runs the cache-hierarchy sweep: fixed N, segment size swept across the cache
+//! levels, throughput cliffs = cache sizes.
 
 const std = @import("std");
-const bench = @import("bench.zig");
-
 const wheel = @import("wheel.zig");
-const sieve = @import("sieve.zig");
+const sweep = @import("sweep.zig");
 
-const store_flat_bool = @import("stores/flat_bool.zig");
 const store_bit_packed = @import("stores/bit_packed.zig");
-const store_bit_set_std = @import("stores/bit_set_std.zig");
 
 const N: u64 = 1_000_000_000;
 const REPEATS: usize = 3;
-const SEG: u64 = 32 * 1024; // store bytes per segment (L1d)
 
 const W_all = wheel.Wheel(&[_]u64{});
 const W_odds = wheel.Wheel(&[_]u64{2});
-const W_mod6 = wheel.Wheel(&[_]u64{ 2, 3 });
-const W_mod30 = wheel.Wheel(&[_]u64{ 2, 3, 5 });
+
+// Dense sampling around L1 (32 KiB) and L2 (512 KiB); out to whole-array (DRAM).
+const SEGS = [_]u64{
+    4 * 1024,         8 * 1024,          16 * 1024,         24 * 1024,
+    32 * 1024,        48 * 1024,         64 * 1024,         96 * 1024,
+    128 * 1024,       192 * 1024,        256 * 1024,        384 * 1024,
+    512 * 1024,       768 * 1024,        1024 * 1024,       2 * 1024 * 1024,
+    4 * 1024 * 1024,  8 * 1024 * 1024,   16 * 1024 * 1024,  32 * 1024 * 1024,
+    64 * 1024 * 1024, 128 * 1024 * 1024, 256 * 1024 * 1024,
+};
+
+// Powers of 2 spanning L1 (arr=32K @ 2^18) → L2 (2^22) → L3 (2^27) → DRAM.
+const NS = [_]u64{
+    1 << 16, 1 << 17, 1 << 18, 1 << 19, 1 << 20, 1 << 21, 1 << 22, 1 << 23,
+    1 << 24, 1 << 25, 1 << 26, 1 << 27, 1 << 28, 1 << 29, 1 << 30,
+};
 
 pub fn main() !void {
     const gpa = std.heap.page_allocator;
-
-    // All four wheels from one sieve — first, verify π is correct for each.
-    try bench.run(sieve.Sieve(W_all, store_bit_packed, SEG), gpa, N, REPEATS);
-    try bench.run(sieve.Sieve(W_odds, store_bit_packed, SEG), gpa, N, REPEATS);
-    try bench.run(sieve.Sieve(W_mod6, store_bit_packed, SEG), gpa, N, REPEATS);
-    try bench.run(sieve.Sieve(W_mod30, store_bit_packed, SEG), gpa, N, REPEATS);
-
-    // mod-30 across two stores (the byte-vs-bit strike comparison, wheeled).
-    try bench.run(sieve.Sieve(W_mod30, store_flat_bool, SEG), gpa, N, REPEATS);
+    // Two curves: whole-array (algorithm × cache) vs segmented (algorithm only).
+    try sweep.nSweep(W_all, store_bit_packed, &NS, true, gpa, REPEATS);
+    try sweep.nSweep(W_all, store_bit_packed, &NS, false, gpa, REPEATS);
+    _ = SEGS;
+    _ = W_odds;
+    _ = N;
 }

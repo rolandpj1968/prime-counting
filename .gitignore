@@ -5,3 +5,8 @@ zig-out/
 # Ad-hoc benchmark binaries (built with `zig build-exe -femit-bin=...`)
 /sieve
 /sieve-*
+
+# Editor cruft (Emacs autosave/lock/backup)
+\#*\#
+.\#*
+*~

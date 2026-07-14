@@ -34,6 +34,49 @@ p/(p−1), maximal at 2, dying toward 1 (Mertens' 3rd theorem: full-wheel densit
 `[]bool` barely improves mod-6→mod-30 (2381→2449) — it was never strike-bound,
 so cutting strikes doesn't help it; `[]u64` takes the full 1.41×.
 
+## Cache-hierarchy sweep (quiet box, core pinned @ 4.54 GHz, 58 °C, no throttle)
+Fixed N=1e9, `[]u64`, segment size swept 4 KiB → 256 MiB. Throughput reads the
+cache sizes straight off the curve.
+
+| seg | all-wheel M/s | odds M/s | note |
+|-----|--------------:|---------:|------|
+| 16–32 KiB | 571–573 | 1707–1714 | **peak ≈ L1d (32 KiB)** — optimal segment |
+| 64 KiB–8 MiB | ~460–520 | ~1040–1670 | gentle L2→L3 slope (small latency gaps, hidden) |
+| 16 MiB | 303 | 764 | **L3 edge (16 MiB): cliff begins** |
+| 32 MiB | 228 | 519 | falling into DRAM |
+| ≥64 MiB | ~200 | ~490 | **DRAM floor** (= non-segmented []u64 baseline) |
+
+- Optimal segment = **L1d-sized (32 KiB)** — validates the default. Below it,
+  per-segment overhead dominates; above it, cache residency erodes.
+- L1→L2→L3 steps are gentle (latency gaps small, pipeline hides them); the one
+  sharp cliff is **L3→DRAM, knee exactly at 16 MiB = L3 size**, ~2× drop.
+- Wheel sets the mountain's *height*, not its *shape* (boundaries are hardware).
+- Single-thread runs at max single-core turbo; parallel will share all-core
+  turbo, so per-core throughput won't scale ×cores (per-core-scaling caveat).
+
+## Segmentation vs N: the cache tax, decomposed (all-wheel, []u64)
+Sweep N = 2^k two ways — whole-array (working set = array, grows with N) vs
+segmented 32 KiB (working set pinned in L1). The segmented curve isolates the
+*algorithm*; the whole-array curve is *algorithm × cache*; their ratio is the
+pure cache penalty segmentation buys back.
+
+| N | array | whole M/s | segmented M/s | seg ÷ whole |
+|---|-------|----------:|--------------:|:-----------:|
+| 2²³ | 1 MiB (L3) | 365 | 619 | 1.70× |
+| 2²⁷ | 16 MiB (L3 edge) | 388 | 594 | 1.53× |
+| 2²⁸ | 32 MiB (DRAM) | 259 | 589 | **2.27×** |
+| 2³⁰ | 128 MiB (DRAM) | 201 | 576 | **2.87×** |
+
+- **Segmented is cache-immune to N**: flat 619→576 over 2²³→2³⁰ (~7% sag = the
+  Mertens strike-density creep, ~algorithm-only, no cliff). That's the whole
+  point of segmentation — a 10¹⁸ run behaves like a 10⁹ one.
+- **Whole-array crashes at DRAM**; the ratio grows with N (≈1.5× in-L3 → ~2.9× in
+  DRAM → keeps rising) — the economic case for segmentation as a function of scale.
+- Caveat: as a *cache probe* this is noisier than the fixed-N segment sweep —
+  small/mid-N runs are sub-100 ms (overhead- + Mertens-confounded); the 2²⁶ point
+  was a huge-page/L3-occupancy artifact. Clean signals here = segmented flatness
+  + the DRAM cliff. For intra-cache structure, the segment sweep is the instrument.
+
 ## Architecture notes
 - Three orthogonal comptime axes (wheel × store × traversal-via-seg-size) +
   a runtime interval. Segmentation = repeated **range sieve** over [lo,hi);
