@@ -113,6 +113,22 @@ fn phi(x: u64, a: usize, primes: []const u64, tbl: *const PiTable) u64 {
     return phi(x, a - 1, primes, tbl) - phi(x / pa, a - 1, primes, tbl);
 }
 
+/// φ(x, π(x^(1/3))) — the oracle LMO's S1+S2 must reproduce.
+pub fn phiOfX(gpa: std.mem.Allocator, x: u64) !u64 {
+    if (x < 2) return 0;
+    const cbrt_x = icbrt(x);
+    const sqrt_x = common.isqrt(x);
+    const primes = try rs.basePrimes(gpa, sqrt_x);
+    defer gpa.free(primes);
+    var a: usize = 0;
+    for (primes) |p| {
+        if (p <= cbrt_x) a += 1 else break;
+    }
+    var tbl = try PiTable.init(gpa, x / cbrt_x);
+    defer tbl.deinit(gpa);
+    return phi(x, a, primes, &tbl);
+}
+
 pub fn pi(gpa: std.mem.Allocator, x: u64) !u64 {
     if (x < 2) return 0;
     const cbrt_x = icbrt(x); // ⌊x^(1/3)⌋
