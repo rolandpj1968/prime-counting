@@ -218,6 +218,29 @@ P₂ and the cutoff share a prefix-π table up to x^(2/3).
   *widens* with x (O(x) vs O(x^0.8)). This is why records go to 10³⁰
   combinatorially, never by sieving.
 
+## Sieve of Atkin vs Eratosthenes: op-count is the wrong metric (atkin.zig)
+Atkin toggles a bit per quadratic-form solution (4x²+y², 3x²+y², 3x²−y², mod-12
+residues) → O(N/log log N) ops, *fewer* than Eratosthenes' O(N log log N).
+Full-array bit sieve, both counting π(N):
+
+| N | Atkin M/s | Eratosthenes M/s |
+|---|----------:|-----------------:|
+| 10⁶ (in-cache) | 1131 | 630 |
+| 10⁸ | 642 | 484 |
+| 10⁹ (DRAM) | 200 | 201 |
+
+- **In-cache (10⁶): Atkin wins ~1.8×** — its fewer ops show when compute-bound.
+- **Memory-bound (10⁹): they converge (~200)** — DRAM bandwidth erases the
+  op-count advantage; both just push bits to RAM.
+- But the champion **segmented + wheeled Eratosthenes is ~3.6 G/s — 18× faster**
+  than full-array Atkin, and Atkin *can't* segment/wheel to follow (scattered
+  quadratic-form writes, not dense resumable strides). The memory optimizations
+  win 18×; Atkin structurally can't have them.
+- Verdict: Atkin's better op-count is real but visible only when compute-bound;
+  at scale it's memory-bound (moot) and crushed by memory-optimized Eratosthenes.
+  For π(x) at scale it's doubly moot — the cost is combinatorial (φ, P₂), not
+  enumeration. Op-count is the wrong metric on this hardware.
+
 ## Architecture notes
 - Three orthogonal comptime axes (wheel × store × traversal-via-seg-size) +
   a runtime interval. Segmentation = repeated **range sieve** over [lo,hi);
