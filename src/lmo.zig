@@ -61,3 +61,66 @@ pub fn ordinaryS1(gpa: std.mem.Allocator, x: u64) !Foundation {
     }
     return .{ .s1 = s1, .a = a, .y = y };
 }
+
+pub const SpecialCount = struct { count: u64, y: u64, piy: u64 };
+
+/// Count LMO special leaves: pairs (p, m) with m squarefree ≤ y = x^(1/3),
+/// p prime, P⁺(m) < p ≤ y, and m·p > y. (c = 0 — every prime ≤ y eligible.)
+/// This enumeration is the S2 skeleton: swap "count" for "sieve-query and sum".
+pub fn countSpecialLeaves(gpa: std.mem.Allocator, x: u64) !SpecialCount {
+    const y = icbrt(x);
+    const n: usize = @intCast(y + 1);
+
+    const comp = try gpa.alloc(bool, n);
+    defer gpa.free(comp);
+    @memset(comp, false);
+    const mu = try gpa.alloc(i8, n);
+    defer gpa.free(mu);
+    @memset(mu, 1);
+    var i: u64 = 2;
+    while (i <= y) : (i += 1) {
+        if (!comp[@intCast(i)]) {
+            var j = i;
+            while (j <= y) : (j += i) {
+                if (j > i) comp[@intCast(j)] = true;
+                mu[@intCast(j)] = -mu[@intCast(j)];
+            }
+            var k = i * i;
+            while (k <= y) : (k += i * i) mu[@intCast(k)] = 0;
+        }
+    }
+
+    // largest prime factor P⁺(m): later (larger) primes overwrite earlier ones.
+    const maxpf = try gpa.alloc(u32, n);
+    defer gpa.free(maxpf);
+    @memset(maxpf, 0);
+    var p: u64 = 2;
+    while (p <= y) : (p += 1) {
+        if (!comp[@intCast(p)]) {
+            var k = p;
+            while (k <= y) : (k += p) maxpf[@intCast(k)] = @intCast(p);
+        }
+    }
+
+    // prefix π: ppi[t] = number of primes ≤ t.
+    const ppi = try gpa.alloc(u32, n);
+    defer gpa.free(ppi);
+    var c: u32 = 0;
+    var t: u64 = 0;
+    while (t <= y) : (t += 1) {
+        if (t >= 2 and !comp[@intCast(t)]) c += 1;
+        ppi[@intCast(t)] = c;
+    }
+    const piy: u64 = ppi[@intCast(y)];
+
+    var total: u64 = 0;
+    var m: u64 = 2;
+    while (m <= y) : (m += 1) {
+        if (mu[@intCast(m)] == 0) continue; // m must be squarefree
+        const pmax: u64 = maxpf[@intCast(m)];
+        const yb: u64 = y / m; // p must satisfy m·p > y  ⇔  p > ⌊y/m⌋
+        const thr = @max(pmax, yb);
+        if (thr < y) total += piy - ppi[@intCast(thr)];
+    }
+    return .{ .count = total, .y = y, .piy = piy };
+}
