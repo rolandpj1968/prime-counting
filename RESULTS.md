@@ -637,6 +637,41 @@ unpromising: the `cnt1`/`cnt2` u32 sums vectorise well, but the third loop needs
 u64s, and this box has AVX2 without **VPOPCNTDQ** — the `vpshufb` nibble-LUT is ~1.5 ops/u64
 against scalar `popcnt`'s 1/cycle throughput. Reverted.
 
+## Full scaling sweep after the DR-paper work (10¹²–10¹⁹)
+
+Every DR-paper optimisation in place (binomial, π-table, mod-30 wheel, branchless kill, gated
+diagnostics), swept against the pre-DR-classes baseline. Least-squares over all points, never
+2-point deltas.
+
+| x | π(x) | before | after | speedup |
+|---|------|-------:|------:|--------:|
+| 10¹² | 37,607,912,018 | 0.16 s | 0.06 s | 2.61× |
+| 10¹³ | 346,065,536,839 | 0.74 s | 0.26 s | 2.82× |
+| 10¹⁴ | 3,204,941,750,802 | 3.34 s | 1.16 s | 2.88× |
+| 10¹⁵ | 29,844,570,422,669 | 15.18 s | 5.23 s | 2.90× |
+| 10¹⁶ | 279,238,341,033,925 | 72.87 s | 23.11 s | 3.15× |
+| 10¹⁷ | 2,623,557,157,654,233 | 369.3 s | 103.1 s | 3.58× |
+| 10¹⁸ | 24,739,954,287,740,860 | 28.1 min | **8.3 min** | 3.40× |
+| 10¹⁹ | 234,057,667,276,344,607 | 2.41 h | **42.4 min** | 3.41× |
+
+All exact. The speedup **grows with x** (2.6× → 3.4×) as the class-(1) binomial and π-table absorb
+a rising share of leaves.
+
+**Exponent — the DR classes lowered it but did not flatten the drift.**
+
+| range | before | after |
+|---|---:|---:|
+| 10¹² .. 10¹⁹ | 0.6755 | **0.6582** |
+| 10¹² .. 10¹⁵ | 0.6586 | 0.6471 |
+| 10¹⁵ .. 10¹⁹ | 0.6879 | 0.6705 |
+
+Overall exponent is now **0.658 — just under the theoretical 2/3.** The drift barely moved (+0.029
+→ +0.023), which is informative: stripping ~half the leaf work should have weakened a
+*leaf-driven* drift, and it did not. So the residual drift lives on the **kill / fold / counter**
+side — untouched by the leaf optimisations — consistent with the L1-miss-rate climb (0.78% → 2.15%
+after the wheel shrank the working set's useful density). Not chased further; it is a ~3% effect
+over seven decades and the serial well is dry.
+
 ## DR §6.5 clustering: measured reach, and why y = x^(1/3)·log³x exists
 
 DR's actual novelty: *"for each p we can split the summation over q into sums over intervals where
