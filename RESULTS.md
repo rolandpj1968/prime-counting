@@ -393,12 +393,31 @@ never swept. Predicted the counter's O(√S) query dominated, so S ≈ 2570 (~72
 | 185660 (=y) | 108 | 4.9×10⁷ | 3904 | +1.4% |
 
 Optima are 32768/65536/131072 at 10¹²/10¹³/10¹⁴ ≈ **0.75y** — not worth a knob; S=y self-scales.
-The model was wrong because it priced the `a·z/S` fold at ~1 op. Back it out of the data: at
-S=32768 the query cost halves (91→46), which should save ~6×10⁹ ops, yet it runs *slower*. That
-only balances if each (segment, prime) fold step costs **~30 cycles** — i.e. the
-`((lo+p−1)/p)·p` division. **That division is what pins S high**, and it is still ~12% of runtime
-at the optimum. Replacing it with a per-prime next-multiple cursor should un-pin S (≈32768 viable,
-queries halve) — model says ~2×. A lock on a knob, not a 12% cleanup.
+The model was wrong because it priced the `a·z/S` fold at ~1 op. Backing it out of the data, each
+(segment, prime) fold step costs **~26 cycles**. First guess: the `((lo+p−1)/p)·p` division, so
+"the division pins S high" — replace it with a next-multiple cursor and S should un-pin (~2×).
+
+**Falsified. The cursor is a no-op — 1.00× at essentially every (x, S):**
+
+| seg (10¹⁴) | before | with cursor | ratio | vs best |
+|---:|---:|---:|---:|---:|
+| 2048 | 13309.8 | 13205.6 | 1.01× | +243.9% |
+| 8192 | 6331.9 | 6321.4 | 1.00× | +64.6% |
+| 32768 | 4301.2 | 4364.4 | 0.99× | +13.6% |
+| **131072** | 3852.3 | **3840.4** | 1.00× | **0.0%** |
+| 185660 (=y) | 3913.0 | 3892.4 | 1.01× | +1.4% |
+
+Identical curve, identical optimum. The division's ~30-cycle **latency was already hidden by ILP**
+— the prime loop's iterations are independent, so the divider pipelines against everything else.
+Latency ≠ cost when there is that much parallelism to hide it under. Cursor reverted (neutral on
+time, and it adds another a-sized array to the exact pressure point below).
+
+**What actually pins S is structural.** The ~26 cycles are memory traffic on the *a-sized* arrays:
+every segment streams `seg_cnt`, `cur`, `next`, `phi_run` — 4 × 16700 × 8 B ≈ **536 KB at 10¹⁴,
+right at this box's 512 KB L2 cliff**. And it is irreducible given the algorithm:
+`phi_run[bi] += seg_cnt[bi]` must run for *every* b at *every* segment boundary, because the
+running φ per b is exactly the mechanism that lets us never re-sieve [1,lo). So a·nsegs is a hard
+floor, and **S ≈ 0.75y is right for a real reason** rather than a tuning accident. S=y stays.
 
 **Parallelism: the leaves are wildly non-uniform.** Kills are uniform by construction (each
 element of [1,z] dies once), but leaves are not — measured at 10¹⁴:
