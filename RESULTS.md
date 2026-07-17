@@ -212,8 +212,8 @@ P₂ and the cutoff share a prefix-π table up to x^(2/3).
   ~16× less memory (0.5 GB vs 8.6 GB at 10¹⁴) — moving the wall from ~10¹⁴ to
   ~10¹⁶ — *and faster*, because the small table is cache-resident where the fat
   one was DRAM-bound (10¹² 1.18→0.89 s, 10¹³ 7.25→5.68 s). Same algorithm, so the
-  ~0.8 exponent is unchanged; **Stage B** (special-leaf sieve) targets O(x^(1/3))
-  memory and the 2/3 exponent.
+  ~0.8 exponent is unchanged. The special-leaf sieve that reaches O(x^(1/3)) memory
+  and the 2/3 exponent became `lmo.zig` — see the LMO section below.
 - vs sieving (~3.6 G ints/s): 10¹³ in 5.7 s where sieving needs ~46 min; the gap
   *widens* with x (O(x) vs O(x^0.8)). This is why records go to 10³⁰
   combinatorially, never by sieving.

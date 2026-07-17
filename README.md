@@ -13,7 +13,8 @@ compute it, in increasing sophistication and decreasing intuition:
 - **Combinatorial** — Legendre → Meissel → Lehmer → Lagarias–Miller–Odlyzko →
   Deléglise–Rivat. Sub-linear (≈ O(N^(2/3))): counts π(N) *without listing the
   primes*, via a partial-sieve identity π(N) = φ(N,a) + a − 1 − P₂(N,a). This is
-  how records reach 10³⁰. **The destination of this project.**
+  how records reach 10³⁰. **Built here through the LMO/DR line** (π(10¹⁹) in ~50
+  min, single-threaded).
 - **Analytic** — Lagarias–Odlyzko. O(N^(1/2+ε)) by contour-integrating ζ(s).
   Asymptotically best, but high-precision-arithmetic constants leave it
   practically dominated; its real use is independent verification.
@@ -76,24 +77,37 @@ the average gap ≈ ln N − 1, and Li(N) tracking π to parts-per-million on th
 √N/ln N (Riemann) error scale. And it counts primes **past 2⁶⁴** (u128), validated
 not against any table but against the prime number theorem itself.
 
-### Combinatorial π(x) leaves sieving behind
+### Combinatorial π(x): from Meissel to LMO/Deléglise–Rivat
 
-`meissel.zig` implements the Meissel–Lehmer identity π(x) = φ(x,a) + a − 1 −
-P₂(x,a), a = π(x^⅓) — counting primes *without enumerating them*. It's
-**sub-linear** (empirical exponent ~0.8; sieving is 1.0), so the lead over
-sieving *widens* with x:
+Two implementations share the identity π(x) = φ(x,a) + a − 1 − P₂(x,a), a = π(y):
 
-| x | π(x) | Meissel | vs sieving |
-|---|------|--------:|:----------:|
-| 10¹² | 37,607,912,018 | 0.89 s | ~310× |
-| 10¹³ | 346,065,536,839 | 5.68 s | ~490× |
-| 10¹⁴ | 3,204,941,750,802 | 41 s | ~660× |
+- **`meissel.zig`** — the classical Meissel–Lehmer recursion for φ, with a compact
+  bit-sieve+checkpoints π-table (cache-resident: memory *and* speed). Reaches 10¹⁴
+  in 41 s at ~0.8 exponent, then hits an O(x^(2/3)) memory wall.
+- **`lmo.zig`** — Lagarias–Miller–Odlyzko / Deléglise–Rivat. Splits φ into ordinary
+  and *special* leaves, resolves the special leaves with a **segmented sieve +
+  O(1)-kill counter** (never storing the O(x^(2/3)) table), and evaluates whole
+  classes of leaves in closed form. **The 2/3 exponent in Θ(x^(1/3)) memory.**
 
-Sieving 10¹⁴ would take ~8 hours; Meissel does it in 41 seconds, and the lead
-widens with x. This is why records reach 10³⁰ combinatorially and never by
-sieving. Meissel computed π(10⁹) *by hand* in 1885 (off by 56); the same identity
-is exact here in milliseconds. (A compact bit-sieve+checkpoints π-table keeps the
-whole thing cache-resident — memory *and* speed; the special-leaf sieve is next.)
+| x | π(x) | LMO | vs Meissel | memory |
+|---|------|----:|:----------:|-------:|
+| 10¹⁴ | 3,204,941,750,802 | 1.2 s | 34× | ~7 MB |
+| 10¹⁶ | 279,238,341,033,925 | ~35 s | — | ~7 MB |
+| 10¹⁸ | 24,739,954,287,740,860 | ~19 min | — | ~31 MB |
+| 10¹⁹ | 234,057,667,276,344,607 | ~50 min | — | ~67 MB |
+
+π(10¹⁹) matches M. Deléglise's 1996 computation — reproduced single-threaded on a
+laptop in the time his HP-730 took for a value **four decades smaller**. Sieving
+10¹⁹ would take *months*; the lead over sieving widens with x, which is why records
+reach 10³⁰ combinatorially and never by enumeration.
+
+The build was driven **empirically against the two source papers** ([RESULTS.md](RESULTS.md)
+has the full log), and the most interesting results were the negatives: both of
+Deléglise–Rivat's headline optimisations — the x^(1/4) sieve bound (§7) and leaf
+*clustering* (§6.5) — measured **net-negative here**, because each amortises a cost
+(an O(log x) tree; per-leaf evaluation) that the O(1)-kill counter and a π-table
+had already removed. We sit at ~1.6× DR's 1996 implementation while using *neither*
+of their log-factor tricks: they weren't skipped, they were made unnecessary.
 
 ## Build & run
 
@@ -110,10 +124,14 @@ zig test src/stores/bit_packed.zig      # unit tests
 
 ## Status
 
-Straight sieving is characterized end to end, and the combinatorial π(x)
-(Meissel–Lehmer) works to 10¹³. Next: LMO's special-leaf sieving to remove the
-O(x^(2/3)) prefix-π table (the current memory wall), Deléglise–Rivat's log-factor
-refinement, and u128 to push past 10¹⁸.
+Straight sieving is characterized end to end. Combinatorial π(x) is complete
+through the LMO/Deléglise–Rivat line: exact and verified against every known value
+10 → 10¹⁹ (plus exhaustively over [0, 5000]), at the 2/3 exponent in Θ(x^(1/3))
+memory, single-threaded. 10¹⁹ is the last power of ten under 2⁶⁴.
+
+Next: u128 for the ground beyond 2⁶⁴, and parallelisation — 12 cores untouched,
+with the hard part (leaf work is 99.7% concentrated in the first decile of [1, x/y],
+so blocks must be sized by leaf count, not width) already measured.
 
 ## References
 
