@@ -26,8 +26,20 @@ each cross-checked differentially against an independent reference (`specialS2Se
 Least-squares scaling exponent **0.658** over 10¹²–10¹⁹, just under the theoretical 2/3.
 π(10¹⁹) is the last power of ten under 2⁶⁴ and matches M. Deléglise's 1996 computation —
 reproduced here single-threaded in less time than his HP-730 took for a value four
-decades smaller. We sit at **~1.6× DR's 1996 implementation** while implementing *neither*
-of their two log-factor optimisations (see [dead ends](#what-didnt-work-dead-ends-and-unhelpful-literature)) — they were made unnecessary, not skipped.
+decades smaller. We implement *neither* of DR's two log-factor optimisations
+(see [dead ends](#what-didnt-work-dead-ends-and-unhelpful-literature)) — they were made
+unnecessary on this hardware, not skipped.
+
+A cross-era *speed* comparison is not really recoverable, and the honest lean is that
+hardware-adjusted we are at par or behind DR 1996, with the modern advantage dominated by
+**native 64-bit width**. This computation lives entirely in 64-bit arithmetic (products
+m·p ≤ y² ≈ 3×10¹⁴, divides x/(m·p)); their HP-730 *emulated* 64-bit in software (§10),
+and DR report the native-64-bit DEC Alpha as ">3× faster" at similar SPEC — that factor is
+precisely the emulation penalty, invisible to a clock×IPC adjustment. We measured the same
+phenomenon one level up: the u128-divide tax at 10²⁰ (2.5–2.9× per op, compiler-rt emulating
+128-bit on 64-bit hardware) is the 2026 version of their 1996 penalty. What *is* solid, and
+independent of any cross-era guess, is that §7 and §6.5 measure net-negative **here** — a
+direct measurement on this machine, not an adjusted comparison.
 
 ## What worked: the optimisation ladder
 
@@ -78,8 +90,9 @@ made cheap:
 | §7, x^(1/4) bound on the φ-sieve | tree ops at O(log x) each (§8.3) | O(1)-kill counter | **−2%** |
 | §6.5, clustering | leaf evaluation | π-table: one lookup | **−7%** |
 
-That is why we beat their 1996 implementation while using neither of their log factors:
-we did not skip them, we made them unnecessary. It also retires the α_opt puzzle (below):
+That is why using neither of their log factors is not a handicap here: we did not skip them,
+we made them unnecessary on this hardware (the raw speed gap over their 1996 run is largely
+native 64-bit width, not algorithm — see Results). It also retires the α_opt puzzle (below):
 six sweeps said α_opt = 4 flat over five decades against a literature that says α ~ log³x —
 never a contradiction, because DR's α is large *because* their leaves are expensive.
 
