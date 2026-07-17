@@ -299,7 +299,7 @@ closed form since those primes have indices a+1..A.
 | 10¹¹ | 4,118,054,813 | 0.09 s | 0.10 s | 1.1× | — |
 | 10¹² | 37,607,912,018 | 0.42 s | 0.69 s | 1.6× | 0.655 |
 | 10¹³ | 346,065,536,839 | 1.94 s | 5.81 s | 3.0× | 0.661 |
-| 10¹⁴ | 3,204,941,750,802 | 4.13 s | 41.3 s | **10.0×** | 0.657 |
+| 10¹⁴ | 3,204,941,750,802 | 3.54 s | 41.3 s | **11.7×** | 0.657 |
 
 The 10¹⁴ column, step by step — each is a separate committed measurement:
 
@@ -310,7 +310,8 @@ The 10¹⁴ column, step by step — each is a separate committed measurement:
 | → α = 2 | 7.98 s | 1.12× |
 | → m-walk split at √y | 6.07 s | 1.31× |
 | → P₂ fused onto the counter | 4.97 s | 1.22× |
-| → α = 4 | **4.13 s** | 1.20× |
+| → α = 4 | 4.13 s | 1.20× |
+| → 3-level counter, power-of-2 blocks | **3.54 s** | 1.17× |
 
 ## The α knob, where it is finally real (lmo.zig)
 
@@ -418,6 +419,28 @@ right at this box's 512 KB L2 cliff**. And it is irreducible given the algorithm
 `phi_run[bi] += seg_cnt[bi]` must run for *every* b at *every* segment boundary, because the
 running φ per b is exactly the mechanism that lets us never re-sieve [1,lo). So a·nsegs is a hard
 floor, and **S ≈ 0.75y is right for a real reason** rather than a tuning accident. S=y stays.
+
+**The counter, revisited — and the two divisions that disagree.** The 2-level Counter's own
+docstring justified itself with "kills outnumber queries ~60:1", measured at α=1.5. At α=4 that
+**inverted**: 5.4×10⁸ kills vs 1.4×10⁸ leaves is ~4:1 by count, and in *cost* the queries dominate
+~12:1 the other way. So the balance was retested with three variants, separating the two effects:
+
+| x | Counter (2-level, ÷) | Counter2P (2-level, shift) | Counter3P (3-level, shift) |
+|---|---:|---:|---:|
+| 10¹³ | 854.2 ms | 745.8 (1.15×) | 740.6 (**1.15×**) |
+| 10¹⁴ | 3989.0 ms | 3667.5 (1.09×) | 3345.2 (**1.19×**) |
+
+Predicted ~20% from the third level (query 3·nwords^(1/3) vs 2·√nwords — 43 vs 108 at 10¹⁴). The
+**total** is ~19% at 10¹⁴, but the attribution was wrong: most of it is removing the **division**,
+and at 10¹³ the third level adds *nothing* over a 2-level shift. Adopted anyway — 3P is ≥ 2P at
+both, and its margin grows with x (1.15 → 1.19), which is the right direction for 10¹⁸.
+
+**Why this division cost when the fold's didn't.** In `kill()`, `cnt[w / wpb] -= 1`: wpb is a
+runtime divisor and the quotient is an **address**, so the dependent load-modify-store sits on the
+critical path. The fold's `((lo+p−1)/p)·p` measured *free* because its quotient only seeded a loop
+whose iterations were independent across primes — ILP swallowed the latency. **Division latency is
+free when it feeds independent work, and expensive when it feeds an address you must immediately
+touch.** Two opposite results, one rule.
 
 **Parallelism: the leaves are wildly non-uniform.** Kills are uniform by construction (each
 element of [1,z] dies once), but leaves are not — measured at 10¹⁴:

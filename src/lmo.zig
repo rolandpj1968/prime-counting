@@ -172,11 +172,21 @@ const Fenwick = struct {
 /// (~6.8e9 vs Fenwick's ~1.2e10), but its margin no longer comes from where this
 /// comment used to claim.
 ///
-/// UNTESTED HYPOTHESIS, given queries now dominate: a third level would make the
-/// query ~3·nwords^(1/3) instead of 2·√nwords — 43 vs 108 at 10^14 — for one extra
-/// counter decrement per kill. Worth ~20% on the model, and the model has been wrong
-/// five times running today, so measure before believing it.
-const Counter = struct {
+/// SUPERSEDED by Counter3P, which is what s2AndP2Fused now uses (1.15× at 10^13,
+/// 1.19× at 10^14, margin growing with x). Kept as the flat/reference counter.
+///
+/// The measurement corrected the attribution: I predicted ~20% from the third level
+/// making the query 3·nwords^(1/3) rather than 2·√nwords (43 vs 108 at 10^14). The
+/// total is indeed ~19% at 10^14 — but most of it is removing the DIVISION below, not
+/// the extra level (at 10^13 the third level adds nothing over a 2-level shift).
+///
+/// `w / self.wpb` is the cost: wpb is a runtime divisor, and the quotient is an
+/// ADDRESS, so the dependent load-modify-store sits on the critical path. Contrast
+/// the fold's `((lo+p−1)/p)·p`, which measured free — there the quotient only seeded
+/// a loop whose iterations were independent across primes, so ILP hid the latency.
+/// Division latency is free when it feeds independent work, and expensive when it
+/// feeds an address you must immediately touch.
+pub const Counter = struct {
     bits: []u64, // 1 = alive
     cnt: []u32, // cnt[k] = alive in block k
     wpb: usize, // words per block
@@ -235,6 +245,144 @@ const Counter = struct {
         var s: i64 = 0;
         for (self.cnt[0..blk]) |c| s += c;
         for (self.bits[blk * self.wpb .. w]) |word| s += @popCount(word);
+        const r: u6 = @intCast(i & 63);
+        const mask: u64 = if (r == 63) ~@as(u64, 0) else (@as(u64, 1) << (r + 1)) - 1;
+        s += @popCount(self.bits[w] & mask);
+        return s;
+    }
+};
+
+/// Power-of-two variants, so `w / wpb` in kill() becomes a shift. Counter's block
+/// size is isqrt(nwords), a runtime divisor — a real division on the hot kill path.
+/// Counter2P isolates that effect from the level count; Counter3P adds the level.
+
+inline fn log2Floor(n: usize) u6 {
+    return @intCast(63 - @clz(@as(u64, @max(n, 1))));
+}
+
+/// 2-level, power-of-two block (shift, not divide). Same shape as Counter otherwise.
+pub const Counter2P = struct {
+    bits: []u64,
+    cnt: []u32,
+    s1: u6, // block = 2^s1 words ≈ √nwords
+    nwords: usize,
+    total: i64,
+
+    fn init(gpa: std.mem.Allocator, seg: usize) !Counter2P {
+        const nwords = (seg + 63) / 64;
+        const s1: u6 = @intCast((log2Floor(nwords) + 1) / 2);
+        const nblocks = (nwords >> s1) + 1;
+        return .{
+            .bits = try gpa.alloc(u64, nwords),
+            .cnt = try gpa.alloc(u32, nblocks),
+            .s1 = s1,
+            .nwords = nwords,
+            .total = 0,
+        };
+    }
+    fn deinit(self: *Counter2P, gpa: std.mem.Allocator) void {
+        gpa.free(self.bits);
+        gpa.free(self.cnt);
+    }
+    fn reset(self: *Counter2P, len: usize) void {
+        const nw = (len + 63) / 64;
+        @memset(self.bits[0..nw], ~@as(u64, 0));
+        if (len % 64 != 0) self.bits[nw - 1] = (@as(u64, 1) << @as(u6, @intCast(len % 64))) - 1;
+        @memset(self.bits[nw..self.nwords], 0);
+        @memset(self.cnt, 0);
+        for (self.bits, 0..) |word, w| self.cnt[w >> self.s1] += @popCount(word);
+        self.total = @intCast(len);
+    }
+    inline fn kill(self: *Counter2P, i: usize) void {
+        const w = i >> 6;
+        const b = @as(u64, 1) << @as(u6, @intCast(i & 63));
+        if (self.bits[w] & b != 0) {
+            self.bits[w] &= ~b;
+            self.cnt[w >> self.s1] -= 1;
+            self.total -= 1;
+        }
+    }
+    fn prefix(self: *const Counter2P, i: usize) i64 {
+        const w = i >> 6;
+        const blk = w >> self.s1;
+        var s: i64 = 0;
+        for (self.cnt[0..blk]) |c| s += c;
+        for (self.bits[blk << self.s1 .. w]) |word| s += @popCount(word);
+        const r: u6 = @intCast(i & 63);
+        const mask: u64 = if (r == 63) ~@as(u64, 0) else (@as(u64, 1) << (r + 1)) - 1;
+        s += @popCount(self.bits[w] & mask);
+        return s;
+    }
+};
+
+/// 3-level: bits → blocks of 2^s1 words → superblocks of 2^s2 blocks.
+///
+/// A query costs nsuper + 2^s2 + 2^s1, minimised at both ≈ nwords^(1/3) → 3·n^(1/3)
+/// instead of the 2-level's 2·√n (43 vs 108 at 10^14). Pays one extra counter
+/// decrement per kill. Worth trying because the traffic INVERTED at α=4: queries now
+/// dominate cost ~12:1, the opposite of when the 2-level was chosen at α=1.5.
+pub const Counter3P = struct {
+    bits: []u64,
+    cnt1: []u32, // per block of 2^s1 words
+    cnt2: []u32, // per superblock of 2^s2 blocks
+    s1: u6,
+    s2: u6,
+    nwords: usize,
+    total: i64,
+
+    fn init(gpa: std.mem.Allocator, seg: usize) !Counter3P {
+        const nwords = (seg + 63) / 64;
+        const t: u6 = @intCast(@max(1, (log2Floor(nwords) + 2) / 3)); // ≈ n^(1/3)
+        const nblocks = (nwords >> t) + 1;
+        const nsuper = (nblocks >> t) + 1;
+        return .{
+            .bits = try gpa.alloc(u64, nwords),
+            .cnt1 = try gpa.alloc(u32, nblocks),
+            .cnt2 = try gpa.alloc(u32, nsuper),
+            .s1 = t,
+            .s2 = t,
+            .nwords = nwords,
+            .total = 0,
+        };
+    }
+    fn deinit(self: *Counter3P, gpa: std.mem.Allocator) void {
+        gpa.free(self.bits);
+        gpa.free(self.cnt1);
+        gpa.free(self.cnt2);
+    }
+    fn reset(self: *Counter3P, len: usize) void {
+        const nw = (len + 63) / 64;
+        @memset(self.bits[0..nw], ~@as(u64, 0));
+        if (len % 64 != 0) self.bits[nw - 1] = (@as(u64, 1) << @as(u6, @intCast(len % 64))) - 1;
+        @memset(self.bits[nw..self.nwords], 0);
+        @memset(self.cnt1, 0);
+        @memset(self.cnt2, 0);
+        for (self.bits, 0..) |word, w| {
+            const c: u32 = @popCount(word);
+            self.cnt1[w >> self.s1] += c;
+            self.cnt2[(w >> self.s1) >> self.s2] += c;
+        }
+        self.total = @intCast(len);
+    }
+    inline fn kill(self: *Counter3P, i: usize) void {
+        const w = i >> 6;
+        const b = @as(u64, 1) << @as(u6, @intCast(i & 63));
+        if (self.bits[w] & b != 0) {
+            self.bits[w] &= ~b;
+            const blk = w >> self.s1;
+            self.cnt1[blk] -= 1;
+            self.cnt2[blk >> self.s2] -= 1;
+            self.total -= 1;
+        }
+    }
+    fn prefix(self: *const Counter3P, i: usize) i64 {
+        const w = i >> 6;
+        const blk = w >> self.s1;
+        const sblk = blk >> self.s2;
+        var s: i64 = 0;
+        for (self.cnt2[0..sblk]) |c| s += c;
+        for (self.cnt1[sblk << self.s2 .. blk]) |c| s += c;
+        for (self.bits[blk << self.s1 .. w]) |word| s += @popCount(word);
         const r: u6 = @intCast(i & 63);
         const mask: u64 = if (r == 63) ~@as(u64, 0) else (@as(u64, 1) << (r + 1)) - 1;
         s += @popCount(self.bits[w] & mask);
@@ -532,6 +680,11 @@ pub const FusedResult = struct {
 };
 
 pub fn s2AndP2Fused(gpa: std.mem.Allocator, x: u64, y: u64, seg: usize) !FusedResult {
+    return s2AndP2FusedGen(Counter3P, gpa, x, y, seg);
+}
+
+/// Generic over the alive-counter, so variants can be measured head to head.
+pub fn s2AndP2FusedGen(comptime C: type, gpa: std.mem.Allocator, x: u64, y: u64, seg: usize) !FusedResult {
     var t = try SmallTables.init(gpa, y);
     defer t.deinit(gpa);
     const z = x / y;
@@ -551,7 +704,7 @@ pub fn s2AndP2Fused(gpa: std.mem.Allocator, x: u64, y: u64, seg: usize) !FusedRe
     const do_p2 = y < sqrt_x;
     var np: usize = 0; // primes found in (y, √x] ⇒ π(√x) = a + np
 
-    var ctr = try Counter.init(gpa, seg);
+    var ctr = try C.init(gpa, seg);
     defer ctr.deinit(gpa);
 
     // a+1 slots: [a] is the fully-folded state φ(·, a), which is what P₂ reads.
