@@ -183,11 +183,89 @@ pub fn specialS2(gpa: std.mem.Allocator, x: u64, y: u64) !S2Result {
     return .{ .s2 = s2, .leaves = leaves, .z = z, .a = t.a };
 }
 
+/// SEGMENTED S2 — the same sum, in O(x^(1/3)) memory instead of O(x^(2/3)).
+///
+/// Two ideas carry it:
+///  • running φ per b: φ(v, b−1) = phi_run[b−1] + (alive in [lo, v]), where
+///    phi_run[b−1] counts survivors in [1, lo) with p_1..p_{b−1} removed. Each
+///    segment adds its own count to phi_run, so [1, lo) is never re-sieved.
+///  • descending m-cursor per prime: segments run lo ASCENDING, and v = x/(m·p)
+///    rises as m falls — so one cursor per p_b walks m down monotonically and
+///    every m is touched once in TOTAL, not once per segment.
+pub fn specialS2Segmented(gpa: std.mem.Allocator, x: u64, y: u64, seg: usize) !S2Result {
+    var t = try SmallTables.init(gpa, y);
+    defer t.deinit(gpa);
+    const z = x / y;
+    const a = t.a;
+
+    var fen = try Fenwick.initAllOnes(gpa, seg);
+    defer fen.deinit(gpa);
+    const alive = try gpa.alloc(bool, seg + 1);
+    defer gpa.free(alive);
+
+    const phi_run = try gpa.alloc(i64, a); // survivors in [1, lo) per b−1
+    defer gpa.free(phi_run);
+    @memset(phi_run, 0);
+    const seg_cnt = try gpa.alloc(i64, a); // this segment's contribution
+    defer gpa.free(seg_cnt);
+    const m_cur = try gpa.alloc(u64, a); // descending m cursor per prime
+    defer gpa.free(m_cur);
+    @memset(m_cur, y);
+
+    var s2: i128 = 0;
+    var leaves: u64 = 0;
+
+    var lo: u64 = 1;
+    while (lo <= z) : (lo += seg) {
+        const hi = @min(lo + seg, z + 1); // segment covers [lo, hi)
+        const len: usize = @intCast(hi - lo);
+        @memset(alive[1 .. len + 1], true);
+        for (1..len + 1) |i| fen.t[i] = @intCast(Fenwick.lsb(i));
+        // zero the tail so prefix() over a short last segment stays exact
+        for (len + 1..seg + 1) |i| fen.t[i] = 0;
+
+        for (t.primes, 0..) |p32, bi| {
+            const p: u64 = p32; // p = p_b, b = bi+1; segment holds primes[0..bi) removed
+            seg_cnt[bi] = fen.prefix(len); // survivors here with p_1..p_{b−1} gone
+
+            // walk m down while v = x/(m·p) stays inside this segment
+            var m = m_cur[bi];
+            const mlo = y / p; // m·p > y  ⇔  m > ⌊y/p⌋
+            while (m > mlo) {
+                const v = x / (m * p);
+                if (v >= hi) break; // belongs to a later segment
+                if (v >= lo) {
+                    const mm = t.mu[@intCast(m)];
+                    if (mm != 0 and t.lpf[@intCast(m)] > p) {
+                        const phi_v = phi_run[bi] + fen.prefix(@intCast(v - lo + 1));
+                        s2 += @as(i128, -mm) * @as(i128, phi_v);
+                        leaves += 1;
+                    }
+                }
+                m -= 1;
+            }
+            m_cur[bi] = m;
+
+            // fold p_b into this segment, ready for b+1
+            var j = ((lo + p - 1) / p) * p; // first multiple of p at or above lo
+            while (j < hi) : (j += p) {
+                const idx: usize = @intCast(j - lo + 1);
+                if (alive[idx]) {
+                    alive[idx] = false;
+                    fen.add(idx, -1);
+                }
+            }
+        }
+        for (0..a) |bi| phi_run[bi] += seg_cnt[bi];
+    }
+    return .{ .s2 = s2, .leaves = leaves, .z = z, .a = a };
+}
+
 pub const PhiResult = struct { phi: i128, s1: i128, s2: i128, leaves: u64, z: u64, a: usize, y: u64 };
 
 /// φ(x, π(y)) = S1 + S2 — the LMO decomposition end to end.
-pub fn phiLMO(gpa: std.mem.Allocator, x: u64, y: u64) !PhiResult {
+pub fn phiLMO(gpa: std.mem.Allocator, x: u64, y: u64, seg: ?usize) !PhiResult {
     const f = try ordinaryS1(gpa, x, y);
-    const s = try specialS2(gpa, x, y);
+    const s = if (seg) |sz| try specialS2Segmented(gpa, x, y, sz) else try specialS2(gpa, x, y);
     return .{ .phi = f.s1 + s.s2, .s1 = f.s1, .s2 = s.s2, .leaves = s.leaves, .z = s.z, .a = s.a, .y = y };
 }
