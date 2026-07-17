@@ -1020,3 +1020,8 @@ pub fn piLMO(gpa: std.mem.Allocator, x: u64, y_in: ?u64, seg_in: ?usize) !PiResu
     const r = phi + @as(i128, @intCast(f.a)) - 1 - f.p2;
     return .{ .pi = @intCast(r), .phi = phi, .p2 = f.p2, .y = y, .a = f.a, .z = f.z, .leaves = f.leaves };
 }
+
+/// icbrt, exported for analysis harnesses.
+pub fn icbrtPub(x: u64) u64 {
+    return icbrt(x);
+}

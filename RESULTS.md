@@ -637,6 +637,46 @@ unpromising: the `cnt1`/`cnt2` u32 sums vectorise well, but the third loop needs
 u64s, and this box has AVX2 without **VPOPCNTDQ** — the `vpshufb` nibble-LUT is ~1.5 ops/u64
 against scalar `popcnt`'s 1/cycle throughput. Reverted.
 
+## DR §6.5 clustering: measured reach, and why y = x^(1/3)·log³x exists
+
+DR's actual novelty: *"for each p we can split the summation over q into sums over intervals where
+the function q ↦ π(x/pq) is constant."* q ascending ⇒ v = x/(pq) descending ⇒ π(v) non-increasing,
+so the runs are contiguous. Measured the reach **before** building it (the last two "biggest
+remaining wins" both measured negative):
+
+```
+x = 10^14
+ alpha         y  pi-tab leaves           runs     ctr leaves  leaf/run    reach
+     2     92830       13683218        7311759       17274212      1.87    44.2%
+     4    185660       53037184       21780399       14674931      2.44    78.3%
+     8    371320      127796929       36082736        8867918      3.54    93.5%
+    16    742640      262535484       45657832        3541600      5.75    98.7%
+    32   1485280      507399194       49087615        1266051     10.34    99.8%
+```
+
+**At our α=4 it is worth ~8–12%** — reach 78.3%, leaf/run 2.44, and finding each run boundary costs
+about what evaluating a leaf costs. Not the log x the paper advertises.
+
+**But the reach grows with α, and that is the point.** Three things move together:
+- reach 44% → **99.8%**: at large y essentially every leaf is clusterable;
+- leaf/run 1.87 → **10.34**: bigger y ⇒ v smaller and flatter in q ⇒ longer runs;
+- **the runs saturate** — 21.8M → 49.1M while the leaves go 53M → **507M**. Leaves ride α²; runs
+  ride ~α^0.4. *Clustering converts the α² leaf term into a nearly-flat one.*
+
+Meanwhile the two costs of large α collapse: **counter leaves 14.7M → 1.3M** (11× fewer — the ones
+clustering cannot reach), and z = x/y shrinks 8× (5.4×10⁸ → 6.7×10⁷), taking the fold with it. At
+α=32 that is 2.25× more runs to buy 8× less fold and 11× fewer counter queries.
+
+**So DR's y = x^(1/3)·log³x is not a separate choice from clustering — it is what clustering pays
+for.** Our α_opt = 4 was measured on an implementation where every leaf costs a lookup; with the α²
+term flattened, the optimum should move a long way up. That is the first path here to a *large* win
+rather than a 5–10% shave.
+
+Risk on the record: **the dense m-walk (p ≤ √y) grows as α^1.5** — π(√y)·y ≈ 1.5×10⁷ at α=4 →
+~3×10⁸ at α=32 — and clustering cannot touch it (m is composite there, so μ(m) varies across a run
+and there is no shared π value). It could eat the gains, and it is exactly the kind of term
+mispriced repeatedly above, so it is the first thing to measure once α is free to move.
+
 ## The α knob, where it is finally real (lmo.zig)
 
 ## The α knob, where it is finally real (lmo.zig)
