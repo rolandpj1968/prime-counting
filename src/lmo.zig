@@ -1,5 +1,8 @@
-//! LMO (Lagarias–Miller–Odlyzko) φ(x,a), building toward sub-linear π(x) with
-//! O(x^(1/3)) memory — the path to π(10^18) in seconds.
+//! LMO (Lagarias–Miller–Odlyzko) φ(x,a): sub-linear π(x) in O(x^(1/3)) memory.
+//! Measured exponent 0.66 (the theoretical 2/3); π(10^14) exact in ~4.1 s, 10× the
+//! Meissel–Lehmer in meissel.zig. NOT the path to π(10^18) in seconds on its own —
+//! extrapolating 0.66 puts plain LMO at ~40 min single-threaded there. Closing that
+//! needs Deléglise–Rivat plus parallelism; see RESULTS.md.
 //!
 //! DERIVED FROM OUR OWN RECURSION, not from memory. φ(x,a)=φ(x,a−1)−φ(x/p_a,a−1)
 //! takes primes in DECREASING index order, so with F(n,b) = μ(n)·φ(x/n,b):
@@ -116,7 +119,10 @@ pub fn ordinaryS1(gpa: std.mem.Allocator, x: u64, y: u64) !Foundation {
 // -------------------------------------------------------------------- Fenwick
 
 /// Fenwick/BIT over [1, n] of 0/1 counts: O(log n) point update and prefix sum.
-/// An implementation detail, not the idea — √-decomposition would also serve.
+///
+/// KEPT ONLY as the flat specialS2's reference implementation, so that
+/// flat (Fenwick) == segmented (Counter) cross-checks the Counter. It is the wrong
+/// structure for the hot path — see Counter below — and measured 1.9× slower there.
 const Fenwick = struct {
     t: []i32,
     n: usize,
@@ -154,14 +160,22 @@ const Fenwick = struct {
 
 /// Alive-set over one segment: **O(1) kill**, O(√S) prefix count, O(1) total.
 ///
-/// Deliberately the opposite balance to Fenwick, because our traffic is lopsided:
-/// folding the primes kills every element of [1,z] exactly once (z ≈ 1.4e9 at
-/// 10^14) while the leaves only query a²/2 ≈ 2.4e7 times — ~60:1. Fenwick charges
-/// O(log S) for BOTH, so it taxes the hot side to subsidise the cold one.
-///
 /// Two levels: a bit per element, plus an alive-count per block of `wpb` words.
 /// A query sums whole-block counts then popcounts the words within its block, so
 /// its cost is nblocks + wpb — minimised at wpb = √nwords.
+///
+/// Beat Fenwick by 1.9× when adopted (α was 1.5 then, and kills outnumbered queries
+/// ~60:1, so paying O(log S) on the hot kill side to subsidise the cold query side
+/// was clearly wrong). NOTE the traffic has since shifted: at α=4 it is 5.4e8 kills
+/// vs 1.4e8 leaves at 10^14 — only ~4:1 by count, and in COST the queries now
+/// dominate the other way (1.4e8 × ~45 ≈ 6.3e9 vs 5.4e8). The Counter still wins
+/// (~6.8e9 vs Fenwick's ~1.2e10), but its margin no longer comes from where this
+/// comment used to claim.
+///
+/// UNTESTED HYPOTHESIS, given queries now dominate: a third level would make the
+/// query ~3·nwords^(1/3) instead of 2·√nwords — 43 vs 108 at 10^14 — for one extra
+/// counter decrement per kill. Worth ~20% on the model, and the model has been wrong
+/// five times running today, so measure before believing it.
 const Counter = struct {
     bits: []u64, // 1 = alive
     cnt: []u32, // cnt[k] = alive in block k
@@ -230,14 +244,22 @@ const Counter = struct {
 
 // --------------------------------------------------------------------- S2
 
-/// `walk` counts m-candidates scanned; `leaves` how many survived. The gap is the
-/// enumeration waste — we currently rescan (y/p_b, y] per b and reject most of it.
+/// `walk` counts m-candidates scanned; `leaves` how many survived. The gap was the
+/// enumeration waste (w/leaf ≈ 20, i.e. ~2·ln y): we rescanned (y/p_b, y] per b and
+/// rejected most of it. Fixed by the √y split below — w/leaf is now ≈ 1.12, so this
+/// pair is a regression guard rather than a live diagnostic.
 ///
 /// `easy` counts leaves where p_b² > v, i.e. no coprime composite is ≤ v, so
 /// φ(v, b−1) = 1 + π(v) − (b−1) — a π-lookup, no sieve query needed. Equivalently
 /// m·p_b³ > x, which is automatic once p_b > x^(1/3). A HARD leaf needs both
 /// m > y/p and m ≤ x/p³, possible only when p < √z = x^(1/3)/√α — a window that
-/// SHRINKS as α grows.
+/// SHRINKS as α grows. Measured: 93% easy at α=2, 99.2% at α=16, and hard/a²
+/// collapses, so the whole α² leaf growth is easy leaves.
+///
+/// DIAGNOSTIC ONLY — we do not branch on it. Resolving easy leaves via π(v) instead
+/// of the counter was tried and measured 5% SLOWER, and cannot help in principle:
+/// for an easy leaf the survivors ≤ v with lpf ≥ p_b are ALREADY just 1 plus the
+/// primes in [p_b, v], so ctr.prefix(v) IS φ(v,b−1). See s2AndP2Fused.
 pub const S2Result = struct { s2: i128, leaves: u64, z: u64, a: usize, walk: u64 = 0, easy: u64 = 0 };
 
 /// Special leaves S2 = Σ −μ(m)·φ(x/(m·p_b), b−1), by sweeping b = 1..a over a
@@ -291,9 +313,15 @@ pub fn specialS2(gpa: std.mem.Allocator, x: u64, y: u64) !S2Result {
 ///  • running φ per b: φ(v, b−1) = phi_run[b−1] + (alive in [lo, v]), where
 ///    phi_run[b−1] counts survivors in [1, lo) with p_1..p_{b−1} removed. Each
 ///    segment adds its own count to phi_run, so [1, lo) is never re-sieved.
-///  • descending m-cursor per prime: segments run lo ASCENDING, and v = x/(m·p)
-///    rises as m falls — so one cursor per p_b walks m down monotonically and
-///    every m is touched once in TOTAL, not once per segment.
+///  • descending cursor per prime: segments run lo ASCENDING, and v = x/(m·p) rises
+///    as m falls — so one cursor per p_b walks down monotonically and every candidate
+///    is touched once in TOTAL, not once per segment. Two regimes, split at √y (see
+///    the cursor init below): p > √y enumerates m = q prime straight from primes[],
+///    p ≤ √y walks m.
+///
+/// This is now piLMO's REFERENCE path, not its hot path — piLMO calls s2AndP2Fused,
+/// which additionally folds P₂ into this same sweep. Kept so the two can be
+/// differentially cross-checked.
 pub fn specialS2Segmented(gpa: std.mem.Allocator, x: u64, y: u64, seg: usize) !S2Result {
     var t = try SmallTables.init(gpa, y);
     defer t.deinit(gpa);
@@ -395,6 +423,11 @@ pub fn phiLMO(gpa: std.mem.Allocator, x: u64, y: u64, seg: ?usize) !PhiResult {
 
 /// P₂(x,y) = Σ_{y<p≤√x} (π(x/p) − π(p) + 1) — the n ≤ x that are a product of
 /// exactly two primes, both > y.
+///
+/// REFERENCE path only — piLMO uses s2AndP2Fused, which reads P₂ off the S2 counter
+/// and sieves the p-ranges on the fly. This version stores every prime ≤ √x, which is
+/// Θ(√x/ln x) (406 MB at 10^18); kept because it is independently verified and lets
+/// the fused path be differentially cross-checked.
 ///
 /// No Fenwick needed: this is the MONOTONE sweep. p ascending ⇔ x/p descending,
 /// so walking segments of [1, z] upward with a running π and a cursor that walks
@@ -506,14 +539,17 @@ pub fn s2AndP2Fused(gpa: std.mem.Allocator, x: u64, y: u64, seg: usize) !FusedRe
     const sqrt_x = common.isqrt(x);
     const sqrt_y = common.isqrt(y);
 
-    const bp = try rs.basePrimes(gpa, @max(sqrt_x, 2)); // segment sieve + P₂ cursor
-    defer gpa.free(bp);
-    const A: usize = bp.len; // π(√x)
-    var aP: usize = 0; // π(y), from the same list P₂ indexes
-    for (bp) |q| {
-        if (q <= y) aP += 1 else break;
-    }
+    // P₂ needs the primes in (y, √x] descending. We do NOT store them: for segment
+    // [lo, hi) the p with x/p ∈ [lo, hi) are exactly p ∈ (⌊x/hi⌋, ⌊x/lo⌋], and as lo
+    // sweeps upward those ranges TILE (y, √x] — disjoint, contiguous, each ≤ seg wide
+    // — so each is sieved on the fly from base primes ≤ x^(1/4). Storing π(√x) primes
+    // was Θ(√x/ln x): 406 MB at 10^18. This is ~27 KB.
+    const bp4 = try rs.basePrimes(gpa, @max(common.isqrt(sqrt_x), 2));
+    defer gpa.free(bp4);
+    const pbuf = try gpa.alloc(bool, seg); // p-range sieve; width ≤ seg always
+    defer gpa.free(pbuf);
     const do_p2 = y < sqrt_x;
+    var np: usize = 0; // primes found in (y, √x] ⇒ π(√x) = a + np
 
     var ctr = try Counter.init(gpa, seg);
     defer ctr.deinit(gpa);
@@ -533,7 +569,6 @@ pub fn s2AndP2Fused(gpa: std.mem.Allocator, x: u64, y: u64, seg: usize) !FusedRe
     var leaves: u64 = 0;
     var easy: u64 = 0;
     var walk: u64 = 0;
-    var p2idx: usize = A; // P₂ cursor, descending over bp
 
     var lo: u64 = 1;
     while (lo <= z) : (lo += seg) {
@@ -590,22 +625,37 @@ pub fn s2AndP2Fused(gpa: std.mem.Allocator, x: u64, y: u64, seg: usize) !FusedRe
         //     φ(v, a) = 1 + π(v) − a  ⇒  π(v) = φ(v,a) − 1 + a.
         seg_cnt[a] = ctr.total;
         if (do_p2) {
-            while (p2idx > aP) {
-                const p = bp[p2idx - 1];
-                const v = x / p;
-                if (v >= hi) break; // later segment
-                const phi_va = phi_run[a] + ctr.prefix(@intCast(v - lo));
-                sum_pi_xp += phi_va - 1 + @as(i64, @intCast(aP));
-                p2idx -= 1;
+            const p_hi = @min(x / lo, sqrt_x); // x/p ≥ lo ⇔ p ≤ ⌊x/lo⌋
+            const p_lo = @max(x / hi, y); //     x/p < hi ⇔ p > ⌊x/hi⌋
+            if (p_hi > p_lo) {
+                const w: usize = @intCast(p_hi - p_lo); // pbuf[i] ↔ p_lo+1+i
+                @memset(pbuf[0..w], true);
+                for (bp4) |q| {
+                    if (q * q > p_hi) break;
+                    var j = @max(q * q, ((p_lo + q) / q) * q); // ceil((p_lo+1)/q)·q
+                    while (j <= p_hi) : (j += q) pbuf[@intCast(j - p_lo - 1)] = false;
+                }
+                // descending p ⇒ v = x/p ascends, matching this segment
+                var k: usize = w;
+                while (k > 0) {
+                    k -= 1;
+                    if (!pbuf[k]) continue;
+                    const v = x / (p_lo + 1 + @as(u64, k));
+                    const phi_va = phi_run[a] + ctr.prefix(@intCast(v - lo));
+                    sum_pi_xp += phi_va - 1 + @as(i64, @intCast(a));
+                    np += 1;
+                }
             }
         }
         for (0..a + 1) |bi| phi_run[bi] += seg_cnt[bi];
     }
 
+    // Σ_{y<p≤√x} (π(p) − 1) = Σ_{j=a}^{A−1} j, since those p have indices a+1..A.
+    // A = π(√x) = a + np — counted as we went, never stored.
     var p2: i128 = 0;
-    if (do_p2 and A > aP) {
-        const Ai: i128 = @intCast(A);
-        const ai: i128 = @intCast(aP);
+    if (do_p2 and np > 0) {
+        const Ai: i128 = @intCast(a + np);
+        const ai: i128 = @intCast(a);
         p2 = sum_pi_xp - (@divExact((Ai - 1) * Ai, 2) - @divExact(ai * (ai - 1), 2));
     }
     return .{ .s2 = s2, .p2 = p2, .leaves = leaves, .easy = easy, .walk = walk, .z = z, .a = a };

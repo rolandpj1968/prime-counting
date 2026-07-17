@@ -493,10 +493,21 @@ a genuine interior optimum. Balancing them buys only ~ln^(2/3)x, though — extr
 at 10¹⁴ by the measured 0.68 gives **~2 h single-threaded at 10¹⁸**, so plain LMO is nowhere
 near single-digit seconds. That gap is what Deléglise–Rivat and parallelism must cover.
 
-**Open: P₂ is now the memory bottleneck.** It stores the primes ≤ √x — 5 MB at 10¹⁴ vs φ's
-890 KB — so total memory is Θ(√x/ln x), not Θ(x^(1/3)). Fix: each v-segment needs p ∈
-(x/hi, x/lo]; those ranges are disjoint, each ~S wide, and their union is exactly (y, √x], so
-sieve them on the fly instead of storing.
+**P₂'s memory: fixed, and free.** It stored every prime ≤ √x — Θ(√x/ln x), 5 MB at 10¹⁴ and
+386 MB at 10¹⁸ — which dominated everything else and gave back part of what segmenting won. But
+for segment [lo, hi) the p with x/p ∈ [lo, hi) are exactly **p ∈ (⌊x/hi⌋, ⌊x/lo⌋]**, and as lo
+sweeps upward those ranges **tile (y, √x]**: disjoint, contiguous, each provably ≤ seg wide. So
+each is sieved on the fly from base primes ≤ **x^(1/4)**, and π(√x) is just counted as we go
+(never stored) for the Σ(π(p)−1) closed form.
+
+| | 10¹⁴ | 10¹⁸ |
+|---|---:|---:|
+| primes ≤ √x (was) | 5.0 MB | 386.0 MB |
+| primes ≤ x^(1/4) (now) | 3.1 KB | 24.4 KB |
+| **total footprint** | **6.5 → 1.5 MB** | **416.9 → 30.8 MB** |
+
+Costs nothing in time (4101 vs 4134 ms at 10¹⁴ — the on-the-fly sieving is free), and total
+memory is now genuinely **Θ(x^(1/3))**, dominated by the μ/lpf tables at O(y).
 
 ## Sieve of Atkin vs Eratosthenes: op-count is the wrong metric (atkin.zig)
 Atkin toggles a bit per quadratic-form solution (4x²+y², 3x²+y², 3x²−y², mod-12
