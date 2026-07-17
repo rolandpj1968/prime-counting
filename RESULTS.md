@@ -380,6 +380,49 @@ primes in [p_b, v], so `ctr.prefix(v)` **is** φ(v,b−1) — the π-formula is 
 identical number, not a cheaper one. **So DR's gain cannot be cheap easy-leaf evaluation; it must
 be clustering** — consecutive q sharing a π value, i.e. *fewer* queries.
 
+**Segment size: already right, for a reason worth knowing.** S rode y from the start and was
+never swept. Predicted the counter's O(√S) query dominated, so S ≈ 2570 (~72× smaller) would win
+~2.8×. Measured: **S=y is within 0.2–1.4% of optimal**, and shrinking S is catastrophic.
+
+| seg (10¹⁴) | ~query | a·nsegs | total ms | vs best |
+|---:|---:|---:|---:|---:|
+| 2048 | 12 | 4.4×10⁹ | 13456 | +249.5% |
+| 8192 | 23 | 1.1×10⁹ | 6323 | +64.2% |
+| 32768 | 46 | 2.8×10⁸ | 4298 | +11.6% |
+| **131072** | 91 | 6.9×10⁷ | **3850** | **0.0%** |
+| 185660 (=y) | 108 | 4.9×10⁷ | 3904 | +1.4% |
+
+Optima are 32768/65536/131072 at 10¹²/10¹³/10¹⁴ ≈ **0.75y** — not worth a knob; S=y self-scales.
+The model was wrong because it priced the `a·z/S` fold at ~1 op. Back it out of the data: at
+S=32768 the query cost halves (91→46), which should save ~6×10⁹ ops, yet it runs *slower*. That
+only balances if each (segment, prime) fold step costs **~30 cycles** — i.e. the
+`((lo+p−1)/p)·p` division. **That division is what pins S high**, and it is still ~12% of runtime
+at the optimum. Replacing it with a per-prime next-multiple cursor should un-pin S (≈32768 viable,
+queries halve) — model says ~2×. A lock on a knob, not a 12% cleanup.
+
+**Parallelism: the leaves are wildly non-uniform.** Kills are uniform by construction (each
+element of [1,z] dies once), but leaves are not — measured at 10¹⁴:
+
+| decile of [1,z] | 1 | 2 | 5 | 10 |
+|---|---:|---:|---:|---:|
+| share of leaves | **99.72%** | 0.11% | 0.02% | 0.01% |
+
+Leaves are dominated by n = p·q with both primes large, so pq clusters near y² and v = x/(pq)
+clusters near x/y² — the very bottom of [1,z]. Since leaf queries dominate the work
+(~1.4×10⁸ × ~108 ops vs 5.4×10⁸ kills), **decile 1 holds ~90% of total work**: an equal-width
+block split would give one thread nearly everything. Blocks must be sized by leaf count, which is
+cheap to precompute.
+
+The prefix dependency is *not* an obstacle, and the P₂ fusion does not worsen it — both halves
+always had one (S2 needs phi_run[bi], standalone P₂ needed π(lo−1)); fusing merged two identical
+prefix problems into one. φ enters every leaf linearly, so a block-and-scan works: each thread
+takes a contiguous block, computes relative to phi_run = 0 at its start, and returns local S2 plus
+`block_total[bi]` and `mu_sum[bi] = Σ−μ(m)`; then
+S2 = Σ_t [local_t + Σ_bi phi_run_at_block_start[t][bi]·mu_sum[t][bi]], with
+phi_run_at_block_start[t] = Σ_{t'<t} block_total[t'] — O(nthreads × a) storage (~267k values at
+10¹⁴). **P₂ is easier fused than standalone**: π(v) = φ(v,a) − 1 + a makes its per-block
+correction a scalar (the count of p handled), not a per-bi vector.
+
 **Bug found by the small-x spot checks.** π(2) returned 2. y = 4·icbrt(2) = 4 **> x**, so
 a = π(4) = 2 counts the prime 3 > x, and π(x) = φ + a − 1 − P₂ over-counts. The invariant is
 **x^(1/3) ≤ y ≤ √x** — floor is the P₃ bound, ceiling keeps every p_a ≤ √x ≤ x. Always
