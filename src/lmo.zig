@@ -156,6 +156,54 @@ const Fenwick = struct {
     }
 };
 
+// ------------------------------------------------------------------- mod-30 wheel
+
+/// DR §9: "Precomputing the sieving by the first primes 2, 3, 5 saves some more time."
+///
+/// The profile said the fold is ~50% of cycles and that it is VOLUME, not
+/// misprediction: it runs Σ_p z/p ≈ 2.76z times but only z kills land, and the
+/// alive-check mispredicts at just 1.18%. The only lever is fewer iterations.
+///
+/// Key split: the wheel's STEPPING (which multiples to visit) is independent of the
+/// array's INDEXING (bit-per-integer vs 8-per-30). All the fold win is in the
+/// stepping, so we take that and leave the indexing — and hence every leaf/prefix
+/// path — untouched:
+///   Σ_{p≥7} (8/30)·z/p ≈ 0.46z   vs   Σ_{p≤y} z/p ≈ 2.76z   → ~6× fewer visits.
+const W30 = [8]u8{ 1, 7, 11, 13, 17, 19, 23, 29 }; // residues coprime to 30
+const W30GAP = [8]u8{ 6, 4, 2, 4, 2, 4, 6, 2 }; // 1→7→11→13→17→19→23→29→31; Σ = 30
+
+/// Bit pattern of "coprime to 30" over u64 words. lcm(30, 64) = 960 bits = 15 words,
+/// so a segment starting at a multiple of 960 has mask MASK30[w % 15].
+const MASK30: [15]u64 = blk: {
+    @setEvalBranchQuota(20000);
+    var m: [15]u64 = @splat(0);
+    for (0..15) |w| {
+        for (0..64) |i| {
+            const n = w * 64 + i;
+            const r = n % 30;
+            var coprime = true;
+            for ([_]u64{ 2, 3, 5 }) |q| {
+                if (r % q == 0) coprime = false;
+            }
+            if (coprime) m[w] |= @as(u64, 1) << @as(u6, @intCast(i));
+        }
+    }
+    break :blk m;
+};
+
+/// φ(v, b) for b ≤ 3 in closed form — meissel.zig's base cases. Leaves with
+/// p ∈ {2,3,5} need φ(v,0..2), which a 2·3·5-wheel cannot represent (it has already
+/// removed them). There are only ~0.5y such leaves (~93k of 141M at 10^14).
+/// b=3 is the wheel's own initial state, so the counter answers that one directly.
+inline fn phiSmall(v: u64, b: usize) i64 {
+    return switch (b) {
+        0 => @intCast(v),
+        1 => @intCast(v - v / 2),
+        2 => @intCast(v - v / 2 - v / 3 + v / 6),
+        else => unreachable,
+    };
+}
+
 // -------------------------------------------------------------- alive-counter
 
 /// Alive-set over one segment: **O(1) kill**, O(√S) prefix count, O(1) total.
@@ -350,19 +398,24 @@ pub const Counter3P = struct {
         gpa.free(self.cnt1);
         gpa.free(self.cnt2);
     }
+    /// Reset to the mod-30 WHEEL state — 2, 3, 5 already struck — not all-ones.
+    /// Requires the segment to start at a multiple of 960 = lcm(30, 64) so the mask
+    /// is word-aligned. This is φ(·, 3), so the b-loop starts at bi = 3.
     fn reset(self: *Counter3P, len: usize) void {
         const nw = (len + 63) / 64;
-        @memset(self.bits[0..nw], ~@as(u64, 0));
-        if (len % 64 != 0) self.bits[nw - 1] = (@as(u64, 1) << @as(u6, @intCast(len % 64))) - 1;
+        for (0..nw) |w| self.bits[w] = MASK30[w % 15];
+        if (len % 64 != 0) self.bits[nw - 1] &= (@as(u64, 1) << @as(u6, @intCast(len % 64))) - 1;
         @memset(self.bits[nw..self.nwords], 0);
         @memset(self.cnt1, 0);
         @memset(self.cnt2, 0);
+        var tot: i64 = 0;
         for (self.bits, 0..) |word, w| {
             const c: u32 = @popCount(word);
             self.cnt1[w >> self.s1] += c;
             self.cnt2[(w >> self.s1) >> self.s2] += c;
+            tot += c;
         }
-        self.total = @intCast(len);
+        self.total = tot;
     }
     inline fn kill(self: *Counter3P, i: usize) void {
         const w = i >> 6;
@@ -669,6 +722,7 @@ inline fn leafPhi(
     ctr: anytype,
     phi_run: []const i64,
 ) i64 {
+    if (bi <= 2) return phiSmall(v, bi); // p ∈ {2,3,5}: the wheel cannot answer these
     if (v <= y and p * p > v) {
         const piv: i64 = pi_tab[@intCast(v)];
         return 1 + @max(0, piv - @as(i64, @intCast(bi)));
@@ -715,6 +769,10 @@ pub fn s2AndP2Fused(gpa: std.mem.Allocator, x: u64, y: u64, seg: usize) !FusedRe
 
 /// Generic over the alive-counter, so variants can be measured head to head.
 pub fn s2AndP2FusedGen(comptime C: type, gpa: std.mem.Allocator, x: u64, y: u64, seg: usize) !FusedResult {
+    // Segments must start at a multiple of 960 = lcm(30, 64) for MASK30 to be
+    // word-aligned, so round the segment length up to one.
+    const segw = @max(@as(usize, 960), ((seg + 959) / 960) * 960);
+
     var t = try SmallTables.init(gpa, y);
     defer t.deinit(gpa);
     const z = x / y;
@@ -729,12 +787,12 @@ pub fn s2AndP2FusedGen(comptime C: type, gpa: std.mem.Allocator, x: u64, y: u64,
     // was Θ(√x/ln x): 406 MB at 10^18. This is ~27 KB.
     const bp4 = try rs.basePrimes(gpa, @max(common.isqrt(sqrt_x), 2));
     defer gpa.free(bp4);
-    const pbuf = try gpa.alloc(bool, seg); // p-range sieve; width ≤ seg always
+    const pbuf = try gpa.alloc(bool, segw); // p-range sieve; width ≤ seg ≤ segw
     defer gpa.free(pbuf);
     const do_p2 = y < sqrt_x;
     var np: usize = 0; // primes found in (y, √x] ⇒ π(√x) = a + np
 
-    var ctr = try C.init(gpa, seg);
+    var ctr = try C.init(gpa, segw);
     defer ctr.deinit(gpa);
 
     // a+1 slots: [a] is the fully-folded state φ(·, a), which is what P₂ reads.
@@ -779,6 +837,18 @@ pub fn s2AndP2FusedGen(comptime C: type, gpa: std.mem.Allocator, x: u64, y: u64,
     }
     const s1_closed: i128 = @divTrunc(@as(i128, @intCast(n1)) * @as(i128, @intCast(n1 -| 1)), 2);
 
+    // Wheel fold cursors: next[bi] = next multiple p·m (m coprime to 30) at or above
+    // the current lo; wpos[bi] = m's index in W30. Starts at m = 1, i.e. j = p.
+    // 2, 3 and 5 are never folded — MASK30 pre-strikes them in reset().
+    const next = try gpa.alloc(u64, a);
+    defer gpa.free(next);
+    const wpos = try gpa.alloc(u8, a);
+    defer gpa.free(wpos);
+    for (t.primes, 0..) |p32, bi| {
+        next[bi] = p32;
+        wpos[bi] = 0;
+    }
+
     const cur = try gpa.alloc(u64, a);
     defer gpa.free(cur);
     for (t.primes, 0..) |p32, bi| cur[bi] = if (p32 <= sqrt_y) y else a - 1;
@@ -789,16 +859,16 @@ pub fn s2AndP2FusedGen(comptime C: type, gpa: std.mem.Allocator, x: u64, y: u64,
     var easy: u64 = 0;
     var walk: u64 = 0;
 
-    var lo: u64 = 1;
-    while (lo <= z) : (lo += seg) {
-        const hi = @min(lo + seg, z + 1);
+    var lo: u64 = 0; // multiple of 960 throughout; k=0 is not coprime to 30, so dead
+    while (lo <= z) : (lo += segw) {
+        const hi = @min(lo + segw, z + 1);
         const len: usize = @intCast(hi - lo);
 
         // --- S2
         ctr.reset(len);
         for (t.primes, 0..) |p32, bi| {
             const p: u64 = p32;
-            seg_cnt[bi] = ctr.total;
+            if (bi >= 3) seg_cnt[bi] = ctr.total; // bi ≤ 2 is closed-form, no counter
 
             if (p <= sqrt_y) {
                 var m = cur[bi];
@@ -839,15 +909,30 @@ pub fn s2AndP2FusedGen(comptime C: type, gpa: std.mem.Allocator, x: u64, y: u64,
             // else p³ ≥ x: the whole class is s1_closed — nothing to enumerate, no
             // queries. We still fold p below: P₂ reads the FULLY folded counter.
 
-            var j = ((lo + p - 1) / p) * p;
-            while (j < hi) : (j += p) ctr.kill(@intCast(j - lo));
+            // Fold p, visiting ONLY multiples p·m with m coprime to 30 — that is the
+            // ~6× win (0.46z visits instead of 2.76z). The cursor persists across
+            // segments, so j ≥ lo always and no division is needed.
+            if (bi >= 3) {
+                var j = next[bi];
+                var wp = wpos[bi];
+                while (j < hi) {
+                    ctr.kill(@intCast(j - lo));
+                    j += p * W30GAP[wp];
+                    wp = (wp + 1) & 7;
+                }
+                next[bi] = j;
+                wpos[bi] = wp;
+            }
         }
 
         // --- P₂ off the SAME counter: all a primes are folded now, so
         //     φ(v, a) = 1 + π(v) − a  ⇒  π(v) = φ(v,a) − 1 + a.
         seg_cnt[a] = ctr.total;
         if (do_p2) {
-            const p_hi = @min(x / lo, sqrt_x); // x/p ≥ lo ⇔ p ≤ ⌊x/lo⌋
+            // lo = 0 in the first segment now (mask alignment), and x/0 traps. lo = 0
+            // means "no upper bound from lo", i.e. p_hi = √x — and that segment ends
+            // up empty anyway since v = x/p ≥ √x > hi for any p ≤ √x.
+            const p_hi = if (lo == 0) sqrt_x else @min(x / lo, sqrt_x); // x/p ≥ lo ⇔ p ≤ ⌊x/lo⌋
             const p_lo = @max(x / hi, y); //     x/p < hi ⇔ p > ⌊x/hi⌋
             if (p_hi > p_lo) {
                 const w: usize = @intCast(p_hi - p_lo); // pbuf[i] ↔ p_lo+1+i
@@ -869,7 +954,10 @@ pub fn s2AndP2FusedGen(comptime C: type, gpa: std.mem.Allocator, x: u64, y: u64,
                 }
             }
         }
-        for (0..a + 1) |bi| phi_run[bi] += seg_cnt[bi];
+        // @max guards tiny x: a = π(y) can be < 3 (y ≤ 4), where 3..a+1 would have
+        // start > end. Safe because a < 3 ⟹ y ≤ 4 ⟹ !do_p2, and every leaf there has
+        // bi ≤ 2 and is closed-form — the counter is never read.
+        for (3..@max(3, a + 1)) |bi| phi_run[bi] += seg_cnt[bi];
     }
 
     // Σ_{y<p≤√x} (π(p) − 1) = Σ_{j=a}^{A−1} j, since those p have indices a+1..A.

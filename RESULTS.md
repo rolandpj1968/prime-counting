@@ -299,7 +299,7 @@ closed form since those primes have indices a+1..A.
 | 10¹¹ | 4,118,054,813 | 0.09 s | 0.10 s | 1.1× | — |
 | 10¹² | 37,607,912,018 | 0.42 s | 0.69 s | 1.6× | 0.655 |
 | 10¹³ | 346,065,536,839 | 1.94 s | 5.81 s | 3.0× | 0.661 |
-| 10¹⁴ | 3,204,941,750,802 | 2.42 s | 41.3 s | **17.1×** | 0.654 |
+| 10¹⁴ | 3,204,941,750,802 | 1.59 s | 41.3 s | **26.0×** | 0.654 |
 | 10¹⁵ | 29,844,570,422,669 | 15.2 s | — (OOM) | — | 0.658 |
 | 10¹⁶ | 279,238,341,033,925 | 72.9 s | — (OOM) | — | **0.681** |
 
@@ -404,7 +404,8 @@ The 10¹⁴ column, step by step — each is a separate committed measurement:
 | → α = 4 | 4.13 s | 1.20× |
 | → 3-level counter, power-of-2 blocks | 3.54 s | 1.17× |
 | → class-(1) binomial (LMO p.555 / DR §6.1) | 2.83 s | 1.27× |
-| → π-table for classes (2)/(3)-easy | **2.42 s** | 1.17× |
+| → π-table for classes (2)/(3)-easy | 2.42 s | 1.17× |
+| → mod-30 wheel fold (DR §9) | **1.59 s** | 1.52× |
 
 ## What the papers actually say (literature/, read after the fact)
 
@@ -486,6 +487,55 @@ log x)… adds up to O(x^(2/3+ε))"*: the updates are the **dominant** term at x
 kill Counter here removes that log from the paper's leading cost — found not by cleverness but by
 measuring the 60:1 kill:query traffic. Our √y prime-m split also beats DR's x^(1/4) threshold
 (2·x^(1/6) ≈ 2000 vs 31,623 at 10¹⁸), though it is LMO Lemma 5.1's split rediscovered.
+
+## The profile, and the mod-30 wheel (DR §9)
+
+Nine cost models into this file, we finally ran `perf`. It disagreed with all of them.
+
+```
+IPC = 2.65 (measured)          L1-dcache miss 0.78%       branch-miss 2.94%
+
+CYCLES by source line          BRANCH MISSES by source line
+ 7.44%  lmo.zig:843  fold      13.72%  lmo.zig:370  if (bits[w] & b != 0)
+ 6.40%  lmo.zig:370  kill      12.01%  lmo.zig:375
+ 4.83%  lmo.zig:370            6.37%   lmo.zig:843
+ 4.30%  lmo.zig:375            4.36%   lmo.zig:371
+```
+
+**The fold and kill are ~50% of all cycles.** The leaves — the thing every optimisation above
+attacked — are the other half. And L1 misses at 0.78% are evidence *against* the a-array/L2 story
+for the residual exponent drift.
+
+**A falsified inference, from misreading our own profile.** "Line 370 = 13.72% of branch misses"
+looked like *unpredictable*, so the branch was removed (`alive = @intFromBool(...)`, subtract 0 or
+1 unconditionally). Measured **0.75× — a 33% regression**. The arithmetic: 13.72% of 137.8M is
+18.9M misses over ~1.6×10⁹ fold iterations = a **1.18% miss rate**. That branch is *highly*
+predictable — the already-dead pattern within one prime's strike loop is periodic, and TAGE
+handles it. It tops the chart because it **executes most**, not because it misses most. *Share of
+misses ≠ miss rate.* Reverted.
+
+**So the fold's 50% is VOLUME.** It runs Σ_p z/p ≈ 2.76z but only z kills land: **66% of visits
+hit an already-dead element**, and the predictor sees them coming. The only lever is fewer visits
+— which is DR §9: *"Precomputing the sieving by the first primes 2, 3, 5 saves some more time."*
+
+**The decomposition that made it cheap.** The wheel's *stepping* (which multiples to visit) is
+independent of the array's *indexing* (bit-per-integer vs 8-per-30). All the fold win is in the
+stepping, so take that and leave the indexing — and every leaf/prefix path — untouched:
+
+- `reset()` starts from a mod-30 mask instead of all-ones (lcm(30,64) = 960, so the u64 pattern
+  repeats every 15 words; segments align to 960). That state *is* φ(·,3).
+- Fold p ≥ 7 by stepping j = p·m over m coprime to 30 (gaps 6,4,2,4,2,4,6,2). 2/3/5 are never
+  folded at all.
+- Σ_{p≥7} (8/30)·z/p ≈ **0.46z visits vs 2.76z — 6× fewer**.
+- Leaves with p ∈ {2,3,5} need φ(v,0..2), which a 2·3·5-wheel cannot represent — but those are
+  meissel.zig's closed-form base cases, and there are only ~0.5y of them (~93k of 141M at 10¹⁴).
+
+**1.52× at 10¹⁴** (2422 → 1591 ms), growing with x (1.30× at 10⁹). π(10¹⁴) = **1.59 s, 26.0×
+Meissel**. Verified differentially: `specialS2Segmented` still uses an all-ones reset and a plain
+fold over every prime, and the wheel path matches it bit for bit.
+
+Two bugs the small-x sweep caught, both from `lo` now starting at 0 (mask alignment): `x / lo`
+trapped with SIGFPE, and `for (3..a+1)` had start > end when a = π(y) < 2.
 
 ## The α knob, where it is finally real (lmo.zig)
 
