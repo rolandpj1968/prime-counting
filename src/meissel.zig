@@ -127,20 +127,24 @@ fn phi(x: u64, a: usize, primes: []const u64, tbl: *const PiTable, zmax: u64, c:
     return phi(x, a - 1, primes, tbl, zmax, c) - phi(x / pa, a - 1, primes, tbl, zmax, c);
 }
 
-/// φ(x, π(x^(1/3))) — the oracle LMO's S1+S2 must reproduce.
-pub fn phiOfX(gpa: std.mem.Allocator, x: u64) !u64 {
+/// φ(x, π(y)) by the plain recursion — the ORACLE that LMO's S1+S2 must reproduce.
+/// Un-capped, so the table must cover the cutoff's full reach, v ≤ min(x, y²).
+pub fn phiOfXY(gpa: std.mem.Allocator, x: u64, y: u64) !u64 {
     if (x < 2) return 0;
-    const cbrt_x = icbrt(x);
-    const sqrt_x = common.isqrt(x);
-    const primes = try rs.basePrimes(gpa, sqrt_x);
+    const primes = try rs.basePrimes(gpa, @max(common.isqrt(x), y) + 1);
     defer gpa.free(primes);
     var a: usize = 0;
     for (primes) |p| {
-        if (p <= cbrt_x) a += 1 else break;
+        if (p <= y) a += 1 else break;
     }
-    var tbl = try PiTable.init(gpa, x / cbrt_x);
+    var tbl = try PiTable.init(gpa, @min(x, y *| y));
     defer tbl.deinit(gpa);
     return phi(x, a, primes, &tbl, std.math.maxInt(u64), null);
+}
+
+/// φ(x, π(x^(1/3))) — the oracle at the classical y.
+pub fn phiOfX(gpa: std.mem.Allocator, x: u64) !u64 {
+    return phiOfXY(gpa, x, icbrt(x));
 }
 
 /// Meissel–Lehmer with y as a free knob (a = π(y)), for the y-sweep experiment.
