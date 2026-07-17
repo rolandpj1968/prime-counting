@@ -771,12 +771,24 @@ pub const FusedResult = struct {
     a: usize,
 };
 
+/// Production path: diagnostics OFF. The `walk`/`leaves`/`easy` counters cost 3.3% at
+/// 10^14 and 9.3% at 10^9 (the share falls as the class-(1) binomial absorbs more
+/// leaves) — `easy` alone recomputes the `v <= y and p*p > v` test that leafPhi does
+/// again one line later. They are analysis instruments, not part of π(x).
 pub fn s2AndP2Fused(gpa: std.mem.Allocator, x: u64, y: u64, seg: usize) !FusedResult {
-    return s2AndP2FusedGen(Counter3P, gpa, x, y, seg);
+    return s2AndP2FusedGen(Counter3P, false, gpa, x, y, seg);
 }
 
-/// Generic over the alive-counter, so variants can be measured head to head.
-pub fn s2AndP2FusedGen(comptime C: type, gpa: std.mem.Allocator, x: u64, y: u64, seg: usize) !FusedResult {
+/// Diagnostics ON — `leaves` confirmed LMO Lemma 5.1 to 0.03% at 10^19, `walk` is the
+/// regression guard on the √y split, `easy` sized the π-table class. Kept, just not paid
+/// for on every run.
+pub fn s2AndP2FusedInstrumented(gpa: std.mem.Allocator, x: u64, y: u64, seg: usize) !FusedResult {
+    return s2AndP2FusedGen(Counter3P, true, gpa, x, y, seg);
+}
+
+/// Generic over the alive-counter and the instrumentation, so variants can be measured
+/// head to head and the counters cost nothing when off.
+pub fn s2AndP2FusedGen(comptime C: type, comptime INST: bool, gpa: std.mem.Allocator, x: u64, y: u64, seg: usize) !FusedResult {
     // Segments must start at a multiple of 960 = lcm(30, 64) for MASK30 to be
     // word-aligned, so round the segment length up to one.
     const segw = @max(@as(usize, 960), ((seg + 959) / 960) * 960);
@@ -866,6 +878,11 @@ pub fn s2AndP2FusedGen(comptime C: type, gpa: std.mem.Allocator, x: u64, y: u64,
     var leaves: u64 = 0;
     var easy: u64 = 0;
     var walk: u64 = 0;
+    if (!INST) { // keep them addressable so !INST does not trip "never mutated"
+        _ = &leaves;
+        _ = &easy;
+        _ = &walk;
+    }
 
     var lo: u64 = 0; // multiple of 960 throughout; k=0 is not coprime to 30, so dead
     while (lo <= z) : (lo += segw) {
@@ -884,14 +901,14 @@ pub fn s2AndP2FusedGen(comptime C: type, gpa: std.mem.Allocator, x: u64, y: u64,
                 while (m > mlo) {
                     const v = x / (m * p);
                     if (v >= hi) break;
-                    walk += 1;
+                    if (INST) walk += 1;
                     if (v >= lo) {
                         const mm = t.mu[@intCast(m)];
                         if (mm != 0 and t.lpf[@intCast(m)] > p) {
-                            if (v <= y and p * p > v) easy += 1;
+                            if (INST and v <= y and p * p > v) easy += 1;
                             const phi_v = leafPhi(v, p, bi, lo, y, pi_tab, &ctr, phi_run);
                             s2 += @as(i128, -mm) * @as(i128, phi_v);
-                            leaves += 1;
+                            if (INST) leaves += 1;
                         }
                     }
                     m -= 1;
@@ -904,11 +921,11 @@ pub fn s2AndP2FusedGen(comptime C: type, gpa: std.mem.Allocator, x: u64, y: u64,
                     const q: u64 = t.primes[@intCast(qi)];
                     const v = x / (p * q);
                     if (v >= hi) break;
-                    walk += 1;
+                    if (INST) walk += 1;
                     if (v >= lo) {
-                        if (v <= y and p * p > v) easy += 1;
+                        if (INST and v <= y and p * p > v) easy += 1;
                         s2 += @as(i128, leafPhi(v, p, bi, lo, y, pi_tab, &ctr, phi_run));
-                        leaves += 1;
+                        if (INST) leaves += 1;
                     }
                     qi -= 1;
                 }
@@ -980,7 +997,7 @@ pub fn s2AndP2FusedGen(comptime C: type, gpa: std.mem.Allocator, x: u64, y: u64,
     return .{
         .s2 = s2 + s1_closed,
         .p2 = p2,
-        .leaves = leaves + @as(u64, @intCast(s1_closed)),
+        .leaves = if (INST) leaves + @as(u64, @intCast(s1_closed)) else 0,
         .easy = easy,
         .walk = walk,
         .z = z,

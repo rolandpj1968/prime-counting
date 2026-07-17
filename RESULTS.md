@@ -299,7 +299,7 @@ closed form since those primes have indices a+1..A.
 | 10¹¹ | 4,118,054,813 | 0.09 s | 0.10 s | 1.1× | — |
 | 10¹² | 37,607,912,018 | 0.42 s | 0.69 s | 1.6× | 0.655 |
 | 10¹³ | 346,065,536,839 | 1.94 s | 5.81 s | 3.0× | 0.661 |
-| 10¹⁴ | 3,204,941,750,802 | 1.25 s | 41.3 s | **33.1×** | 0.654 |
+| 10¹⁴ | 3,204,941,750,802 | 1.21 s | 41.3 s | **34.2×** | 0.654 |
 | 10¹⁵ | 29,844,570,422,669 | 15.2 s | — (OOM) | — | 0.658 |
 | 10¹⁶ | 279,238,341,033,925 | 72.9 s | — (OOM) | — | **0.681** |
 
@@ -406,7 +406,8 @@ The 10¹⁴ column, step by step — each is a separate committed measurement:
 | → class-(1) binomial (LMO p.555 / DR §6.1) | 2.83 s | 1.27× |
 | → π-table for classes (2)/(3)-easy | 2.42 s | 1.17× |
 | → mod-30 wheel fold (DR §9) | 1.59 s | 1.52× |
-| → branchless kill (*after* the wheel) | **1.25 s** | 1.27× |
+| → branchless kill (*after* the wheel) | 1.25 s | 1.27× |
+| → gate the diagnostics behind comptime | **1.21 s** | 1.03× |
 
 ## What the papers actually say (literature/, read after the fact)
 
@@ -592,6 +593,19 @@ provides — and makes the P₂ fusion (criticised above as "optimising the 13% 
 that pins everything else") the right trade after all. Both halves of that judgement were wrong,
 and identically so: pricing a paper's design decision without pricing the data structure it was
 designed around.
+
+**The instrumentation was costing 3.3%.** Nobody had ever measured the measurement. The
+`walk`/`leaves`/`easy` counters sit in the hot leaf loop, and `easy` recomputes the exact
+`v ≤ y and p*p > v` test that `leafPhi` does again one line later:
+
+| x | 10⁹ | 10¹¹ | 10¹² | 10¹³ | 10¹⁴ |
+|---|---:|---:|---:|---:|---:|
+| cost of diagnostics | 9.3% | 7.9% | 6.7% | 6.5% | **3.3%** |
+
+The share falls with x as the class-(1) binomial absorbs a growing fraction of leaves (they are
+counted arithmetically, not enumerated). Gated behind a comptime `INST` flag rather than deleted —
+`leaves` is what confirmed Lemma 5.1 to 0.03% at 10¹⁹, `walk` is the regression guard on the √y
+split, and `easy` sized the π-table class. Both paths verified to produce identical S₂ and P₂.
 
 ## The α knob, where it is finally real (lmo.zig)
 
