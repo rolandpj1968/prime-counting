@@ -457,6 +457,152 @@ pub fn p2Segmented(gpa: std.mem.Allocator, x: u64, y: u64, seg: usize) !i128 {
     return sum_pi_xp - sub;
 }
 
+// ------------------------------------------------------------- fused sweep
+
+/// S2 and P₂ from ONE pass over [1, z] — P₂ reads the SAME counter, for free.
+///
+/// After folding all a primes, the alive set in [1, z] is exactly {1} ∪ primes in
+/// (y, z]: any composite with lpf > y is ≥ lpf² > y², and y² > z whenever α > 1
+/// (y² = α²x^(2/3) vs z = x^(2/3)/α). So φ(v, a) = 1 + π(v) − a, i.e.
+///
+///     π(v) = φ(v, a) − 1 + a
+///
+/// and P₂'s π(x/p) is just a counter query at the end of each segment's b loop.
+/// That deletes P₂'s entire separate sweep over [1, z] at zero added cost.
+///
+/// NOTE — what does NOT work: resolving "easy" leaves (p² > v) via π(v) instead of
+/// the counter. For an easy leaf the survivors ≤ v with lpf ≥ p_b are ALREADY just
+/// 1 plus the primes in [p_b, v] (a composite would be ≥ p_b² > v), so ctr.prefix(v)
+/// IS φ(v,b−1) — the π-formula is a different route to the identical number, not a
+/// cheaper one. Building a flat O(1)-query prefix array to serve them measured 5%
+/// SLOWER: the build is O(z) but the queries are only the leaves, and z/leaves ≈ 27.
+/// DR's gain must therefore come from CLUSTERING (fewer queries), not cheaper ones.
+///
+/// `s2` and `p2` stay separate accumulators so each can be validated on its own
+/// against specialS2Segmented / p2Segmented rather than only end-to-end via π(x).
+pub const FusedResult = struct {
+    s2: i128,
+    p2: i128,
+    leaves: u64,
+    easy: u64,
+    walk: u64,
+    z: u64,
+    a: usize,
+};
+
+pub fn s2AndP2Fused(gpa: std.mem.Allocator, x: u64, y: u64, seg: usize) !FusedResult {
+    var t = try SmallTables.init(gpa, y);
+    defer t.deinit(gpa);
+    const z = x / y;
+    const a = t.a;
+    const sqrt_x = common.isqrt(x);
+    const sqrt_y = common.isqrt(y);
+
+    const bp = try rs.basePrimes(gpa, @max(sqrt_x, 2)); // segment sieve + P₂ cursor
+    defer gpa.free(bp);
+    const A: usize = bp.len; // π(√x)
+    var aP: usize = 0; // π(y), from the same list P₂ indexes
+    for (bp) |q| {
+        if (q <= y) aP += 1 else break;
+    }
+    const do_p2 = y < sqrt_x;
+
+    var ctr = try Counter.init(gpa, seg);
+    defer ctr.deinit(gpa);
+
+    // a+1 slots: [a] is the fully-folded state φ(·, a), which is what P₂ reads.
+    const phi_run = try gpa.alloc(i64, a + 1);
+    defer gpa.free(phi_run);
+    @memset(phi_run, 0);
+    const seg_cnt = try gpa.alloc(i64, a + 1);
+    defer gpa.free(seg_cnt);
+    const cur = try gpa.alloc(u64, a);
+    defer gpa.free(cur);
+    for (t.primes, 0..) |p32, bi| cur[bi] = if (p32 <= sqrt_y) y else a - 1;
+
+    var s2: i128 = 0;
+    var sum_pi_xp: i128 = 0;
+    var leaves: u64 = 0;
+    var easy: u64 = 0;
+    var walk: u64 = 0;
+    var p2idx: usize = A; // P₂ cursor, descending over bp
+
+    var lo: u64 = 1;
+    while (lo <= z) : (lo += seg) {
+        const hi = @min(lo + seg, z + 1);
+        const len: usize = @intCast(hi - lo);
+
+        // --- S2
+        ctr.reset(len);
+        for (t.primes, 0..) |p32, bi| {
+            const p: u64 = p32;
+            seg_cnt[bi] = ctr.total;
+
+            if (p <= sqrt_y) {
+                var m = cur[bi];
+                const mlo = y / p;
+                while (m > mlo) {
+                    const v = x / (m * p);
+                    if (v >= hi) break;
+                    walk += 1;
+                    if (v >= lo) {
+                        const mm = t.mu[@intCast(m)];
+                        if (mm != 0 and t.lpf[@intCast(m)] > p) {
+                            if (p * p > v) easy += 1;
+                            const phi_v = phi_run[bi] + ctr.prefix(@intCast(v - lo));
+                            s2 += @as(i128, -mm) * @as(i128, phi_v);
+                            leaves += 1;
+                        }
+                    }
+                    m -= 1;
+                }
+                cur[bi] = m;
+            } else {
+                var qi = cur[bi];
+                while (qi > bi) {
+                    const q: u64 = t.primes[@intCast(qi)];
+                    const v = x / (p * q);
+                    if (v >= hi) break;
+                    walk += 1;
+                    if (v >= lo) {
+                        if (p * p > v) easy += 1;
+                        s2 += @as(i128, phi_run[bi] + ctr.prefix(@intCast(v - lo)));
+                        leaves += 1;
+                    }
+                    qi -= 1;
+                }
+                cur[bi] = qi;
+            }
+
+            var j = ((lo + p - 1) / p) * p;
+            while (j < hi) : (j += p) ctr.kill(@intCast(j - lo));
+        }
+
+        // --- P₂ off the SAME counter: all a primes are folded now, so
+        //     φ(v, a) = 1 + π(v) − a  ⇒  π(v) = φ(v,a) − 1 + a.
+        seg_cnt[a] = ctr.total;
+        if (do_p2) {
+            while (p2idx > aP) {
+                const p = bp[p2idx - 1];
+                const v = x / p;
+                if (v >= hi) break; // later segment
+                const phi_va = phi_run[a] + ctr.prefix(@intCast(v - lo));
+                sum_pi_xp += phi_va - 1 + @as(i64, @intCast(aP));
+                p2idx -= 1;
+            }
+        }
+        for (0..a + 1) |bi| phi_run[bi] += seg_cnt[bi];
+    }
+
+    var p2: i128 = 0;
+    if (do_p2 and A > aP) {
+        const Ai: i128 = @intCast(A);
+        const ai: i128 = @intCast(aP);
+        p2 = sum_pi_xp - (@divExact((Ai - 1) * Ai, 2) - @divExact(ai * (ai - 1), 2));
+    }
+    return .{ .s2 = s2, .p2 = p2, .leaves = leaves, .easy = easy, .walk = walk, .z = z, .a = a };
+}
+
 // ---------------------------------------------------------------------- π(x)
 
 pub const PiResult = struct { pi: u64, phi: i128, p2: i128, y: u64, a: usize, z: u64, leaves: u64 };
@@ -466,8 +612,9 @@ pub fn piLMO(gpa: std.mem.Allocator, x: u64, y_in: ?u64, seg_in: ?usize) !PiResu
     if (x < 2) return .{ .pi = 0, .phi = 0, .p2 = 0, .y = 0, .a = 0, .z = 0, .leaves = 0 };
     const y = y_in orelse defaultY(x);
     const seg: usize = seg_in orelse @intCast(@max(y, 1024));
-    const f = try phiLMO(gpa, x, y, seg);
-    const p2 = try p2Segmented(gpa, x, y, seg);
-    const r = f.phi + @as(i128, @intCast(f.a)) - 1 - p2;
-    return .{ .pi = @intCast(r), .phi = f.phi, .p2 = p2, .y = y, .a = f.a, .z = f.z, .leaves = f.leaves };
+    const s1 = try ordinaryS1(gpa, x, y);
+    const f = try s2AndP2Fused(gpa, x, y, seg); // S2 and P₂ share one sweep of [1,z]
+    const phi = s1.s1 + f.s2;
+    const r = phi + @as(i128, @intCast(f.a)) - 1 - f.p2;
+    return .{ .pi = @intCast(r), .phi = phi, .p2 = f.p2, .y = y, .a = f.a, .z = f.z, .leaves = f.leaves };
 }
