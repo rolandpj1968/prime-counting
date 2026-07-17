@@ -136,6 +136,84 @@ const Fenwick = struct {
     }
 };
 
+// -------------------------------------------------------------- alive-counter
+
+/// Alive-set over one segment: **O(1) kill**, O(√S) prefix count, O(1) total.
+///
+/// Deliberately the opposite balance to Fenwick, because our traffic is lopsided:
+/// folding the primes kills every element of [1,z] exactly once (z ≈ 1.4e9 at
+/// 10^14) while the leaves only query a²/2 ≈ 2.4e7 times — ~60:1. Fenwick charges
+/// O(log S) for BOTH, so it taxes the hot side to subsidise the cold one.
+///
+/// Two levels: a bit per element, plus an alive-count per block of `wpb` words.
+/// A query sums whole-block counts then popcounts the words within its block, so
+/// its cost is nblocks + wpb — minimised at wpb = √nwords.
+const Counter = struct {
+    bits: []u64, // 1 = alive
+    cnt: []u32, // cnt[k] = alive in block k
+    wpb: usize, // words per block
+    nwords: usize,
+    total: i64, // alive in the whole segment — makes seg_cnt O(1)
+
+    fn init(gpa: std.mem.Allocator, seg: usize) !Counter {
+        const nwords = (seg + 63) / 64;
+        var wpb: usize = @intCast(common.isqrt(nwords));
+        if (wpb == 0) wpb = 1;
+        const nblocks = (nwords + wpb - 1) / wpb;
+        return .{
+            .bits = try gpa.alloc(u64, nwords),
+            .cnt = try gpa.alloc(u32, nblocks),
+            .wpb = wpb,
+            .nwords = nwords,
+            .total = 0,
+        };
+    }
+
+    fn deinit(self: *Counter, gpa: std.mem.Allocator) void {
+        gpa.free(self.bits);
+        gpa.free(self.cnt);
+    }
+
+    /// Mark [0, len) alive, everything above dead.
+    fn reset(self: *Counter, len: usize) void {
+        const nw = (len + 63) / 64;
+        @memset(self.bits[0..nw], ~@as(u64, 0));
+        if (len % 64 != 0) self.bits[nw - 1] = (@as(u64, 1) << @as(u6, @intCast(len % 64))) - 1;
+        @memset(self.bits[nw..self.nwords], 0);
+        for (self.cnt, 0..) |*c, k| {
+            var s: u32 = 0;
+            const w0 = k * self.wpb;
+            const w1 = @min(w0 + self.wpb, self.nwords);
+            for (w0..w1) |w| s += @popCount(self.bits[w]);
+            c.* = s;
+        }
+        self.total = @intCast(len);
+    }
+
+    inline fn kill(self: *Counter, i: usize) void {
+        const w = i >> 6;
+        const b = @as(u64, 1) << @as(u6, @intCast(i & 63));
+        if (self.bits[w] & b != 0) {
+            self.bits[w] &= ~b;
+            self.cnt[w / self.wpb] -= 1;
+            self.total -= 1;
+        }
+    }
+
+    /// Alive in [0, i] inclusive.
+    fn prefix(self: *const Counter, i: usize) i64 {
+        const w = i >> 6;
+        const blk = w / self.wpb;
+        var s: i64 = 0;
+        for (self.cnt[0..blk]) |c| s += c;
+        for (self.bits[blk * self.wpb .. w]) |word| s += @popCount(word);
+        const r: u6 = @intCast(i & 63);
+        const mask: u64 = if (r == 63) ~@as(u64, 0) else (@as(u64, 1) << (r + 1)) - 1;
+        s += @popCount(self.bits[w] & mask);
+        return s;
+    }
+};
+
 // --------------------------------------------------------------------- S2
 
 pub const S2Result = struct { s2: i128, leaves: u64, z: u64, a: usize };
@@ -200,10 +278,8 @@ pub fn specialS2Segmented(gpa: std.mem.Allocator, x: u64, y: u64, seg: usize) !S
     const z = x / y;
     const a = t.a;
 
-    var fen = try Fenwick.initAllOnes(gpa, seg);
-    defer fen.deinit(gpa);
-    const alive = try gpa.alloc(bool, seg + 1);
-    defer gpa.free(alive);
+    var ctr = try Counter.init(gpa, seg);
+    defer ctr.deinit(gpa);
 
     const phi_run = try gpa.alloc(i64, a); // survivors in [1, lo) per b−1
     defer gpa.free(phi_run);
@@ -221,14 +297,11 @@ pub fn specialS2Segmented(gpa: std.mem.Allocator, x: u64, y: u64, seg: usize) !S
     while (lo <= z) : (lo += seg) {
         const hi = @min(lo + seg, z + 1); // segment covers [lo, hi)
         const len: usize = @intCast(hi - lo);
-        @memset(alive[1 .. len + 1], true);
-        for (1..len + 1) |i| fen.t[i] = @intCast(Fenwick.lsb(i));
-        // zero the tail so prefix() over a short last segment stays exact
-        for (len + 1..seg + 1) |i| fen.t[i] = 0;
+        ctr.reset(len);
 
         for (t.primes, 0..) |p32, bi| {
             const p: u64 = p32; // p = p_b, b = bi+1; segment holds primes[0..bi) removed
-            seg_cnt[bi] = fen.prefix(len); // survivors here with p_1..p_{b−1} gone
+            seg_cnt[bi] = ctr.total; // survivors here with p_1..p_{b−1} gone — O(1)
 
             // walk m down while v = x/(m·p) stays inside this segment
             var m = m_cur[bi];
@@ -239,7 +312,7 @@ pub fn specialS2Segmented(gpa: std.mem.Allocator, x: u64, y: u64, seg: usize) !S
                 if (v >= lo) {
                     const mm = t.mu[@intCast(m)];
                     if (mm != 0 and t.lpf[@intCast(m)] > p) {
-                        const phi_v = phi_run[bi] + fen.prefix(@intCast(v - lo + 1));
+                        const phi_v = phi_run[bi] + ctr.prefix(@intCast(v - lo));
                         s2 += @as(i128, -mm) * @as(i128, phi_v);
                         leaves += 1;
                     }
@@ -250,13 +323,7 @@ pub fn specialS2Segmented(gpa: std.mem.Allocator, x: u64, y: u64, seg: usize) !S
 
             // fold p_b into this segment, ready for b+1
             var j = ((lo + p - 1) / p) * p; // first multiple of p at or above lo
-            while (j < hi) : (j += p) {
-                const idx: usize = @intCast(j - lo + 1);
-                if (alive[idx]) {
-                    alive[idx] = false;
-                    fen.add(idx, -1);
-                }
-            }
+            while (j < hi) : (j += p) ctr.kill(@intCast(j - lo));
         }
         for (0..a) |bi| phi_run[bi] += seg_cnt[bi];
     }

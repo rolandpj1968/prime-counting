@@ -296,10 +296,10 @@ closed form since those primes have indices a+1..A.
 
 | x | π(x) | LMO | Meissel | speedup | exponent |
 |---|------|----:|--------:|--------:|:--------:|
-| 10¹¹ | 4,118,054,813 | 0.16 s | 0.10 s | 0.6× | — |
-| 10¹² | 37,607,912,018 | 0.71 s | 0.69 s | 1.0× | 0.663 |
-| 10¹³ | 346,065,536,839 | 3.41 s | 5.81 s | 1.7× | 0.679 |
-| 10¹⁴ | 3,204,941,750,802 | 16.9 s | 41.3 s | **2.4×** | 0.697 |
+| 10¹¹ | 4,118,054,813 | 0.09 s | 0.10 s | 1.1× | — |
+| 10¹² | 37,607,912,018 | 0.42 s | 0.69 s | 1.6× | 0.655 |
+| 10¹³ | 346,065,536,839 | 1.94 s | 5.81 s | 3.0× | 0.661 |
+| 10¹⁴ | 3,204,941,750,802 | 8.91 s | 41.3 s | **4.6×** | 0.661 |
 
 - Exact at all 14 known values through 10¹⁴ plus 12 small-x / non-power-of-ten spot checks.
 - **Exponent 0.68 vs Meissel's 0.86** — the theoretical 2/3, achieved. Crossover ~10¹²; the
@@ -320,6 +320,25 @@ predicts the count almost exactly:
 
 So **leaves ≈ π(y)²/2 = Θ(x^(2/3)/ln²x)**, dominated by two-prime leaves n = p·q. At 10¹⁸ that
 is ~6.5×10⁹ leaves, not the 42.6×10⁹ the wrong convention predicted.
+
+**Fenwick was the wrong data structure — the traffic is lopsided.** Folding the primes
+kills every element of [1,z] exactly once (z ≈ 1.4×10⁹ at 10¹⁴), while the leaves only query
+a²/2 ≈ 2.4×10⁷ times — **~60:1**. Fenwick charges O(log S) for *both*, taxing the hot side to
+subsidise the cold one. Replaced with a two-level counter (a bit per element + an alive-count
+per block of √nwords words): **O(1) kill**, O(√S) query, O(1) segment total. That last one
+matters more than it looks — the old code spent a full `prefix(len)` per (segment, b), which
+is 1.4×10⁸ tree walks at 10¹⁴, now a single register read.
+
+| x | Fenwick | Counter | speedup |
+|---|--------:|--------:|--------:|
+| 10¹¹ | 155.2 ms | 93.8 ms | 1.65× |
+| 10¹² | 714.2 ms | 424.0 ms | 1.68× |
+| 10¹³ | 3408 ms | 1943 ms | 1.75× |
+| 10¹⁴ | 16947 ms | 8912 ms | **1.90×** |
+
+The gain *grows* with x, as it must when you drop a log factor off the dominant term — and it
+pulled the exponent from 0.68 to **0.66**, essentially the theoretical 2/3. The Fenwick is kept
+in the flat [1,z] path as a cross-check: flat (Fenwick) == segmented (Counter) == oracle.
 
 **Where the cost actually is.** Not the leaves — the *sieve*: z = 3.1×10⁸ at 10¹³ against
 6.0×10⁶ leaves. So α is a **real lever** here, unlike capped Meissel: z ~ 1/α but leaves ~ α²,
