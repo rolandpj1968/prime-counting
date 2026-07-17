@@ -41,6 +41,13 @@ phenomenon one level up: the u128-divide tax at 10²⁰ (2.5–2.9× per op, com
 independent of any cross-era guess, is that §7 and §6.5 measure net-negative **here** — a
 direct measurement on this machine, not an adjusted comparison.
 
+**π(10²⁰)** (u128, past 2⁶⁴) is running as of this writing; its target is the published
+2,220,819,602,560,918,840 (Gourdon 2001, in Oliveira e Silva 2006, Table IV) — an independent
+value, not a self-check. Oliveira's leaf taxonomy (trivial / easy / clustered-easy / hard),
+π-table over [1,y] for easy leaves, and empirical flat-basin α all match what was reconstructed
+here independently; clustered easy leaves are the one thing he implements and we measured
+net-negative, for the reason above.
+
 ## What worked: the optimisation ladder
 
 Each row is a separate committed measurement at 10¹⁴, in build order. 16.95 s → 1.21 s
@@ -393,9 +400,12 @@ found empirically, **is LMO's own prescription.** The α ~ log³x measured again
 *asymptotic space bound*, infeasible at 10¹⁸ anyway (log³x = 71,197 vs the y ≤ √x cap of
 α ≤ 1000). Six sweeps were compared to the wrong paper's constant.
 
-**Where we are ahead.** LMO's a(i,j) array is an unnamed Fenwick tree, and their §3.2 makes
-its updates the *dominant* term at x^(2/3)·log x. The O(1)-kill counter removes that log —
-found by measuring the 60:1 kill:query traffic, not by cleverness.
+**Where we are ahead of all three papers.** LMO's a(i,j) array is a Fenwick tree — Oliveira e
+Silva 2006 (the most implementation-focused treatment) names it as such and cites Fenwick [9]
+directly. All three (LMO, DR, Oliveira) keep **O(log z) on both update and query**; LMO §3.2
+makes the *updates* the dominant term at x^(2/3)·log x. Our O(1)-kill counter (O(√S) query,
+because kills outnumber queries ~60:1) removes that log from the leading cost — found by
+measuring the traffic, and not present in even the most practical prior implementation.
 
 ## DR §7's x^(1/4) bound: measured, and not worth it
 

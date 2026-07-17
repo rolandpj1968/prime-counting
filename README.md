@@ -160,6 +160,7 @@ Prime-counting methods:
 - D. H. Lehmer, "On the exact number of primes less than a given limit," *Illinois J. Math.* 3 (1959).
 - J. C. Lagarias, V. S. Miller, A. M. Odlyzko, "Computing π(x): the Meissel–Lehmer method," *Math. Comp.* 44 (1985).
 - M. Deléglise, J. Rivat, "Computing π(x): the Meissel, Lehmer, Lagarias, Miller, Odlyzko method," *Math. Comp.* 65 (1996).
+- T. Oliveira e Silva, "Computing π(x): the combinatorial method," *Revista do DETUA* 4:6 (2006) — the self-contained, C-code-level treatment of LMO/DR; independent π(10ⁿ) tables.
 - X. Gourdon, "Computation of π(x): improvements to the … method" (2001).
 - J. C. Lagarias, A. M. Odlyzko, "Computing π(x): an analytic method," *J. Algorithms* 8 (1987).
 
