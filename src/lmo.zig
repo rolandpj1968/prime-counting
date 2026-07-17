@@ -31,12 +31,29 @@ const common = @import("common.zig");
 const rs = @import("rangesieve.zig");
 
 fn icbrt(x: u64) u64 {
+    return icbrtG(u64, x);
+}
+
+/// floor(x^(1/3)) for x of any unsigned width; the root itself always fits u64
+/// (x ≤ 10²⁰ ⇒ root ≤ 4.7×10⁶). Cubes are formed in T so they don't overflow the
+/// narrow type at the top of the range.
+fn icbrtG(comptime T: type, x: T) u64 {
     if (x == 0) return 0;
     var r: u64 = @intFromFloat(std.math.pow(f64, @floatFromInt(x), 1.0 / 3.0));
     if (r == 0) r = 1;
-    while (r * r * r > x) r -= 1;
-    while ((r + 1) * (r + 1) * (r + 1) <= x) r += 1;
+    while (@as(T, r) * @as(T, r) * @as(T, r) > x) r -= 1;
+    while (@as(T, r + 1) * @as(T, r + 1) * @as(T, r + 1) <= x) r += 1;
     return r;
+}
+
+/// floor(√n) for n of any unsigned width; the root always fits u64 (n ≤ 10²⁰ ⇒
+/// root ≤ 10¹⁰). Squares are formed in T.
+fn isqrtG(comptime T: type, n: T) u64 {
+    if (n < 2) return @intCast(n);
+    var x: u64 = @intFromFloat(@sqrt(@as(f64, @floatFromInt(n))));
+    while (@as(T, x) * @as(T, x) > n) x -= 1;
+    while (@as(T, x + 1) * @as(T, x + 1) <= n) x += 1;
+    return x;
 }
 
 /// Default knob: y = 4·x^(1/3). Measured argmin at 10^11, 10^12, 10^13 and 10^14
@@ -54,8 +71,8 @@ fn icbrt(x: u64) u64 {
 /// high (π(2) returned 2 with y = 4·icbrt(2) = 4, which counts 3). So the invariant
 /// is x^(1/3) ≤ y ≤ √x — the floor is the P₃ bound, the ceiling keeps p_a ≤ √x ≤ x.
 /// Always satisfiable (icbrt ≤ isqrt), and it only binds below x = 4096.
-pub fn defaultY(x: u64) u64 {
-    return @min(icbrt(x) * 4, common.isqrt(x));
+pub fn defaultY(x: u128) u64 {
+    return @min(icbrtG(u128, x) * 4, isqrtG(u128, x));
 }
 
 // ---------------------------------------------------------------- small sieves
@@ -103,15 +120,22 @@ const SmallTables = struct {
 
 pub const Foundation = struct { s1: i128, a: usize, y: u64 };
 
-/// Ordinary leaves S1 = Σ_{n≤y} μ(n)⌊x/n⌋, and a = π(y).
+/// Ordinary leaves S1 = Σ_{n≤y} μ(n)⌊x/n⌋, and a = π(y). u64 entry point.
 pub fn ordinaryS1(gpa: std.mem.Allocator, x: u64, y: u64) !Foundation {
+    return ordinaryS1Gen(u64, gpa, x, y);
+}
+
+/// Generic over the value type X (u64 / u128). ⌊x/n⌋ ≤ x fits X; only the numerator
+/// is wide. The result ⌊x/n⌋ can exceed u64 for n small at x = 10²⁰, so it stays X
+/// until multiplied into the i128 accumulator.
+pub fn ordinaryS1Gen(comptime X: type, gpa: std.mem.Allocator, x: X, y: u64) !Foundation {
     var t = try SmallTables.init(gpa, y);
     defer t.deinit(gpa);
     var s1: i128 = 0;
     var n: u64 = 1;
     while (n <= y) : (n += 1) {
         const mn = t.mu[@intCast(n)];
-        if (mn != 0) s1 += @as(i128, mn) * @as(i128, @intCast(x / n));
+        if (mn != 0) s1 += @as(i128, mn) * @as(i128, @intCast(x / @as(X, n)));
     }
     return .{ .s1 = s1, .a = t.a, .y = y };
 }
@@ -776,28 +800,30 @@ pub const FusedResult = struct {
 /// leaves) — `easy` alone recomputes the `v <= y and p*p > v` test that leafPhi does
 /// again one line later. They are analysis instruments, not part of π(x).
 pub fn s2AndP2Fused(gpa: std.mem.Allocator, x: u64, y: u64, seg: usize) !FusedResult {
-    return s2AndP2FusedGen(Counter3P, false, gpa, x, y, seg);
+    return s2AndP2FusedGen(Counter3P, false, u64, gpa, x, y, seg);
 }
 
 /// Diagnostics ON — `leaves` confirmed LMO Lemma 5.1 to 0.03% at 10^19, `walk` is the
 /// regression guard on the √y split, `easy` sized the π-table class. Kept, just not paid
 /// for on every run.
 pub fn s2AndP2FusedInstrumented(gpa: std.mem.Allocator, x: u64, y: u64, seg: usize) !FusedResult {
-    return s2AndP2FusedGen(Counter3P, true, gpa, x, y, seg);
+    return s2AndP2FusedGen(Counter3P, true, u64, gpa, x, y, seg);
 }
 
-/// Generic over the alive-counter and the instrumentation, so variants can be measured
-/// head to head and the counters cost nothing when off.
-pub fn s2AndP2FusedGen(comptime C: type, comptime INST: bool, gpa: std.mem.Allocator, x: u64, y: u64, seg: usize) !FusedResult {
+/// Generic over the alive-counter, the instrumentation, and the value type X (u64 /
+/// u128 — the latter for x > 2⁶⁴, i.e. π(10²⁰)). Only x and the divisions with x in
+/// the numerator are X-wide; every quotient (z, v = x/(m·p), x/p) fits u64 and is cast
+/// down immediately, so y, a, primes, m, p, q and the whole counter stay u64.
+pub fn s2AndP2FusedGen(comptime C: type, comptime INST: bool, comptime X: type, gpa: std.mem.Allocator, x: X, y: u64, seg: usize) !FusedResult {
     // Segments must start at a multiple of 960 = lcm(30, 64) for MASK30 to be
     // word-aligned, so round the segment length up to one.
     const segw = @max(@as(usize, 960), ((seg + 959) / 960) * 960);
 
     var t = try SmallTables.init(gpa, y);
     defer t.deinit(gpa);
-    const z = x / y;
+    const z: u64 = @intCast(x / @as(X, y));
     const a = t.a;
-    const sqrt_x = common.isqrt(x);
+    const sqrt_x = isqrtG(X, x);
     const sqrt_y = common.isqrt(y);
 
     // P₂ needs the primes in (y, √x] descending. We do NOT store them: for segment
@@ -848,8 +874,8 @@ pub fn s2AndP2FusedGen(comptime C: type, comptime INST: bool, gpa: std.mem.Alloc
         }
     }
 
-    const c3 = icbrt(x);
-    const p_cube_min = if (c3 * c3 * c3 == x) c3 else c3 + 1;
+    const c3 = icbrtG(X, x);
+    const p_cube_min = if (@as(X, c3) * @as(X, c3) * @as(X, c3) == x) c3 else c3 + 1;
     var n1: u64 = 0;
     for (t.primes) |p32| {
         const p: u64 = p32;
@@ -899,7 +925,7 @@ pub fn s2AndP2FusedGen(comptime C: type, comptime INST: bool, gpa: std.mem.Alloc
                 var m = cur[bi];
                 const mlo = y / p;
                 while (m > mlo) {
-                    const v = x / (m * p);
+                    const v: u64 = @intCast(x / @as(X, m * p)); // ≤ z, fits u64
                     if (v >= hi) break;
                     if (INST) walk += 1;
                     if (v >= lo) {
@@ -919,7 +945,7 @@ pub fn s2AndP2FusedGen(comptime C: type, comptime INST: bool, gpa: std.mem.Alloc
                 var qi = cur[bi];
                 while (qi > bi) {
                     const q: u64 = t.primes[@intCast(qi)];
-                    const v = x / (p * q);
+                    const v: u64 = @intCast(x / @as(X, p * q)); // ≤ z, fits u64
                     if (v >= hi) break;
                     if (INST) walk += 1;
                     if (v >= lo) {
@@ -957,8 +983,8 @@ pub fn s2AndP2FusedGen(comptime C: type, comptime INST: bool, gpa: std.mem.Alloc
             // lo = 0 in the first segment now (mask alignment), and x/0 traps. lo = 0
             // means "no upper bound from lo", i.e. p_hi = √x — and that segment ends
             // up empty anyway since v = x/p ≥ √x > hi for any p ≤ √x.
-            const p_hi = if (lo == 0) sqrt_x else @min(x / lo, sqrt_x); // x/p ≥ lo ⇔ p ≤ ⌊x/lo⌋
-            const p_lo = @max(x / hi, y); //     x/p < hi ⇔ p > ⌊x/hi⌋
+            const p_hi = if (lo == 0) sqrt_x else @min(@as(u64, @intCast(x / @as(X, lo))), sqrt_x); // x/p ≥ lo ⇔ p ≤ ⌊x/lo⌋
+            const p_lo = @max(@as(u64, @intCast(x / @as(X, hi))), y); //     x/p < hi ⇔ p > ⌊x/hi⌋
             if (p_hi > p_lo) {
                 const w: usize = @intCast(p_hi - p_lo); // pbuf[i] ↔ p_lo+1+i
                 @memset(pbuf[0..w], true);
@@ -972,7 +998,7 @@ pub fn s2AndP2FusedGen(comptime C: type, comptime INST: bool, gpa: std.mem.Alloc
                 while (k > 0) {
                     k -= 1;
                     if (!pbuf[k]) continue;
-                    const v = x / (p_lo + 1 + @as(u64, k));
+                    const v: u64 = @intCast(x / @as(X, p_lo + 1 + @as(u64, k))); // = x/p ∈ [lo,hi)
                     const phi_va = phi_run[a] + ctr.prefix(@intCast(v - lo));
                     sum_pi_xp += phi_va - 1 + @as(i64, @intCast(a));
                     np += 1;
@@ -1010,12 +1036,23 @@ pub fn s2AndP2FusedGen(comptime C: type, comptime INST: bool, gpa: std.mem.Alloc
 pub const PiResult = struct { pi: u64, phi: i128, p2: i128, y: u64, a: usize, z: u64, leaves: u64 };
 
 /// π(x) = φ(x, a) + a − 1 − P₂(x, a), a = π(y) — LMO end to end.
-pub fn piLMO(gpa: std.mem.Allocator, x: u64, y_in: ?u64, seg_in: ?usize) !PiResult {
+/// π(x) end to end. Takes u128 so x can exceed 2⁶⁴ (π(10²⁰)); dispatches to the u64
+/// value type below the wall so the common case pays no u128-division tax. Everything
+/// but x and its divisions stays u64 — see s2AndP2FusedGen.
+pub fn piLMO(gpa: std.mem.Allocator, x: u128, y_in: ?u64, seg_in: ?usize) !PiResult {
     if (x < 2) return .{ .pi = 0, .phi = 0, .p2 = 0, .y = 0, .a = 0, .z = 0, .leaves = 0 };
     const y = y_in orelse defaultY(x);
-    const seg: usize = seg_in orelse @intCast(@max(y, 1024));
-    const s1 = try ordinaryS1(gpa, x, y);
-    const f = try s2AndP2Fused(gpa, x, y, seg); // S2 and P₂ share one sweep of [1,z]
+    const seg: usize = seg_in orelse @max(y, 1024);
+    if (x <= std.math.maxInt(u64)) {
+        return piImpl(u64, gpa, @intCast(x), y, seg);
+    } else {
+        return piImpl(u128, gpa, x, y, seg);
+    }
+}
+
+fn piImpl(comptime X: type, gpa: std.mem.Allocator, x: X, y: u64, seg: usize) !PiResult {
+    const s1 = try ordinaryS1Gen(X, gpa, x, y);
+    const f = try s2AndP2FusedGen(Counter3P, false, X, gpa, x, y, seg); // S2 and P₂ share one sweep of [1,z]
     const phi = s1.s1 + f.s2;
     const r = phi + @as(i128, @intCast(f.a)) - 1 - f.p2;
     return .{ .pi = @intCast(r), .phi = phi, .p2 = f.p2, .y = y, .a = f.a, .z = f.z, .leaves = f.leaves };
