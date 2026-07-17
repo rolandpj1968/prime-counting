@@ -308,7 +308,16 @@ closed form since those primes have indices a+1..A.
 0.1 MB.
 
 | 10¹⁷ | 2,623,557,157,654,233 | 369.3 s | — (OOM) | — | 0.705 |
-| 10¹⁸ | **24,739,954,287,740,860** | 1686.1 s (28.1 min) | — (OOM) | — | 0.660 |
+| 10¹⁸ | 24,739,954,287,740,860 | 1686.1 s (28.1 min) | — (OOM) | — | 0.660 |
+| 10¹⁹ | **234,057,667,276,344,607** | 8680.3 s (2.41 h) | — (OOM) | — | 0.712 |
+
+10¹⁹ is the **last power of ten reachable in u64** (x < 2^64 = 1.845e19; 10²⁰ is 5.4× over). The
+value matches M. Deléglise's 1996 computation — reproduced here on one core with the *predecessor*
+algorithm. Everything else has vast headroom (m·p ≈ 7.4e13, 250,000×; z as i64, 8e6×; lpf/primes
+u32 good to x ≈ 1e27), so going further needs u128 for **x, z and the divisions only**.
+
+**Lemma 5.1 confirmed to 0.03% at 167 billion leaves**: a = π(y) = 578,568 ⇒ ½π(y)² =
+167,370,465,312 vs measured **167,423,661,964**.
 
 **π(10¹⁸) exact, in 28.1 min and ~31 MB** — six decades past Meissel's ceiling, single-threaded.
 The leaf count came in at 40,105,355,244 against the a²/2 law's 40,090,000,000 (0.04%), a closing
@@ -328,13 +337,22 @@ differencing adjacent pairs:
 | 10¹⁵ .. 10¹⁸ | 0.6842 |
 | 10¹⁶ .. 10¹⁸ | 0.6822 |
 
-Overall it is **0.6715 — essentially the theoretical 2/3.** The 0.705 was read off 2-point deltas
-between *single, unrepeated* runs, and `0.705 then 0.660` is the exact signature of one slow run at
-10¹⁷: an outlier inflates the delta into it and deflates the delta out of it. Two elaborate
-mechanisms got built on that.
+With 10¹⁹ added (8 points):
 
-A **real but smaller drift does survive** — disjoint 4-point fits give 0.659 (10¹²–10¹⁵) → 0.684
-(10¹⁵–10¹⁸). So the question stands, at about half the claimed size. Both candidates remain live:
+| range | slope | points |
+|---|---:|---:|
+| 10¹² .. 10¹⁹ | **0.6755** | 8 |
+| 10¹² .. 10¹⁵ | 0.6586 | 4 |
+| 10¹⁵ .. 10¹⁹ | 0.6879 | 5 |
+| 10¹⁶ .. 10¹⁹ | 0.6887 | 4 |
+
+**The drift is real: 0.659 → 0.688, and the overall slope 0.6755 sits above 2/3.** The per-decade
+deltas (0.705, 0.660, 0.712) *alternate* — that is run-to-run noise on unrepeated runs, and it
+fooled the analysis twice in both directions: first into "the exponent is climbing to 0.705", then
+into "0.660 falsifies the drift". Neither 2-point delta was a measurement. Only the multi-point
+fits are, and they say the drift is genuine and mild. Roland predicted it; the data agrees.
+
+Candidate mechanisms, still unresolved:
 
 Two candidate mechanisms, **neither established**:
 
@@ -385,6 +403,52 @@ The 10¹⁴ column, step by step — each is a separate committed measurement:
 | → P₂ fused onto the counter | 4.97 s | 1.22× |
 | → α = 4 | 4.13 s | 1.20× |
 | → 3-level counter, power-of-2 blocks | **3.54 s** | 1.17× |
+
+## What the papers actually say (literature/, read after the fact)
+
+LMO 1985 (Math. Comp. 44, 537–560) and Deléglise–Rivat 1996 (Math. Comp. 65, 235–245), read only
+after the implementation was measured into its current shape. Scorecard:
+
+**Confirmed, derived independently here:**
+- **δ(n) = the SMALLEST prime factor** (DR eq. 10). Our P⁻ derivation from our own recursion was
+  right, and the earlier `maxpf` counter was the wrong convention.
+- **Our S2 is DR eq. (11)**, term for term.
+- **S₀ = Σ_{n≤y} μ(n)⌊x/n⌋ with φ(u,0) = [u]** — c=0 confirmed. LMO's own implementation uses a
+  wheel k=5; DR drops it to 0. Roland's instinct ("why not c=0 and be done") is DR's choice.
+- **x^(1/3) ≤ y ≤ x^(1/2)** is DR's stated precondition — the invariant the π(2) bug forced on us.
+- **DR = clustering**: *"many special leaves could be computed at the same time… saving a log x
+  factor… we show it is possible to compute more special leaves at the same time, saving another
+  log x factor."* The one claim asserted here without evidence, and it holds.
+- **LMO Lemma 5.1: "The number of special leaves is ½·π(y)² + O(y^(3/2)/log y)"** — exactly the
+  a²/2 law fitted empirically here (0.03% at 10¹⁹). Its proof *is* our √y enumeration split:
+  *"those for which δ(n) < √y and those for which δ(n) ≥ √y… in that case we must have n = pq."*
+- **LMO Truncation Rule T′: "x^(2/5) ≥ y ≥ x^(1/3)"** — Roland recalled this bound from memory,
+  including his uncertainty about the upper end. It is exact.
+
+**The α mystery, resolved.** LMO p. 556: *"We choose **y = c·x^(1/3)** which balances the sieving
+and calculating special leaves… (In the actual implementation, a good value of the constant **c
+was determined empirically**.)"* Our α_opt = 4, flat over five decades and found empirically, **is
+LMO's own prescription.** The α ~ log³x measured against here is DR's *asymptotic space bound*, and
+at 10¹⁸ it is infeasible anyway: log³x = 71,197 while y ≤ √x caps α at x^(1/6) = 1000. Six sweeps
+were not contradicting the literature — they were being compared to the wrong paper's constant.
+
+**What we missed, and it is large.** LMO p. 555 / DR §6.1: for **p > x^(1/3)**, x/(pq) < x^(1/3) < p
+so **φ(x/(pq), π(p)−1) = 1 identically** — not "a cheap lookup", *literally 1*. The whole class
+collapses to a binomial: S₁ = C(π(y) − π(x^(1/3)), 2), **constant time**. At α=4 that is **52% of
+our leaves** — 20.9 × 10⁹ counter queries at 10¹⁸ computing what is one formula. The "easy leaves
+cannot be cheaper" argument recorded above is true and irrelevant: for this class you do not
+evaluate φ, you *count* it. Our `easy` predicate (p² > v ⟺ m·p³ > x) is the weak version; the
+collapsing condition is **v < p ⟺ m·p² > x**. LMO's own "easy" is different again — x/(pq) ≤ y,
+readable from a π table over [1, y], which is O(x^(1/3)) and affordable; the prefix-array failure
+here assumed the table had to span [1, z].
+
+**Where we are ahead.** LMO's array a(i,j) in (3.9)–(3.10) — a binary hierarchy of counts, queried
+by decomposing l into powers of two — **is a Fenwick tree**, never named as such. LMO's own analysis
+says *"the number of updating operations of the array {a(i,j)} during each block takes O(x^(1/3)
+log x)… adds up to O(x^(2/3+ε))"*: the updates are the **dominant** term at x^(2/3)·log x. The O(1)
+kill Counter here removes that log from the paper's leading cost — found not by cleverness but by
+measuring the 60:1 kill:query traffic. Our √y prime-m split also beats DR's x^(1/4) threshold
+(2·x^(1/6) ≈ 2000 vs 31,623 at 10¹⁸), though it is LMO Lemma 5.1's split rediscovered.
 
 ## The α knob, where it is finally real (lmo.zig)
 
