@@ -299,7 +299,22 @@ closed form since those primes have indices a+1..A.
 | 10¹¹ | 4,118,054,813 | 0.09 s | 0.10 s | 1.1× | — |
 | 10¹² | 37,607,912,018 | 0.42 s | 0.69 s | 1.6× | 0.655 |
 | 10¹³ | 346,065,536,839 | 1.94 s | 5.81 s | 3.0× | 0.661 |
-| 10¹⁴ | 3,204,941,750,802 | 3.54 s | 41.3 s | **11.7×** | 0.657 |
+| 10¹⁴ | 3,204,941,750,802 | 3.34 s | 41.3 s | **12.4×** | 0.654 |
+| 10¹⁵ | 29,844,570,422,669 | 15.2 s | — (OOM) | — | 0.658 |
+| 10¹⁶ | 279,238,341,033,925 | 72.9 s | — (OOM) | — | **0.681** |
+
+10¹⁵ and 10¹⁶ are new ground — Meissel's ceiling was 10¹⁴, and it needed 73.8 MB there. LMO does
+10¹⁶ in **~6.9 MB**: μ/lpf tables 4.3 MB + a-sized arrays 1.6 MB + p-range buffer 0.9 MB + counter
+0.1 MB.
+
+**The exponent held at ~0.657 for three decades, then turned.** 0.660 / 0.654 / 0.658 through 10¹⁵
+— essentially the theoretical 2/3 — then **0.681 at 10¹⁶**. A 4% jump, too big to be noise.
+*Untested hypothesis*: the a-sized arrays (`phi_run`, `seg_cnt`, `cur` = a×24 B) are streamed once
+per segment, and they cross L2 exactly there — 403 KB at 10¹⁴ (fits the 512 KB L2), 812 KB at 10¹⁵,
+**1.6 MB at 10¹⁶**. Same structure that pins the segment size. Flagged, not claimed: the cost
+models in this file are 0-for-6 today.
+
+Extrapolating at the measured 0.68 puts 10¹⁸ at **~28 min** single-threaded (~25 min at 0.66).
 
 The 10¹⁴ column, step by step — each is a separate committed measurement:
 
