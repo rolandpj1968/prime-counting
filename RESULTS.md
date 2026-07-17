@@ -299,7 +299,45 @@ closed form since those primes have indices a+1..A.
 | 10¹¹ | 4,118,054,813 | 0.09 s | 0.10 s | 1.1× | — |
 | 10¹² | 37,607,912,018 | 0.42 s | 0.69 s | 1.6× | 0.655 |
 | 10¹³ | 346,065,536,839 | 1.94 s | 5.81 s | 3.0× | 0.661 |
-| 10¹⁴ | 3,204,941,750,802 | 8.91 s | 41.3 s | **4.6×** | 0.661 |
+| 10¹⁴ | 3,204,941,750,802 | 7.98 s | 41.3 s | **5.2×** | 0.657 |
+
+(LMO column at the tuned y = 2·x^(1/3); the exponent row is from the y = 1.5 sweep.)
+
+## The α knob, where it is finally real (lmo.zig)
+
+In capped Meissel α was nearly free — φ's leaf count barely moved, so the basin was flat. In
+LMO it is a **sharp interior optimum**, because the two terms genuinely fight:
+
+- z = x/y = x^(2/3)/α → sieve kills fall as **1/α**
+- leaves ≈ π(y)²/2 → rise as **α²**
+
+Segment size held fixed at x^(1/3) across the sweep, so this is one knob, not two:
+
+| α | z = x/y (10¹³) | leaves | φ ms | P₂ ms | total | vs best |
+|--:|---:|---:|---:|---:|---:|---:|
+| 1.0 | 464,166,357 | 2,939,588 | 2042 | 528 | 2570 | +35.8% |
+| 1.5 | 309,444,238 | 6,035,944 | 1667 | 341 | 2008 | +6.1% |
+| **2.0** | 232,083,178 | 10,182,481 | 1640 | 252 | **1892** | **0.0%** |
+| 3.0 | 154,722,119 | 20,976,262 | 1908 | 163 | 2072 | +9.5% |
+| 4.0 | 116,041,589 | 35,211,802 | 2475 | 122 | 2597 | +37.2% |
+| 16.0 | 29,010,397 | 437,536,611 | 22003 | 35 | 22038 | **+1064.7%** |
+
+- **α_opt = 2.0 at 10¹¹, 10¹² and 10¹³ alike** → now the default. Worth 6–7% in the sweep,
+  ~11% end-to-end (π(10¹⁴) 8.91 → 7.98 s).
+- The curve is **steeply asymmetric** — gentle below (+36% at α=1), catastrophic above
+  (+1065% at α=16). That is the α² leaf term, exactly as predicted.
+- **P₂ monotonically wants large α** (528 → 35 ms as z shrinks), but it is too small a share
+  to move the optimum.
+- **α_opt does not scale with x** — 2.0/2.0/2.0 over two decades, where α ~ log³x predicts a
+  ~1.65× rise. Same non-result as capped Meissel's flat 1.5. Two decades is not a law, but
+  there is no visible trend to extrapolate.
+
+**The measured confound (α=2.0 is a lower bound).** `w/leaf` runs 15–23, matching the ~2·ln y
+prediction: we rescan (y/p_b, y] per b and reject most of it, so the m-walk *also* rides α².
+At the optimum the walk (1.94×10⁸) is comparable to the entire kill count (2.3×10⁸) — about a
+third of φ is spent scanning m's it discards. At α=16 the walk is 1.0×10¹⁰ against 2.9×10⁷
+kills; it *is* the cost. Enumerating m properly (a per-lpf linked list, monotonically pruned as
+b rises, makes the walk O(leaves)) should push α_opt up.
 
 - Exact at all 14 known values through 10¹⁴ plus 12 small-x / non-power-of-ten spot checks.
 - **Exponent 0.68 vs Meissel's 0.86** — the theoretical 2/3, achieved. Crossover ~10¹²; the

@@ -36,9 +36,15 @@ fn icbrt(x: u64) u64 {
     return r;
 }
 
-/// Default knob: y = 1.5·x^(1/3) (see RESULTS.md — argmin at 10^11..10^13).
+/// Default knob: y = 2·x^(1/3). Measured argmin at 10^11, 10^12 and 10^13 alike
+/// (6-7% better than 1.5). Unlike capped Meissel this is a SHARP interior optimum:
+/// z = x/y falls as 1/α but the leaves ~ π(y)²/2 rise as α², so the curve is
+/// gentle below (+36% at α=1) and brutal above (+1065% at α=16).
+///
+/// Caveat: the m-walk waste (see S2Result.walk) also rides α², so this argmin is a
+/// LOWER bound — enumerating m properly should push it up.
 pub fn defaultY(x: u64) u64 {
-    return icbrt(x) * 3 / 2;
+    return icbrt(x) * 2;
 }
 
 // ---------------------------------------------------------------- small sieves
@@ -216,7 +222,9 @@ const Counter = struct {
 
 // --------------------------------------------------------------------- S2
 
-pub const S2Result = struct { s2: i128, leaves: u64, z: u64, a: usize };
+/// `walk` counts m-candidates scanned; `leaves` how many survived. The gap is the
+/// enumeration waste — we currently rescan (y/p_b, y] per b and reject most of it.
+pub const S2Result = struct { s2: i128, leaves: u64, z: u64, a: usize, walk: u64 = 0 };
 
 /// Special leaves S2 = Σ −μ(m)·φ(x/(m·p_b), b−1), by sweeping b = 1..a over a
 /// sieve of [1, z], z = x/y, that holds exactly p_1..p_{b−1} removed at step b.
@@ -292,6 +300,7 @@ pub fn specialS2Segmented(gpa: std.mem.Allocator, x: u64, y: u64, seg: usize) !S
 
     var s2: i128 = 0;
     var leaves: u64 = 0;
+    var walk: u64 = 0;
 
     var lo: u64 = 1;
     while (lo <= z) : (lo += seg) {
@@ -309,6 +318,7 @@ pub fn specialS2Segmented(gpa: std.mem.Allocator, x: u64, y: u64, seg: usize) !S
             while (m > mlo) {
                 const v = x / (m * p);
                 if (v >= hi) break; // belongs to a later segment
+                walk += 1;
                 if (v >= lo) {
                     const mm = t.mu[@intCast(m)];
                     if (mm != 0 and t.lpf[@intCast(m)] > p) {
@@ -327,16 +337,16 @@ pub fn specialS2Segmented(gpa: std.mem.Allocator, x: u64, y: u64, seg: usize) !S
         }
         for (0..a) |bi| phi_run[bi] += seg_cnt[bi];
     }
-    return .{ .s2 = s2, .leaves = leaves, .z = z, .a = a };
+    return .{ .s2 = s2, .leaves = leaves, .z = z, .a = a, .walk = walk };
 }
 
-pub const PhiResult = struct { phi: i128, s1: i128, s2: i128, leaves: u64, z: u64, a: usize, y: u64 };
+pub const PhiResult = struct { phi: i128, s1: i128, s2: i128, leaves: u64, z: u64, a: usize, y: u64, walk: u64 = 0 };
 
 /// φ(x, π(y)) = S1 + S2 — the LMO decomposition end to end.
 pub fn phiLMO(gpa: std.mem.Allocator, x: u64, y: u64, seg: ?usize) !PhiResult {
     const f = try ordinaryS1(gpa, x, y);
     const s = if (seg) |sz| try specialS2Segmented(gpa, x, y, sz) else try specialS2(gpa, x, y);
-    return .{ .phi = f.s1 + s.s2, .s1 = f.s1, .s2 = s.s2, .leaves = s.leaves, .z = s.z, .a = s.a, .y = y };
+    return .{ .phi = f.s1 + s.s2, .s1 = f.s1, .s2 = s.s2, .leaves = s.leaves, .z = s.z, .a = s.a, .y = y, .walk = s.walk };
 }
 
 // ---------------------------------------------------------------------- P₂
