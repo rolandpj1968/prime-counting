@@ -224,7 +224,13 @@ const Counter = struct {
 
 /// `walk` counts m-candidates scanned; `leaves` how many survived. The gap is the
 /// enumeration waste — we currently rescan (y/p_b, y] per b and reject most of it.
-pub const S2Result = struct { s2: i128, leaves: u64, z: u64, a: usize, walk: u64 = 0 };
+///
+/// `easy` counts leaves where p_b² > v, i.e. no coprime composite is ≤ v, so
+/// φ(v, b−1) = 1 + π(v) − (b−1) — a π-lookup, no sieve query needed. Equivalently
+/// m·p_b³ > x, which is automatic once p_b > x^(1/3). A HARD leaf needs both
+/// m > y/p and m ≤ x/p³, possible only when p < √z = x^(1/3)/√α — a window that
+/// SHRINKS as α grows.
+pub const S2Result = struct { s2: i128, leaves: u64, z: u64, a: usize, walk: u64 = 0, easy: u64 = 0 };
 
 /// Special leaves S2 = Σ −μ(m)·φ(x/(m·p_b), b−1), by sweeping b = 1..a over a
 /// sieve of [1, z], z = x/y, that holds exactly p_1..p_{b−1} removed at step b.
@@ -301,6 +307,7 @@ pub fn specialS2Segmented(gpa: std.mem.Allocator, x: u64, y: u64, seg: usize) !S
     var s2: i128 = 0;
     var leaves: u64 = 0;
     var walk: u64 = 0;
+    var easy: u64 = 0;
 
     var lo: u64 = 1;
     while (lo <= z) : (lo += seg) {
@@ -325,6 +332,7 @@ pub fn specialS2Segmented(gpa: std.mem.Allocator, x: u64, y: u64, seg: usize) !S
                         const phi_v = phi_run[bi] + ctr.prefix(@intCast(v - lo));
                         s2 += @as(i128, -mm) * @as(i128, phi_v);
                         leaves += 1;
+                        if (p * p > v) easy += 1; // φ(v,b−1) = 1 + π(v) − (b−1)
                     }
                 }
                 m -= 1;
@@ -337,16 +345,16 @@ pub fn specialS2Segmented(gpa: std.mem.Allocator, x: u64, y: u64, seg: usize) !S
         }
         for (0..a) |bi| phi_run[bi] += seg_cnt[bi];
     }
-    return .{ .s2 = s2, .leaves = leaves, .z = z, .a = a, .walk = walk };
+    return .{ .s2 = s2, .leaves = leaves, .z = z, .a = a, .walk = walk, .easy = easy };
 }
 
-pub const PhiResult = struct { phi: i128, s1: i128, s2: i128, leaves: u64, z: u64, a: usize, y: u64, walk: u64 = 0 };
+pub const PhiResult = struct { phi: i128, s1: i128, s2: i128, leaves: u64, z: u64, a: usize, y: u64, walk: u64 = 0, easy: u64 = 0 };
 
 /// φ(x, π(y)) = S1 + S2 — the LMO decomposition end to end.
 pub fn phiLMO(gpa: std.mem.Allocator, x: u64, y: u64, seg: ?usize) !PhiResult {
     const f = try ordinaryS1(gpa, x, y);
     const s = if (seg) |sz| try specialS2Segmented(gpa, x, y, sz) else try specialS2(gpa, x, y);
-    return .{ .phi = f.s1 + s.s2, .s1 = f.s1, .s2 = s.s2, .leaves = s.leaves, .z = s.z, .a = s.a, .y = y, .walk = s.walk };
+    return .{ .phi = f.s1 + s.s2, .s1 = f.s1, .s2 = s.s2, .leaves = s.leaves, .z = s.z, .a = s.a, .y = y, .walk = s.walk, .easy = s.easy };
 }
 
 // ---------------------------------------------------------------------- P₂
