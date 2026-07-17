@@ -268,6 +268,70 @@ the table is just z = x^(2/3)/α, which now **shrinks** with α:
   3+-factor d. LMO stops at that frontier unconditionally and pays a sieve query:
   ~4× *fewer* leaves (1.4 M vs 5.9 M at 10¹¹), each more expensive.
 
+## LMO end to end: the 2/3 exponent, in Θ(x^(1/3)) memory (lmo.zig)
+
+Leaf structure derived from *our* recursion, not from memory. φ(x,a)=φ(x,a−1)−φ(x/p_a,a−1)
+takes primes in **decreasing** index order, so with F(n,b) = μ(n)·φ(x/n,b):
+F(n,b) = F(n,b−1) + F(n·p_b,b−1) — the tree sums F exactly. Cut any child with n·p_b > y:
+
+- **Ordinary leaf** — n ≤ y reaches b=0 ⇒ μ(n)·⌊x/n⌋. Every squarefree n ≤ y gets there
+  (all prefixes ≤ n ≤ y), so S1 = Σ_{n≤y} μ(n)⌊x/n⌋. O(y), direct — and **c = 0 is exactly
+  right**, not a shortcut.
+- **Special leaf** — n = m·p, n > y ≥ m = n/p. Primes *descend* along the path, so the last
+  one multiplied is the **smallest**: p = P⁻(n), all of m's primes above it. ⇒
+  **S2 = Σ −μ(m)·φ(x/(m·p_b), b−1)** over p_b-rough squarefree m ∈ (y/p_b, y].
+
+The b−1 index is what makes the sieve work: at step b the sieve over [1, z], z = x/y, holds
+exactly p_1..p_{b−1}, so sweeping b = 1..a is one monotone prime-at-a-time removal and
+φ(v, b−1) is a prefix count. Every leaf has v = x/(m·p_b) ≤ z because m·p_b > y.
+
+**Segmentation** rests on two ideas: a *running φ per b* (φ(v,b−1) = phi_run[b−1] + alive in
+[lo,v]), so [1,lo) is never re-sieved; and a *descending m-cursor per prime* — segments run lo
+ascending and v = x/(m·p) rises as m falls, so every m is touched once in **total**, not once
+per segment.
+
+**P₂ needs no Fenwick**: it is the monotone sweep (p ascending ⇔ x/p descending). One linear
+walk per segment with a running count answers every π(x/p), and Σ(π(p)−1) collapses to a
+closed form since those primes have indices a+1..A.
+
+| x | π(x) | LMO | Meissel | speedup | exponent |
+|---|------|----:|--------:|--------:|:--------:|
+| 10¹¹ | 4,118,054,813 | 0.16 s | 0.10 s | 0.6× | — |
+| 10¹² | 37,607,912,018 | 0.71 s | 0.69 s | 1.0× | 0.663 |
+| 10¹³ | 346,065,536,839 | 3.41 s | 5.81 s | 1.7× | 0.679 |
+| 10¹⁴ | 3,204,941,750,802 | 16.9 s | 41.3 s | **2.4×** | 0.697 |
+
+- Exact at all 14 known values through 10¹⁴ plus 12 small-x / non-power-of-ten spot checks.
+- **Exponent 0.68 vs Meissel's 0.86** — the theoretical 2/3, achieved. Crossover ~10¹²; the
+  gap only widens.
+- **φ footprint 410 KB at 10¹³** vs capped Meissel's 73.8 MB — 180×, and Θ(x^(1/3)).
+- Segmenting made S2 *faster* as well as smaller: 2.5× vs the flat [1,z] version at 10¹¹
+  (132.9 → 336.4 ms), because the Fenwick went cache-resident.
+
+**Leaf law — and a correction.** An earlier counter used `maxpf` (p = P⁺(m), the *opposite*
+convention) and reported Θ(x^(2/3)/ln x). Against the real P⁻ set the ratio to x^(2/3)/ln x
+**drifts** (0.805 → 0.474), while the ratio to x^(2/3)/**ln²**x is **flat at ~12.0**, and a²/2
+predicts the count almost exactly:
+
+| x | a = π(y) | leaves | a²/2 | leaves/(x^(2/3)/ln²x) |
+|---|---:|---:|---:|---:|
+| 10⁸ | 125 | 7,815 | 7,813 | 12.31 |
+| 10¹¹ | 894 | 403,134 | 399,618 | 12.00 |
+
+So **leaves ≈ π(y)²/2 = Θ(x^(2/3)/ln²x)**, dominated by two-prime leaves n = p·q. At 10¹⁸ that
+is ~6.5×10⁹ leaves, not the 42.6×10⁹ the wrong convention predicted.
+
+**Where the cost actually is.** Not the leaves — the *sieve*: z = 3.1×10⁸ at 10¹³ against
+6.0×10⁶ leaves. So α is a **real lever** here, unlike capped Meissel: z ~ 1/α but leaves ~ α²,
+a genuine interior optimum. Balancing them buys only ~ln^(2/3)x, though — extrapolating 16.9 s
+at 10¹⁴ by the measured 0.68 gives **~2 h single-threaded at 10¹⁸**, so plain LMO is nowhere
+near single-digit seconds. That gap is what Deléglise–Rivat and parallelism must cover.
+
+**Open: P₂ is now the memory bottleneck.** It stores the primes ≤ √x — 5 MB at 10¹⁴ vs φ's
+890 KB — so total memory is Θ(√x/ln x), not Θ(x^(1/3)). Fix: each v-segment needs p ∈
+(x/hi, x/lo]; those ranges are disjoint, each ~S wide, and their union is exactly (y, √x], so
+sieve them on the fly instead of storing.
+
 ## Sieve of Atkin vs Eratosthenes: op-count is the wrong metric (atkin.zig)
 Atkin toggles a bit per quadratic-form solution (4x²+y², 3x²+y², 3x²−y², mod-12
 residues) → O(N/log log N) ops, *fewer* than Eratosthenes' O(N log log N).

@@ -24,6 +24,8 @@
 //! v = x/(m·p_b) ≤ z because m·p_b > y — one sieve range serves them all.
 
 const std = @import("std");
+const common = @import("common.zig");
+const rs = @import("rangesieve.zig");
 
 fn icbrt(x: u64) u64 {
     if (x == 0) return 0;
@@ -268,4 +270,93 @@ pub fn phiLMO(gpa: std.mem.Allocator, x: u64, y: u64, seg: ?usize) !PhiResult {
     const f = try ordinaryS1(gpa, x, y);
     const s = if (seg) |sz| try specialS2Segmented(gpa, x, y, sz) else try specialS2(gpa, x, y);
     return .{ .phi = f.s1 + s.s2, .s1 = f.s1, .s2 = s.s2, .leaves = s.leaves, .z = s.z, .a = s.a, .y = y };
+}
+
+// ---------------------------------------------------------------------- P₂
+
+/// P₂(x,y) = Σ_{y<p≤√x} (π(x/p) − π(p) + 1) — the n ≤ x that are a product of
+/// exactly two primes, both > y.
+///
+/// No Fenwick needed: this is the MONOTONE sweep. p ascending ⇔ x/p descending,
+/// so walking segments of [1, z] upward with a running π and a cursor that walks
+/// p DOWNWARD from √x visits every (p, x/p) exactly once. Within a segment the
+/// v = x/p arrive in ascending order too, so one linear walk with a running count
+/// answers every π(x/p) — O(z) total, no random access anywhere.
+///
+/// The π(p) half needs no lookup at all: primes in (y, √x] have indices a+1..A,
+/// so Σ(π(p)−1) = Σ_{j=a}^{A−1} j collapses to a closed form.
+pub fn p2Segmented(gpa: std.mem.Allocator, x: u64, y: u64, seg: usize) !i128 {
+    const sqrt_x = common.isqrt(x);
+    if (y >= sqrt_x) return 0; // no primes in (y, √x]
+    const primes = try rs.basePrimes(gpa, sqrt_x);
+    defer gpa.free(primes);
+
+    var a: usize = 0; // π(y)
+    for (primes) |p| {
+        if (p <= y) a += 1 else break;
+    }
+    const A: usize = primes.len; // π(√x)
+    if (A <= a) return 0;
+
+    const z = x / y;
+    const isprime = try gpa.alloc(bool, seg);
+    defer gpa.free(isprime);
+
+    var sum_pi_xp: i128 = 0;
+    var running_pi: i64 = 0; // π(lo − 1)
+    var idx: usize = A; // cursor: next p to process is primes[idx−1], descending
+
+    var lo: u64 = 1;
+    while (lo <= z) : (lo += seg) {
+        const hi = @min(lo + seg, z + 1);
+        const len: usize = @intCast(hi - lo);
+        @memset(isprime[0..len], true);
+        if (lo == 1) isprime[0] = false; // 1 is not prime
+        for (primes) |q| {
+            if (q * q >= hi) break;
+            var j = @max(q * q, ((lo + q - 1) / q) * q);
+            while (j < hi) : (j += q) isprime[@intCast(j - lo)] = false;
+        }
+
+        // v = x/p arrives ascending as p descends → one linear walk serves all
+        var walk: u64 = lo;
+        var cnt: i64 = 0; // primes in [lo, walk−1]
+        while (idx > a) {
+            const p = primes[idx - 1];
+            const v = x / p;
+            if (v >= hi) break; // this p belongs to a later segment
+            while (walk <= v) : (walk += 1) {
+                if (isprime[@intCast(walk - lo)]) cnt += 1;
+            }
+            sum_pi_xp += running_pi + cnt; // = π(x/p)
+            idx -= 1;
+        }
+        while (walk < hi) : (walk += 1) {
+            if (isprime[@intCast(walk - lo)]) cnt += 1;
+        }
+        running_pi += cnt;
+        if (idx <= a) break; // every p consumed
+    }
+
+    // Σ_{y<p≤√x} (π(p) − 1) = Σ_{j=a}^{A−1} j, since those p have indices a+1..A
+    const Ai: i128 = @intCast(A);
+    const ai: i128 = @intCast(a);
+    // both are products of consecutive integers, so both halves are exact
+    const sub = @divExact((Ai - 1) * Ai, 2) - @divExact(ai * (ai - 1), 2);
+    return sum_pi_xp - sub;
+}
+
+// ---------------------------------------------------------------------- π(x)
+
+pub const PiResult = struct { pi: u64, phi: i128, p2: i128, y: u64, a: usize, z: u64, leaves: u64 };
+
+/// π(x) = φ(x, a) + a − 1 − P₂(x, a), a = π(y) — LMO end to end.
+pub fn piLMO(gpa: std.mem.Allocator, x: u64, y_in: ?u64, seg_in: ?usize) !PiResult {
+    if (x < 2) return .{ .pi = 0, .phi = 0, .p2 = 0, .y = 0, .a = 0, .z = 0, .leaves = 0 };
+    const y = y_in orelse defaultY(x);
+    const seg: usize = seg_in orelse @intCast(@max(y, 1024));
+    const f = try phiLMO(gpa, x, y, seg);
+    const p2 = try p2Segmented(gpa, x, y, seg);
+    const r = f.phi + @as(i128, @intCast(f.a)) - 1 - p2;
+    return .{ .pi = @intCast(r), .phi = f.phi, .p2 = p2, .y = y, .a = f.a, .z = f.z, .leaves = f.leaves };
 }
