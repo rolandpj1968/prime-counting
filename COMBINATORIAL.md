@@ -48,6 +48,25 @@ value, not a self-check. Oliveira's leaf taxonomy (trivial / easy / clustered-ea
 here independently; clustered easy leaves are the one thing he implements and we measured
 net-negative, for the reason above.
 
+## Calibration against primecount (same machine, single thread)
+
+primecount (Kim Walisch, ~13 yr) is the reference combinatorial π(x). Its README benchmarks
+(π(10¹⁸) 1.58 s Gourdon / 3.72 s DR) are on a **32-core EPYC Zen4** — so the raw ~133–386×
+over our single-threaded mini-PC number is mostly cores, not code. Built primecount 8.6 from
+source and ran it **single-threaded on this box** to remove the machine and parallelism guesses:
+
+| x | ours 1T | primecount DR 1T | primecount Gourdon 1T | vs DR | vs Gourdon |
+|---|---:|---:|---:|---:|---:|
+| 10¹⁴ | 1.18 s | 0.351 s | 0.168 s | 3.4× | 7.0× |
+| 10¹⁶ | 23.16 s | 6.039 s | 2.595 s | 3.8× | 8.9× |
+
+So the ~133× raw gap vs their 32-thread EPYC decomposes as **~26× parallelism × ~1.3× machine ×
+3.8× implementation**. Same box, same thread, same algorithm class (DR), we are **3.8× off the
+reference** — the honest implementation-maturity gap (libdivide fast division, hand-tuned inner
+loops). Of the further gap to their *best*, **2.3× is the Gourdon algorithm** (their DR→Gourdon
+speedup), which we have not implemented. Priorities in order of payoff: parallelism (the ~26×,
+[scoped](#parallelism-measured-not-yet-built)), then Gourdon, then the 3.8× of division/micro-opt.
+
 ## What worked: the optimisation ladder
 
 Each row is a separate committed measurement at 10¹⁴, in build order. 16.95 s → 1.21 s
