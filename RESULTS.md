@@ -307,14 +307,44 @@ closed form since those primes have indices a+1..A.
 10¹⁶ in **~6.9 MB**: μ/lpf tables 4.3 MB + a-sized arrays 1.6 MB + p-range buffer 0.9 MB + counter
 0.1 MB.
 
-**The exponent held at ~0.657 for three decades, then turned.** 0.660 / 0.654 / 0.658 through 10¹⁵
-— essentially the theoretical 2/3 — then **0.681 at 10¹⁶**. A 4% jump, too big to be noise.
-*Untested hypothesis*: the a-sized arrays (`phi_run`, `seg_cnt`, `cur` = a×24 B) are streamed once
-per segment, and they cross L2 exactly there — 403 KB at 10¹⁴ (fits the 512 KB L2), 812 KB at 10¹⁵,
-**1.6 MB at 10¹⁶**. Same structure that pins the segment size. Flagged, not claimed: the cost
-models in this file are 0-for-6 today.
+| 10¹⁷ | 2,623,557,157,654,233 | 369.3 s | — (OOM) | — | **0.705** |
 
-Extrapolating at the measured 0.68 puts 10¹⁸ at **~28 min** single-threaded (~25 min at 0.66).
+**The exponent held at ~0.657 for three decades, then started climbing — and we do not know why.**
+0.660 / 0.654 / 0.658 through 10¹⁵ (essentially the theoretical 2/3), then **0.681** at 10¹⁶ and
+**0.705** at 10¹⁷. A trend, not noise.
+
+Two candidate mechanisms, **neither established**:
+
+1. *Cache*: the a-sized arrays (`phi_run`, `seg_cnt`, `cur` = a×24 B) are streamed once per
+   segment and cross the 512 KB L2 around there — 403 KB at 10¹⁴, 812 KB at 10¹⁵, 1.6 MB at 10¹⁶,
+   3.3 MB at 10¹⁷. Same structure that pins the segment size. But the arrays crossed at 10¹⁵ while
+   the exponent only turned at 10¹⁶.
+2. *Query growth*: the counter query is ~3·nwords^(1/3) with nwords = S/64 and S ≈ y ~ x^(1/3), so
+   **the query itself grows as x^(1/9)** — making leaves×query ~ x^(2/3+1/9)/ln²x = x^0.778/ln²x
+   against kills at exactly x^(2/3). S cannot simply be frozen to fix this: a·z/S would then grow
+   linearly, and S ~ x^(1/3) is precisely what holds that term at x^(2/3). The two constraints fight.
+
+**Two retractions.** (a) An α sweep at 10¹⁵/10¹⁶ was run as a "discriminating test" — cache would
+predict α_opt drops, query-growth that it holds. It discriminates nothing: at 10¹⁶ even α=2 leaves
+the arrays at 849 KB, **still outside L2**, so lowering α never restores residency. The hypothesis
+was never on trial. (b) The query-growth model was first reported as fitting the measured exponents
+across three decades. Recomputed with the actual power-of-two-rounded query costs (nwords
+2901/6250/13465/29010 → avg query 22/28.5/39/46.5) against the real leaf counts, it predicts
+**0.723 / 0.748 / 0.690** vs measured **0.658 / 0.681 / 0.705**. Direction right, magnitude wrong —
+not a fit, and it should not have been called one.
+
+**What is solid:** α_opt = 4.0 measured at 10¹¹, 10¹², 10¹³, 10¹⁴, 10¹⁵ and 10¹⁶ alike — five
+decades flat, where the literature's α ~ log³x demands a steady rise.
+
+| α (seg = x^(1/3) fixed) | 10¹⁵ | 10¹⁶ |
+|---|---:|---:|
+| 2 | +26.2% | +27.9% |
+| 3 | +4.6% | +6.0% |
+| **4** | **0.0%** | **0.0%** |
+| 6 | +11.0% | +9.8% |
+
+Extrapolating at the measured 0.705 puts 10¹⁸ at **~30 min** single-threaded — and if the exponent
+keeps climbing, worse.
 
 The 10¹⁴ column, step by step — each is a separate committed measurement:
 
