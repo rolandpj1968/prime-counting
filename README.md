@@ -66,7 +66,7 @@ How it earns the exponent and the footprint:
 - **mod-30 wheel fold** and P₂ **fused** onto the same counter (its primes sieved
   on the fly from x^(1/4) base primes, never stored — the last Θ(√x) term gone).
 
-The build was driven **empirically against the two source papers** ([RESULTS.md](RESULTS.md)
+The build was driven **empirically against the two source papers** ([COMBINATORIAL.md](COMBINATORIAL.md)
 has the full log). The most interesting results were the negatives: both of
 Deléglise–Rivat's headline optimisations — the x^(1/4) sieve bound (§7) and leaf
 *clustering* (§6.5) — measured **net-negative here**, because each amortises a cost
@@ -107,7 +107,7 @@ leaf count, not width) already measured.
 
 ## Empirical highlights
 
-Full detail and tables in [RESULTS.md](RESULTS.md). Two sieving results stand out.
+Full detail and tables in [SIEVING.md](SIEVING.md). Two sieving results stand out.
 
 ### Segmentation is about cache, and the cache is legible
 
