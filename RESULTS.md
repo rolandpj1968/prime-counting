@@ -299,7 +299,7 @@ closed form since those primes have indices a+1..A.
 | 10¹¹ | 4,118,054,813 | 0.09 s | 0.10 s | 1.1× | — |
 | 10¹² | 37,607,912,018 | 0.42 s | 0.69 s | 1.6× | 0.655 |
 | 10¹³ | 346,065,536,839 | 1.94 s | 5.81 s | 3.0× | 0.661 |
-| 10¹⁴ | 3,204,941,750,802 | 3.34 s | 41.3 s | **12.4×** | 0.654 |
+| 10¹⁴ | 3,204,941,750,802 | 2.83 s | 41.3 s | **14.6×** | 0.654 |
 | 10¹⁵ | 29,844,570,422,669 | 15.2 s | — (OOM) | — | 0.658 |
 | 10¹⁶ | 279,238,341,033,925 | 72.9 s | — (OOM) | — | **0.681** |
 
@@ -402,7 +402,8 @@ The 10¹⁴ column, step by step — each is a separate committed measurement:
 | → m-walk split at √y | 6.07 s | 1.31× |
 | → P₂ fused onto the counter | 4.97 s | 1.22× |
 | → α = 4 | 4.13 s | 1.20× |
-| → 3-level counter, power-of-2 blocks | **3.54 s** | 1.17× |
+| → 3-level counter, power-of-2 blocks | 3.54 s | 1.17× |
+| → class-(1) binomial (LMO p.555 / DR §6.1) | **2.83 s** | 1.27× |
 
 ## What the papers actually say (literature/, read after the fact)
 
@@ -432,7 +433,7 @@ LMO's own prescription.** The α ~ log³x measured against here is DR's *asympto
 at 10¹⁸ it is infeasible anyway: log³x = 71,197 while y ≤ √x caps α at x^(1/6) = 1000. Six sweeps
 were not contradicting the literature — they were being compared to the wrong paper's constant.
 
-**What we missed, and it is large.** LMO p. 555 / DR §6.1: for **p > x^(1/3)**, x/(pq) < x^(1/3) < p
+**What we missed — now implemented, 1.27×.** LMO p. 555 / DR §6.1: for **p > x^(1/3)**, x/(pq) < x^(1/3) < p
 so **φ(x/(pq), π(p)−1) = 1 identically** — not "a cheap lookup", *literally 1*. The whole class
 collapses to a binomial: S₁ = C(π(y) − π(x^(1/3)), 2), **constant time**. At α=4 that is **52% of
 our leaves** — 20.9 × 10⁹ counter queries at 10¹⁸ computing what is one formula. The "easy leaves
@@ -441,6 +442,20 @@ evaluate φ, you *count* it. Our `easy` predicate (p² > v ⟺ m·p³ > x) is th
 collapsing condition is **v < p ⟺ m·p² > x**. LMO's own "easy" is different again — x/(pq) ≤ y,
 readable from a π table over [1, y], which is O(x^(1/3)) and affordable; the prefix-array failure
 here assumed the table had to span [1, z].
+
+Implemented as S₁ = C(n₁, 2) with n₁ = #{primes p : p³ ≥ x, p ≤ y}. The threshold comes from icbrt,
+not `p*p*p`, which would overflow (p ≤ 4x^(1/3) ⇒ p³ ≤ 64x = 6.4×10²⁰ at 10¹⁹). Measured **1.27×**
+at 10¹²–10¹⁴ (3577 → 2827 ms at 10¹⁴). Less than the 52% leaf share implies — back out the ratio
+and leaf work is ~41% of runtime, the rest being kills, folds and per-segment overhead.
+
+Verified differentially, which is the point: the fused path never enumerates class (1), yet its S₂
+is bit-identical to `specialS2Segmented`, which enumerates every leaf — and the leaf *counts* match,
+so the binomial counts exactly the set it skips.
+
+**Still on the table** (LMO p.555 classes (2)–(3), DR §6.3–6.4): the *trivial* leaves — for
+√(x/y) < p ≤ x^(1/3), every q > x/p² also gives φ = 1, contributing Σ(π(y) − π(x/p²)) in O(x^(1/3))
+— and the *easy* leaves, x/(pq) ≤ y, readable straight from a π table over [1, y]. Both need that
+O(y) π table, which is the piece previously dismissed for the wrong reason.
 
 **Where we are ahead.** LMO's array a(i,j) in (3.9)–(3.10) — a binary hierarchy of counts, queried
 by decomposing l into powers of two — **is a Fenwick tree**, never named as such. LMO's own analysis

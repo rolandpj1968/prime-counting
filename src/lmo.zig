@@ -713,6 +713,29 @@ pub fn s2AndP2FusedGen(comptime C: type, gpa: std.mem.Allocator, x: u64, y: u64,
     @memset(phi_run, 0);
     const seg_cnt = try gpa.alloc(i64, a + 1);
     defer gpa.free(seg_cnt);
+    // LMO p.555 class (1) / DR §6.1 — THE BINOMIAL.
+    // If p³ ≥ x then for every q > p we have p²q > p³ ≥ x, hence x/(pq) < p. The only
+    // survivor ≤ x/(pq) coprime to p_1..p_{b−1} is 1 — a surviving prime would be
+    // ≥ p_b = p > x/(pq), and a coprime composite is ≥ p², bigger still. So
+    // φ(x/(pq), π(p)−1) = 1 IDENTICALLY: not a cheap lookup, literally 1. With m = q
+    // prime, μ(q) = −1 so −μ(m) = +1, and the entire class is one pair count:
+    //
+    //     S₁ = C(n₁, 2),   n₁ = #{primes p : p³ ≥ x, p ≤ y}
+    //
+    // ~52% of all leaves at α=4 (20.9e9 of 40.1e9 at 10^18) — constant time, no sieve,
+    // no queries. This is LMO Lemma 5.1's class (1) and DR's S₁.
+    //
+    // p*p*p would overflow (p ≤ y = 4x^(1/3) ⇒ p³ ≤ 64x = 6.4e20 at 10^19), so the
+    // threshold comes from icbrt: the least p with p³ ≥ x.
+    const c3 = icbrt(x);
+    const p_cube_min = if (c3 * c3 * c3 == x) c3 else c3 + 1;
+    var n1: u64 = 0;
+    for (t.primes) |p32| {
+        const p: u64 = p32;
+        if (p > sqrt_y and p >= p_cube_min) n1 += 1; // exactly the set skipped below
+    }
+    const s1_closed: i128 = @divTrunc(@as(i128, @intCast(n1)) * @as(i128, @intCast(n1 -| 1)), 2);
+
     const cur = try gpa.alloc(u64, a);
     defer gpa.free(cur);
     for (t.primes, 0..) |p32, bi| cur[bi] = if (p32 <= sqrt_y) y else a - 1;
@@ -753,7 +776,8 @@ pub fn s2AndP2FusedGen(comptime C: type, gpa: std.mem.Allocator, x: u64, y: u64,
                     m -= 1;
                 }
                 cur[bi] = m;
-            } else {
+            } else if (p < p_cube_min) {
+                // sparse: m = q prime in (p, y]. μ(q) = −1, so −μ(m) = +1.
                 var qi = cur[bi];
                 while (qi > bi) {
                     const q: u64 = t.primes[@intCast(qi)];
@@ -769,6 +793,8 @@ pub fn s2AndP2FusedGen(comptime C: type, gpa: std.mem.Allocator, x: u64, y: u64,
                 }
                 cur[bi] = qi;
             }
+            // else p³ ≥ x: the whole class is s1_closed — nothing to enumerate, no
+            // queries. We still fold p below: P₂ reads the FULLY folded counter.
 
             var j = ((lo + p - 1) / p) * p;
             while (j < hi) : (j += p) ctr.kill(@intCast(j - lo));
@@ -811,7 +837,16 @@ pub fn s2AndP2FusedGen(comptime C: type, gpa: std.mem.Allocator, x: u64, y: u64,
         const ai: i128 = @intCast(a);
         p2 = sum_pi_xp - (@divExact((Ai - 1) * Ai, 2) - @divExact(ai * (ai - 1), 2));
     }
-    return .{ .s2 = s2, .p2 = p2, .leaves = leaves, .easy = easy, .walk = walk, .z = z, .a = a };
+    // fold in the closed-form class; count its leaves so the a²/2 law still checks out
+    return .{
+        .s2 = s2 + s1_closed,
+        .p2 = p2,
+        .leaves = leaves + @as(u64, @intCast(s1_closed)),
+        .easy = easy,
+        .walk = walk,
+        .z = z,
+        .a = a,
+    };
 }
 
 // ---------------------------------------------------------------------- π(x)
