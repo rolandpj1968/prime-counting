@@ -36,15 +36,23 @@ fn icbrt(x: u64) u64 {
     return r;
 }
 
-/// Default knob: y = 2·x^(1/3). Measured argmin at 10^11, 10^12 and 10^13 alike
-/// (6-7% better than 1.5). Unlike capped Meissel this is a SHARP interior optimum:
-/// z = x/y falls as 1/α but the leaves ~ π(y)²/2 rise as α², so the curve is
-/// gentle below (+36% at α=1) and brutal above (+1065% at α=16).
+/// Default knob: y = 4·x^(1/3). Measured argmin at 10^11, 10^12, 10^13 and 10^14
+/// alike. An interior optimum, because the two terms fight: z = x/y falls as 1/α
+/// but the leaves ≈ π(y)²/2 rise as α².
 ///
-/// Caveat: the m-walk waste (see S2Result.walk) also rides α², so this argmin is a
-/// LOWER bound — enumerating m properly should push it up.
+/// It was 2 before the √y enumeration split. The old m-walk waste ALSO rode α², so
+/// removing it flattened the high-α side (α=8 cost +250%, now +41%) and let the
+/// optimum drift up — worth a further ~23%. α_opt has never scaled with x here:
+/// flat 1.5 in capped Meissel, flat 2, now flat 4 over four decades, where the
+/// literature's α ~ log³x would demand a steady rise.
+///
+/// y is clamped to √x. The identity π(x) = φ(x,a) + a − 1 − P₂ needs every one of
+/// the a primes to be ≤ x; y > x makes a count primes above x and π comes out too
+/// high (π(2) returned 2 with y = 4·icbrt(2) = 4, which counts 3). So the invariant
+/// is x^(1/3) ≤ y ≤ √x — the floor is the P₃ bound, the ceiling keeps p_a ≤ √x ≤ x.
+/// Always satisfiable (icbrt ≤ isqrt), and it only binds below x = 4096.
 pub fn defaultY(x: u64) u64 {
-    return icbrt(x) * 2;
+    return @min(icbrt(x) * 4, common.isqrt(x));
 }
 
 // ---------------------------------------------------------------- small sieves

@@ -299,9 +299,20 @@ closed form since those primes have indices a+1..A.
 | 10¹¹ | 4,118,054,813 | 0.09 s | 0.10 s | 1.1× | — |
 | 10¹² | 37,607,912,018 | 0.42 s | 0.69 s | 1.6× | 0.655 |
 | 10¹³ | 346,065,536,839 | 1.94 s | 5.81 s | 3.0× | 0.661 |
-| 10¹⁴ | 3,204,941,750,802 | 7.98 s | 41.3 s | **5.2×** | 0.657 |
+| 10¹⁴ | 3,204,941,750,802 | 4.13 s | 41.3 s | **10.0×** | 0.657 |
 
-(LMO column at the tuned y = 2·x^(1/3); the exponent row is from the y = 1.5 sweep.)
+The 10¹⁴ column, step by step — each is a separate committed measurement:
+
+| change | 10¹⁴ | vs prev |
+|---|---:|---:|
+| Fenwick, α=1.5 | 16.95 s | — |
+| → block Counter (O(1) kill) | 8.91 s | 1.90× |
+| → α = 2 | 7.98 s | 1.12× |
+| → m-walk split at √y | 6.07 s | 1.31× |
+| → P₂ fused onto the counter | 4.97 s | 1.22× |
+| → α = 4 | **4.13 s** | 1.20× |
+
+## The α knob, where it is finally real (lmo.zig)
 
 ## The α knob, where it is finally real (lmo.zig)
 
@@ -332,12 +343,48 @@ Segment size held fixed at x^(1/3) across the sweep, so this is one knob, not tw
   ~1.65× rise. Same non-result as capped Meissel's flat 1.5. Two decades is not a law, but
   there is no visible trend to extrapolate.
 
-**The measured confound (α=2.0 is a lower bound).** `w/leaf` runs 15–23, matching the ~2·ln y
-prediction: we rescan (y/p_b, y] per b and reject most of it, so the m-walk *also* rides α².
-At the optimum the walk (1.94×10⁸) is comparable to the entire kill count (2.3×10⁸) — about a
-third of φ is spent scanning m's it discards. At α=16 the walk is 1.0×10¹⁰ against 2.9×10⁷
-kills; it *is* the cost. Enumerating m properly (a per-lpf linked list, monotonically pruned as
-b rises, makes the walk O(leaves)) should push α_opt up.
+**The confound, and α_opt = 4 after fixing it.** `w/leaf` ran 15–23, matching the ~2·ln y
+prediction: we rescanned (y/p_b, y] per b and rejected most of it, so the m-walk *also* rode α².
+Fixed by splitting the enumeration at p = √y (see below): w/leaf → **1.12**. That flattened the
+high-α side — α=8 cost +250%, now +41% — and the optimum drifted **2 → 4**, worth a further 23%:
+
+|  | α=1 | α=2 | α=3 | **α=4** | α=5 | α=6 | α=8 | α=12 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 10¹² | +98.5% | +24.7% | +4.8% | **0.0%** | +2.1% | +10.0% | +36.3% | +109.6% |
+| 10¹³ | +105.2% | +24.0% | +5.6% | **0.0%** | +3.4% | +12.6% | +40.9% | +121.1% |
+| 10¹⁴ | +104.8% | +23.2% | +4.7% | **0.0%** | +4.1% | +13.1% | +45.5% | +136.6% |
+
+**α_opt still does not scale with x** — flat 1.5 in capped Meissel, then flat 2, now flat 4 over
+four decades, where α ~ log³x demands a steady rise. Three independent sweeps, same non-result.
+
+**Enumeration: split at √y.** A per-lpf linked list does NOT work — the valid-m set depends on b
+and we re-walk b inside every segment, so it would be rebuilt per segment at y·lnln y × nsegs ≈
+1.4×10⁹, *worse* than the 1.9×10⁸ walk it replaces. Instead:
+- **p > √y** — any p-rough m ≤ y is 1 or a prime (a composite would be ≥ lpf² > y), and m=1 fails
+  m·p > y. So m = q prime in (p, y], with m·p > y automatic. Enumerable straight from primes[] —
+  no walk, no rejects. This is the a²/2 bulk.
+- **p ≤ √y** — keep the walk; it now costs π(√y)·y ≈ 2×10⁶ instead of 1.9×10⁸.
+
+**P₂ fuses onto the same counter, for free.** After folding all a primes, the alive set in [1,z]
+is exactly {1} ∪ primes in (y, z] — a composite with lpf > y is ≥ y², and y² > z whenever α > 1.
+So π(v) = φ(v,a) − 1 + a, and P₂'s π(x/p) is a counter query at the end of each segment's b loop.
+P₂'s whole separate sweep disappears: 1.24×, more than its 13% share, because it deletes a prime
+sieve rather than just bookkeeping.
+
+**Falsified: "easy leaves are cheap".** Predicted that resolving easy leaves (p² > v) via π(v)
+from a flat O(1)-query prefix array would defuse the α² term. Measured **5% slower**, and the
+analysis says it never could work: (1) the build is O(z) but the queries are only the leaves, and
+z/leaves ≈ 27 — the Fenwick mistake inverted, optimise the query and pay on the build; (2) more
+fundamentally, for an easy leaf the survivors ≤ v with lpf ≥ p_b are *already* just 1 plus the
+primes in [p_b, v], so `ctr.prefix(v)` **is** φ(v,b−1) — the π-formula is a different route to the
+identical number, not a cheaper one. **So DR's gain cannot be cheap easy-leaf evaluation; it must
+be clustering** — consecutive q sharing a π value, i.e. *fewer* queries.
+
+**Bug found by the small-x spot checks.** π(2) returned 2. y = 4·icbrt(2) = 4 **> x**, so
+a = π(4) = 2 counts the prime 3 > x, and π(x) = φ + a − 1 − P₂ over-counts. The invariant is
+**x^(1/3) ≤ y ≤ √x** — floor is the P₃ bound, ceiling keeps every p_a ≤ √x ≤ x. Always
+satisfiable (icbrt ≤ isqrt) and only binds below x = 4096, which is why α=2 masked it. Now
+verified exhaustively for every x in [0, 5000].
 
 - Exact at all 14 known values through 10¹⁴ plus 12 small-x / non-power-of-ten spot checks.
 - **Exponent 0.68 vs Meissel's 0.86** — the theoretical 2/3, achieved. Crossover ~10¹²; the
