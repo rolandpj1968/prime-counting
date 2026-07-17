@@ -299,7 +299,7 @@ closed form since those primes have indices a+1..A.
 | 10¹¹ | 4,118,054,813 | 0.09 s | 0.10 s | 1.1× | — |
 | 10¹² | 37,607,912,018 | 0.42 s | 0.69 s | 1.6× | 0.655 |
 | 10¹³ | 346,065,536,839 | 1.94 s | 5.81 s | 3.0× | 0.661 |
-| 10¹⁴ | 3,204,941,750,802 | 1.59 s | 41.3 s | **26.0×** | 0.654 |
+| 10¹⁴ | 3,204,941,750,802 | 1.25 s | 41.3 s | **33.1×** | 0.654 |
 | 10¹⁵ | 29,844,570,422,669 | 15.2 s | — (OOM) | — | 0.658 |
 | 10¹⁶ | 279,238,341,033,925 | 72.9 s | — (OOM) | — | **0.681** |
 
@@ -405,7 +405,8 @@ The 10¹⁴ column, step by step — each is a separate committed measurement:
 | → 3-level counter, power-of-2 blocks | 3.54 s | 1.17× |
 | → class-(1) binomial (LMO p.555 / DR §6.1) | 2.83 s | 1.27× |
 | → π-table for classes (2)/(3)-easy | 2.42 s | 1.17× |
-| → mod-30 wheel fold (DR §9) | **1.59 s** | 1.52× |
+| → mod-30 wheel fold (DR §9) | 1.59 s | 1.52× |
+| → branchless kill (*after* the wheel) | **1.25 s** | 1.27× |
 
 ## What the papers actually say (literature/, read after the fact)
 
@@ -536,6 +537,36 @@ fold over every prime, and the wheel path matches it bit for bit.
 
 Two bugs the small-x sweep caught, both from `lo` now starting at 0 (mask alignment): `x / lo`
 trapped with SIGFPE, and `for (3..a+1)` had start > end when a = π(y) < 2.
+
+**Re-profiling after the wheel: the balance inverted.**
+
+```
+                        before wheel      after wheel
+instructions            29.6e9            11.5e9        2.6x fewer
+IPC                      2.65              1.74         WORSE
+branch-misses          137.8M            128.8M        barely moved
+branch-miss rate         2.94%             6.66%
+```
+
+2.6× fewer instructions bought only 1.5× the time, because the fold was the
+*ILP-friendly* half (independent strikes, predictable branches) and what remains is
+dependent loads and data-dependent branches. Branch misses barely moved — they were never
+the fold's, they were the leaves' — and at ~17 cycles they are now ~⅓ of runtime.
+
+**The same patch, reverted an hour earlier, is now a 27% win.** The branchless kill measured
+**0.75×** before the wheel and **1.27×** after. Nothing about the code changed; the *context* did:
+
+| | pre-wheel | post-wheel |
+|---|---:|---:|
+| kill alive-check miss rate | 1.18% | **9.0%** |
+| fold visits | 1.6×10⁹ | 2.5×10⁸ |
+
+The wheel deleted p = 2/3/5 — exactly the primes whose already-dead patterns are short and
+periodic, and which the predictor nailed. What is left is p ≥ 7, whose aliveness follows irregular
+factorisations. So the branch got 8× *less* predictable while the cost of removing it fell 6.4×.
+Both terms moved and the sign flipped. **An optimisation's sign can depend on another
+optimisation** — no amount of reasoning about "is this branch predictable" survives that, only
+re-measuring after each change.
 
 ## The α knob, where it is finally real (lmo.zig)
 

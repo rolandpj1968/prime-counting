@@ -417,16 +417,24 @@ pub const Counter3P = struct {
         }
         self.total = tot;
     }
+    /// BRANCHLESS — and this only became right AFTER the mod-30 wheel.
+    /// Pre-wheel it measured 0.75× (a 33% regression): the alive-check missed at just
+    /// 1.18%, because p=2/3/5 dominated the fold and their already-dead patterns are
+    /// short and periodic, so the predictor nailed them; paying 3 unconditional RMWs
+    /// over 1.6e9 visits to remove a 98.8%-correct branch was a bad trade.
+    /// The wheel deleted exactly those primes. What is left is p≥7, whose aliveness
+    /// follows irregular factorizations: the miss rate jumped to 9.0% (22.5M over
+    /// 2.5e8 visits, 38% of all branch misses) while visits fell 6.4×. Both terms
+    /// moved, so the trade flipped.
     inline fn kill(self: *Counter3P, i: usize) void {
         const w = i >> 6;
         const b = @as(u64, 1) << @as(u6, @intCast(i & 63));
-        if (self.bits[w] & b != 0) {
-            self.bits[w] &= ~b;
-            const blk = w >> self.s1;
-            self.cnt1[blk] -= 1;
-            self.cnt2[blk >> self.s2] -= 1;
-            self.total -= 1;
-        }
+        const alive: u32 = @intFromBool(self.bits[w] & b != 0);
+        self.bits[w] &= ~b;
+        const blk = w >> self.s1;
+        self.cnt1[blk] -= alive;
+        self.cnt2[blk >> self.s2] -= alive;
+        self.total -= @as(i64, alive);
     }
     fn prefix(self: *const Counter3P, i: usize) i64 {
         const w = i >> 6;
