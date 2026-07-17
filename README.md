@@ -46,12 +46,14 @@ run at the **2/3 exponent in Θ(x^(1/3)) memory**:
 | 10¹⁷ | 2,623,557,157,654,233 | 1.72 min | ~24 MB |
 | 10¹⁸ | 24,739,954,287,740,860 | 8.3 min | ~52 MB |
 | 10¹⁹ | 234,057,667,276,344,607 | 42.4 min | ~109 MB |
+| 10²⁰ | 2,220,819,602,560,918,840 | 3.44 h | ~230 MB |
 
 Least-squares scaling exponent **0.658**, just under the theoretical 2/3. π(10¹⁹)
 matches M. Deléglise's 1996 computation — reproduced here single-threaded in less
-time than his HP-730 took for a value **four decades smaller**. Sieving 10¹⁹ would
-take months; the lead over sieving *widens* with x, which is why records reach 10³⁰
-combinatorially and never by enumeration. 10¹⁹ is the last power of ten under 2⁶⁴.
+time than his HP-730 took for a value **four decades smaller**. Sieving 10²⁰ would
+take years; the lead over sieving *widens* with x, which is why records reach 10³⁰
+combinatorially and never by enumeration. 10²⁰ (2,220,819,602,560,918,840) is the first value
+past 2⁶⁴, reached via u128 with a ≤ few-% wide-arithmetic tax, matching the published value.
 
 How it earns the exponent and the footprint:
 

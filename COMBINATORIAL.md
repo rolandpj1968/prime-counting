@@ -22,9 +22,10 @@ each cross-checked differentially against an independent reference (`specialS2Se
 | 10¹⁷ | 2,623,557,157,654,233 | 1.72 min | 0.66 | ~24 MB |
 | 10¹⁸ | 24,739,954,287,740,860 | 8.3 min | 0.66 | ~52 MB |
 | 10¹⁹ | 234,057,667,276,344,607 | 42.4 min | 0.66 | ~109 MB |
+| 10²⁰ | 2,220,819,602,560,918,840 | 3.44 h | 0.69 | ~230 MB |
 
 Least-squares scaling exponent **0.658** over 10¹²–10¹⁹, just under the theoretical 2/3.
-π(10¹⁹) is the last power of ten under 2⁶⁴ and matches M. Deléglise's 1996 computation —
+π(10²⁰) is the first value **past 2⁶⁴** (via u128; π(10¹⁹) is the last under it) and matches the published value (Oliveira e Silva 2006 Table IV / Gourdon 2001). π(10¹⁹) matches M. Deléglise's 1996 computation —
 reproduced here single-threaded in less time than his HP-730 took for a value four
 decades smaller. We implement *neither* of DR's two log-factor optimisations
 (see [dead ends](#what-didnt-work-dead-ends-and-unhelpful-literature)) — they were made
@@ -41,9 +42,7 @@ phenomenon one level up: the u128-divide tax at 10²⁰ (2.5–2.9× per op, com
 independent of any cross-era guess, is that §7 and §6.5 measure net-negative **here** — a
 direct measurement on this machine, not an adjusted comparison.
 
-**π(10²⁰)** (u128, past 2⁶⁴) is running as of this writing; its target is the published
-2,220,819,602,560,918,840 (Gourdon 2001, in Oliveira e Silva 2006, Table IV) — an independent
-value, not a self-check. Oliveira's leaf taxonomy (trivial / easy / clustered-easy / hard),
+**π(10²⁰) = 2,220,819,602,560,918,840** (u128, past 2⁶⁴) — computed here in 3.44 h single-threaded and matching the published value (Gourdon 2001, in Oliveira e Silva 2006, Table IV), an independent check not a self-check. The u128-division tax landed ≤ a few % (10²⁰ sits on the existing 0.688 local drift) — exactly the modest, throughput-bound cost predicted, since divisions are OoO-overlapped and not the bottleneck. Oliveira's leaf taxonomy (trivial / easy / clustered-easy / hard),
 π-table over [1,y] for easy leaves, and empirical flat-basin α all match what was reconstructed
 here independently; clustered easy leaves are the one thing he implements and we measured
 net-negative, for the reason above.
