@@ -307,11 +307,34 @@ closed form since those primes have indices a+1..A.
 10¹⁶ in **~6.9 MB**: μ/lpf tables 4.3 MB + a-sized arrays 1.6 MB + p-range buffer 0.9 MB + counter
 0.1 MB.
 
-| 10¹⁷ | 2,623,557,157,654,233 | 369.3 s | — (OOM) | — | **0.705** |
+| 10¹⁷ | 2,623,557,157,654,233 | 369.3 s | — (OOM) | — | 0.705 |
+| 10¹⁸ | **24,739,954,287,740,860** | 1686.1 s (28.1 min) | — (OOM) | — | 0.660 |
 
-**The exponent held at ~0.657 for three decades, then started climbing — and we do not know why.**
-0.660 / 0.654 / 0.658 through 10¹⁵ (essentially the theoretical 2/3), then **0.681** at 10¹⁶ and
-**0.705** at 10¹⁷. A trend, not noise.
+**π(10¹⁸) exact, in 28.1 min and ~31 MB** — six decades past Meissel's ceiling, single-threaded.
+The leaf count came in at 40,105,355,244 against the a²/2 law's 40,090,000,000 (0.04%), a closing
+check on the leaf derivation.
+
+**The exponent: mostly 2/3, with a mild real drift — and a cautionary tale about 2-point deltas.**
+
+Per-decade exponents read 0.665 / 0.655 / 0.658 / 0.681 / **0.705** / 0.660. The middle of that was
+taken as a climb away from 2/3 and given two mechanistic explanations (below). Then 10¹⁸ came in at
+**0.660** and the story collapsed. Fitting *all seven points* by least squares instead of
+differencing adjacent pairs:
+
+| range | slope |
+|---|---:|
+| 10¹² .. 10¹⁸ | **0.6715** |
+| 10¹² .. 10¹⁵ | 0.6586 |
+| 10¹⁵ .. 10¹⁸ | 0.6842 |
+| 10¹⁶ .. 10¹⁸ | 0.6822 |
+
+Overall it is **0.6715 — essentially the theoretical 2/3.** The 0.705 was read off 2-point deltas
+between *single, unrepeated* runs, and `0.705 then 0.660` is the exact signature of one slow run at
+10¹⁷: an outlier inflates the delta into it and deflates the delta out of it. Two elaborate
+mechanisms got built on that.
+
+A **real but smaller drift does survive** — disjoint 4-point fits give 0.659 (10¹²–10¹⁵) → 0.684
+(10¹⁵–10¹⁸). So the question stands, at about half the claimed size. Both candidates remain live:
 
 Two candidate mechanisms, **neither established**:
 
@@ -324,7 +347,11 @@ Two candidate mechanisms, **neither established**:
    against kills at exactly x^(2/3). S cannot simply be frozen to fix this: a·z/S would then grow
    linearly, and S ~ x^(1/3) is precisely what holds that term at x^(2/3). The two constraints fight.
 
-**Two retractions.** (a) An α sweep at 10¹⁵/10¹⁶ was run as a "discriminating test" — cache would
+**Three retractions.** (0) The "climbing exponent" itself was over-read from 2-point deltas on
+unrepeated runs; least squares over all seven points says 0.6715 ≈ 2/3, with only a mild
+0.659 → 0.684 drift surviving. Single-decade deltas at 28 min/run are not a measurement — min-of-N
+and a fit over all points should have been the method from the start.
+(a) An α sweep at 10¹⁵/10¹⁶ was run as a "discriminating test" — cache would
 predict α_opt drops, query-growth that it holds. It discriminates nothing: at 10¹⁶ even α=2 leaves
 the arrays at 849 KB, **still outside L2**, so lowering α never restores residency. The hypothesis
 was never on trial. (b) The query-growth model was first reported as fitting the measured exponents
@@ -343,8 +370,9 @@ decades flat, where the literature's α ~ log³x demands a steady rise.
 | **4** | **0.0%** | **0.0%** |
 | 6 | +11.0% | +9.8% |
 
-Extrapolating at the measured 0.705 puts 10¹⁸ at **~30 min** single-threaded — and if the exponent
-keeps climbing, worse.
+Measured: 10¹⁸ took **28.1 min** single-threaded — close to the ~30 min the 0.705 extrapolation
+predicted, and to the ~25 min the 0.66 one did, which is itself a hint that a decade of argument
+over 0.66-vs-0.705 was arguing about noise.
 
 The 10¹⁴ column, step by step — each is a separate committed measurement:
 
