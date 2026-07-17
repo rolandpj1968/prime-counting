@@ -607,6 +607,36 @@ counted arithmetically, not enumerated). Gated behind a comptime `INST` flag rat
 `leaves` is what confirmed Lemma 5.1 to 0.03% at 10¹⁹, `walk` is the regression guard on the √y
 split, and `easy` sized the π-table class. Both paths verified to produce identical S₂ and P₂.
 
+**Fixed-trip prefix: theory confirmed, trade still loses.** `prefix()`'s three loops stop at
+sblk / blk / w — all functions of the query's position, so every exit branch is unpredictable by
+construction: 1.36 mispredicts per query, 39% of all branch misses, ~23 of ~62 cycles/query. Made
+them fixed-trip (walk a constant nsuper / 2^s2 / 2^s1 slots, mask the out-of-range ones to zero,
+pad the tree so the over-read is always zeros). Same trade as the branchless kill.
+
+```
+                    variable-trip      fixed-trip
+cycles                  5.01e9           5.42e9      +8%
+instructions           13.26e9          17.33e9      +31%
+branch-misses          56.7M            17.6M        -69%
+branch-miss rate         3.67%            1.01%
+IPC                      2.65             3.19
+```
+
+It removed **69% of every branch miss in the program** and IPC jumped 2.65 → 3.19 — the mechanism
+worked exactly as predicted. And it is **4.3% slower**. Backing the numbers out: the misses were
+worth ~0.87×10⁹ cycles (~17%, ≈22 cycles each), the extra 4.07×10⁹ instructions cost ~1.28×10⁹
+(~25%). **So prefix's 62 cycles/query are WORK-dominated, not mispredict-dominated** — the opposite
+of the branchless kill, and the reason that one won and this one loses.
+
+Also: `s += if (cond) v else 0` compiled to a **branch, not a cmov** (39M misses vs the AND-mask's
+17.6M, same instruction count, worse time). The `-@intFromBool(...)` AND-mask is the better form,
+and still not enough.
+
+**So the prefix opportunity is smaller than it looked.** SIMD is the only remaining path, and it is
+unpromising: the `cnt1`/`cnt2` u32 sums vectorise well, but the third loop needs popcount over 16
+u64s, and this box has AVX2 without **VPOPCNTDQ** — the `vpshufb` nibble-LUT is ~1.5 ops/u64
+against scalar `popcnt`'s 1/cycle throughput. Reverted.
+
 ## The α knob, where it is finally real (lmo.zig)
 
 ## The α knob, where it is finally real (lmo.zig)
