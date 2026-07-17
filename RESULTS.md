@@ -668,14 +668,46 @@ clustering cannot reach), and z = x/y shrinks 8× (5.4×10⁸ → 6.7×10⁷), t
 α=32 that is 2.25× more runs to buy 8× less fold and 11× fewer counter queries.
 
 **So DR's y = x^(1/3)·log³x is not a separate choice from clustering — it is what clustering pays
-for.** Our α_opt = 4 was measured on an implementation where every leaf costs a lookup; with the α²
-term flattened, the optimum should move a long way up. That is the first path here to a *large* win
-rather than a 5–10% shave.
+for.** Predicted on that basis that α_opt (measured at 4 on an implementation where every leaf costs
+a lookup) should move a long way up once the α² term is flattened.
 
-Risk on the record: **the dense m-walk (p ≤ √y) grows as α^1.5** — π(√y)·y ≈ 1.5×10⁷ at α=4 →
-~3×10⁸ at α=32 — and clustering cannot touch it (m is composite there, so μ(m) varies across a run
-and there is no shared π value). It could eat the gains, and it is exactly the kind of term
-mispriced repeatedly above, so it is the first thing to measure once α is free to move.
+**Built it. Correct — and a net loss.** S₂ bit-identical to `specialS2Segmented` (which evaluates
+every leaf individually), leaf counts matching, 0 failures; run counts matched the standalone
+prediction exactly (5,510,828 at 10¹³).
+
+```
+x = 10^14                      (alpha=4 without clustering: 1209.2 ms)
+ alpha         y       z = x/y          ms    vs best
+     4    185660     538618980      1346.8       4.1%
+     8    371320     269309490      1294.2       0.0%     <- alpha_opt DID move 4 -> 8
+    16    742640     134654745      1515.1      17.1%
+    32   1485280      67327372      2064.6      59.5%
+    64   2970560      33663686      3521.8     172.1%
+```
+
+**α_opt moved 4 → 8, exactly as predicted** — the α² leaf term really did flatten. And the best
+clustered configuration is still **7% worse than no clustering at α=4**. Every step of the reasoning
+held and the answer is still no. Two reasons: a **run costs ~2.5 leaves** (three random lookups —
+`pi_tab[v]`, `primes[c]`, `pi_tab[qmin−1]` — against a leaf's one, and the leaf's `primes[qi]` walk
+is sequential), so leaf/run must clear ~2.5 to break even; and the **dense m-walk rides α^1.5**
+(flagged before building), which clustering cannot reach and which swamps z's 1/α shrink past α≈8.
+Hoisting the two p-invariant divisions out of the run finder moved it 0.844 → 0.854 — the divisions
+were never the problem.
+
+## The pattern: DR's optimisations ration costs we had already removed
+
+Both of DR's headline optimisations measure **negative** here, and for the same reason:
+
+| DR optimisation | what it rations | what we did | measured |
+|---|---|---|---|
+| §7, x^(1/4) bound on the φ-sieve | tree ops at O(log x) each (§8.3) | O(1)-kill counter | **−2%** |
+| §6.5, clustering | leaf evaluation | π table: one lookup | **−7%** |
+
+**They are amortisation schemes for costs we had already made cheap.** That is why we sit at ~1.6×
+their 1996 implementation while implementing *neither* of their log factors — we did not skip them,
+we made them unnecessary. It also retires the α_opt puzzle: six sweeps said α_opt = 4 flat across
+five decades against a literature that says α ~ log³x, and that was never a contradiction — DR's α
+is large *because* their leaves are expensive. Ours are not.
 
 ## The α knob, where it is finally real (lmo.zig)
 
