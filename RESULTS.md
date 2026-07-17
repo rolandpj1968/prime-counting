@@ -568,6 +568,31 @@ Both terms moved and the sign flipped. **An optimisation's sign can depend on an
 optimisation** — no amount of reasoning about "is this branch predictable" survives that, only
 re-measuring after each change.
 
+**DR §7's x^(1/4) bound: measured, and NOT worth it for us.** DR sieves [1, x/y] "by all primes
+less than x^(1/4)" — for us that is π(x^(1/4)) = 446 primes instead of π(y) = 16,801 at 10¹⁴, an
+83× smaller `a` at 10¹⁸. It looked like the biggest remaining algorithmic win. Measured:
+
+| x | fold visits | share with p ≥ x^(1/4) |
+|---|---:|---:|
+| 10⁹ | 89,674 | 34.2% |
+| 10¹¹ | 2,175,571 | 28.9% |
+| 10¹³ | 51,332,456 | 24.9% |
+| 10¹⁴ | 247,641,412 | **23.6%** |
+
+The share **shrinks** with x (Σ_{x^(1/4)≤p≤y} 1/p → ln(4/3), constant, while Σ_{7≤p≤y} 1/p grows as
+ln ln y). So it saves 38% × 0.236 ≈ **9%**, plus ~2% from smaller a-arrays — against **~13.5%** to
+un-fuse P₂ (the bound leaves the counter at φ(·,π(x^(1/4))), so π(v) = φ(v,a) − 1 + a breaks, and
+P₂ needs DR §4's own [1,z] sieve: 5.4×10⁸ at ~3.6 G/s ≈ 0.15 s of a 1.11 s run). **Net ≈ −2%.**
+
+DR §8.3 explains why it pays for *them*: *"Owing to the necessity of quickly retrieving the values
+φ(u,b), we have to maintain a data structure such that each access costs **O(log x) instead of O(1)
+in a normal sieve**."* **The x^(1/4) bound exists to ration expensive tree operations.** Our O(1)-kill
+counter is a whole log x cheaper than their S3 sieve, which devalues the optimisation the bound
+provides — and makes the P₂ fusion (criticised above as "optimising the 13% and inflating the term
+that pins everything else") the right trade after all. Both halves of that judgement were wrong,
+and identically so: pricing a paper's design decision without pricing the data structure it was
+designed around.
+
 ## The α knob, where it is finally real (lmo.zig)
 
 ## The α knob, where it is finally real (lmo.zig)
