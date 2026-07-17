@@ -300,9 +300,16 @@ pub fn specialS2Segmented(gpa: std.mem.Allocator, x: u64, y: u64, seg: usize) !S
     @memset(phi_run, 0);
     const seg_cnt = try gpa.alloc(i64, a); // this segment's contribution
     defer gpa.free(seg_cnt);
-    const m_cur = try gpa.alloc(u64, a); // descending m cursor per prime
-    defer gpa.free(m_cur);
-    @memset(m_cur, y);
+    // Descending cursor per prime. Two regimes, split at √y:
+    //  • p ≤ √y — cur = m, walking down through p-rough squarefree m ∈ (y/p, y].
+    //  • p > √y — cur = a PRIME INDEX. Any p-rough m ≤ y is 1 or a prime (a
+    //    composite would be ≥ lpf(m)² > y), and m=1 fails m·p > y, so m = q prime
+    //    in (p, y], with m·p > y automatic since q > p > √y ≥ y/p. Enumerable
+    //    straight from primes[] — no walk, no rejects. This is the a²/2 bulk.
+    const sqrt_y = common.isqrt(y);
+    const cur = try gpa.alloc(u64, a);
+    defer gpa.free(cur);
+    for (t.primes, 0..) |p32, bi| cur[bi] = if (p32 <= sqrt_y) y else a - 1;
 
     var s2: i128 = 0;
     var leaves: u64 = 0;
@@ -319,25 +326,44 @@ pub fn specialS2Segmented(gpa: std.mem.Allocator, x: u64, y: u64, seg: usize) !S
             const p: u64 = p32; // p = p_b, b = bi+1; segment holds primes[0..bi) removed
             seg_cnt[bi] = ctr.total; // survivors here with p_1..p_{b−1} gone — O(1)
 
-            // walk m down while v = x/(m·p) stays inside this segment
-            var m = m_cur[bi];
-            const mlo = y / p; // m·p > y  ⇔  m > ⌊y/p⌋
-            while (m > mlo) {
-                const v = x / (m * p);
-                if (v >= hi) break; // belongs to a later segment
-                walk += 1;
-                if (v >= lo) {
-                    const mm = t.mu[@intCast(m)];
-                    if (mm != 0 and t.lpf[@intCast(m)] > p) {
-                        const phi_v = phi_run[bi] + ctr.prefix(@intCast(v - lo));
-                        s2 += @as(i128, -mm) * @as(i128, phi_v);
-                        leaves += 1;
-                        if (p * p > v) easy += 1; // φ(v,b−1) = 1 + π(v) − (b−1)
+            if (p <= sqrt_y) {
+                // dense: walk m down while v = x/(m·p) stays inside this segment
+                var m = cur[bi];
+                const mlo = y / p; // m·p > y  ⇔  m > ⌊y/p⌋
+                while (m > mlo) {
+                    const v = x / (m * p);
+                    if (v >= hi) break; // belongs to a later segment
+                    walk += 1;
+                    if (v >= lo) {
+                        const mm = t.mu[@intCast(m)];
+                        if (mm != 0 and t.lpf[@intCast(m)] > p) {
+                            const phi_v = phi_run[bi] + ctr.prefix(@intCast(v - lo));
+                            s2 += @as(i128, -mm) * @as(i128, phi_v);
+                            leaves += 1;
+                            if (p * p > v) easy += 1; // φ(v,b−1) = 1 + π(v) − (b−1)
+                        }
                     }
+                    m -= 1;
                 }
-                m -= 1;
+                cur[bi] = m;
+            } else {
+                // sparse: m = q prime in (p, y] only. μ(q) = −1, so −μ(m) = +1.
+                var qi = cur[bi];
+                while (qi > bi) {
+                    const q: u64 = t.primes[@intCast(qi)];
+                    const v = x / (p * q);
+                    if (v >= hi) break; // belongs to a later segment
+                    walk += 1;
+                    if (v >= lo) {
+                        const phi_v = phi_run[bi] + ctr.prefix(@intCast(v - lo));
+                        s2 += @as(i128, phi_v);
+                        leaves += 1;
+                        if (p * p > v) easy += 1;
+                    }
+                    qi -= 1;
+                }
+                cur[bi] = qi;
             }
-            m_cur[bi] = m;
 
             // fold p_b into this segment, ready for b+1
             var j = ((lo + p - 1) / p) * p; // first multiple of p at or above lo
