@@ -218,6 +218,56 @@ P₂ and the cutoff share a prefix-π table up to x^(2/3).
   *widens* with x (O(x) vs O(x^0.8)). This is why records go to 10³⁰
   combinatorially, never by sieving.
 
+## The y knob: why x^(1/3) is a minimax, and how to break it (meissel.zig)
+
+The identity holds for **any** y ≥ x^(1/3) (below it, y-rough n ≤ x can have 3
+prime factors and you need P₃ — measured: α=0.7 gives the wrong answer). So
+y = α·x^(1/3) is free to tune. Two consumers want the π-table, and they pull
+opposite ways:
+
+| consumer | needs π up to | vs α |
+|---|---|---|
+| φ's cutoff leaf φ(v,b), p_b² ≥ v ⇒ v ≤ p_b² | **y²** | grows |
+| P₂'s π(x/p), p ∈ (y, √x] | **x/y** | shrinks |
+
+They cross at exactly α = 1. **The classical x^(1/3) is a minimax point**, not a
+coincidence — and raising y is pure loss (10¹¹: 106 ms/5 MB at α=1 → 7631 ms/329 MB
+at α=8, 99% of it table build).
+
+Surprise: **φ's leaf count is flat in y** — 5,927,155 at α=1 → 5,934,991 at α=8,
++0.13% while a grows 6.3×. Same reason the identity works: for p > x^(1/3),
+φ(x/p, ·) has x/p < x^(2/3) ≤ p², so it cuts *immediately*. Every prime above
+x^(1/3) adds exactly one trivial leaf. The recursion is already saturated at α=1.
+
+**Capping the cutoff breaks the minimax.** Add "and v ≤ z" (z = x/y) to the leaf
+test. Tightening a cutoff is always *correct* — the recursion is valid at every
+node — it only trades tree size for table size. This deletes the y² consumer, so
+the table is just z = x^(2/3)/α, which now **shrinks** with α:
+
+```
+             alpha=1.0   alpha=1.5   alpha=2.0   alpha=3.0   alpha=4.0   alpha=6.0
+10^11  vs best  +2.8%       0.0%       +0.5%      +11.0%      +19.7%      +39.9%
+10^12  vs best  +1.7%       0.0%       +3.1%      +10.7%      +20.6%      +39.5%
+10^13  vs best  +6.6%       0.0%       +0.7%       +3.3%       +8.1%      +20.8%
+```
+
+- **α = 1.5 is the argmin at all three x** → now the default. It beats classical
+  α = 1 on *both* axes (10¹¹: 99.6 ms/3.4 MB vs 102.4 ms/5.1 MB) — free, not a trade.
+- The optimum **doesn't move** over two decades; the **basin widens**. α=3 costs
+  +11% at 10¹¹ but only +3.3% at 10¹³ (3× less memory: 36.9 vs 110.7 MB).
+- Mechanism, from the noise-free leaf counts (leaves ~ α^k): k = **0.611** (10¹¹),
+  **0.473** (10¹²), **0.363** (10¹³). φ's sensitivity to α decays with x against a
+  build cost that is always 1/α — so the free memory α buys **grows with x**.
+- Capping alone bounds the table by x^(2/3)/α with α < x^(1/6) (y < √x, where P₂
+  vanishes and it degenerates to Legendre) → **Θ(√x) memory**, a whole exponent
+  step from one condition. LMO's x^(1/3) needs the leaf restructuring too.
+- Caveat: our α_opt should *not* be expected to match the literature's α ~ log³x —
+  that tunes LMO's *sieve-range vs special-leaf* trade; ours is *table-build vs
+  φ-tree*. Different mechanism. Related: capping is **not** the LMO decomposition —
+  capped φ still requires p_b² ≥ v, so it recurses past the m·p frontier into
+  3+-factor d. LMO stops at that frontier unconditionally and pays a sieve query:
+  ~4× *fewer* leaves (1.4 M vs 5.9 M at 10¹¹), each more expensive.
+
 ## Sieve of Atkin vs Eratosthenes: op-count is the wrong metric (atkin.zig)
 Atkin toggles a bit per quadratic-form solution (4x²+y², 3x²+y², 3x²−y², mod-12
 residues) → O(N/log log N) ops, *fewer* than Eratosthenes' O(N log log N).

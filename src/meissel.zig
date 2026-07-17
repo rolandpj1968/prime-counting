@@ -10,6 +10,12 @@
 //! φ is the recursion φ(x,a)=φ(x,a−1)−φ(x/p_a,a−1) with a mod-30 wheel base and
 //! the leaf cutoff φ=1+max(0,π(x)−a) when p_a²≥x (LMO Stage A: π comes from a
 //! COMPACT bit-sieve+checkpoints table, ~16× smaller than a π-per-integer array).
+//!
+//! The identity holds for any y ≥ x^(1/3), so y = α·x^(1/3) is a free knob. Two
+//! consumers want the π-table: φ's cutoff (v ≤ y², grows with α) and P₂ (x/y,
+//! shrinks). Un-capped they cross at α=1 — the classical exponent is a minimax.
+//! CAPPING the cutoff at v ≤ z = x/y deletes the y² consumer, so the table is just
+//! z = x^(2/3)/α and α becomes a real memory knob. See piWithY / the y-sweep.
 
 const std = @import("std");
 const common = @import("common.zig");
@@ -96,21 +102,29 @@ const PiTable = struct {
     }
 };
 
+pub const Counters = struct { leaves: u64 = 0, nodes: u64 = 0 };
+
 /// φ(x, a): count of n in [1, x] with no prime factor among the first a primes.
-fn phi(x: u64, a: usize, primes: []const u64, tbl: *const PiTable) u64 {
+///
+/// `zmax` caps the cutoff: we may only take the π-leaf when x ≤ zmax, since that
+/// is all the table holds. Tightening a cutoff is always CORRECT — the recursion
+/// is valid at every node — it just trades tree size for table size.
+fn phi(x: u64, a: usize, primes: []const u64, tbl: *const PiTable, zmax: u64, c: ?*Counters) u64 {
+    if (c) |cc| cc.nodes += 1;
     if (x == 0) return 0;
     if (a == 0) return x;
     if (a == 1) return x - x / 2;
     if (a == 2) return x - x / 2 - x / 3 + x / 6;
     if (a == 3) return (x / 30) * 8 + smallphi[@intCast(x % 30)]; // coprime to 2,3,5
     const pa = primes[a - 1];
-    if (pa * pa >= x) {
+    if (pa * pa >= x and x <= zmax) {
         // no coprime composites ≤ x → φ = 1 + primes in (p_a, x] = 1 + max(0, π(x)−a)
+        if (c) |cc| cc.leaves += 1;
         const pix = tbl.pi(x);
         const au: u64 = @intCast(a);
         return 1 + (if (pix > au) pix - au else 0);
     }
-    return phi(x, a - 1, primes, tbl) - phi(x / pa, a - 1, primes, tbl);
+    return phi(x, a - 1, primes, tbl, zmax, c) - phi(x / pa, a - 1, primes, tbl, zmax, c);
 }
 
 /// φ(x, π(x^(1/3))) — the oracle LMO's S1+S2 must reproduce.
@@ -126,38 +140,97 @@ pub fn phiOfX(gpa: std.mem.Allocator, x: u64) !u64 {
     }
     var tbl = try PiTable.init(gpa, x / cbrt_x);
     defer tbl.deinit(gpa);
-    return phi(x, a, primes, &tbl);
+    return phi(x, a, primes, &tbl, std.math.maxInt(u64), null);
 }
+
+/// Meissel–Lehmer with y as a free knob (a = π(y)), for the y-sweep experiment.
+///
+/// The identity needs every y-rough n ≤ x to have ≤ 2 prime factors, i.e. y ≥ x^(1/3);
+/// below that you'd need P₃ (Lehmer). Above it the identity still holds, but the
+/// π-table must serve BOTH consumers:
+///   • φ's cutoff leaf φ(v,b), p_b² ≥ v  ⇒  v ≤ p_b² ≤ y²      (grows with y)
+///   • P₂'s π(x/p) for p ∈ (y, √x]       ⇒  argument ≤ x/y      (shrinks with y)
+/// so the bound is max(y², x/y) — minimised exactly at y = x^(1/3), where both are x^(2/3).
+///
+/// `capped` adds "and v ≤ z" to the cutoff (z = x/y). Tightening a cutoff is always
+/// correct — the recursion is valid at every node — so this only trades tree for table.
+/// It deletes the y² consumer, leaving the bound at z = x/y, which now SHRINKS with α.
+pub fn piWithY(gpa: std.mem.Allocator, x: u64, y: u64, capped: bool) !YResult {
+    const sqrt_x = common.isqrt(x);
+    const primes = try rs.basePrimes(gpa, sqrt_x);
+    defer gpa.free(primes);
+
+    var a: usize = 0;
+    for (primes) |p| {
+        if (p <= y) a += 1 else break;
+    }
+
+    // z = x/y serves BOTH consumers once the cutoff is capped at z: φ's leaves
+    // (by construction) and P₂'s π(x/p), p > y. No y² term — it shrinks with α.
+    const limit = @min(x, if (capped) x / y else @max(y *| y, x / y));
+    const zmax = if (capped) limit else std.math.maxInt(u64);
+    var t0 = common.nowNs();
+    var tbl = try PiTable.init(gpa, limit);
+    defer tbl.deinit(gpa);
+    const build_ns = common.nowNs() - t0;
+
+    var ctr = Counters{};
+    t0 = common.nowNs();
+    const phi_val = phi(x, a, primes, &tbl, zmax, &ctr);
+    const phi_ns = common.nowNs() - t0;
+
+    t0 = common.nowNs();
+    var p2: i64 = 0;
+    for (primes, 0..) |p, j| {
+        if (p <= y) continue;
+        if (p > sqrt_x) break;
+        p2 += @as(i64, @intCast(tbl.pi(x / p))) - @as(i64, @intCast(j + 1)) + 1;
+    }
+    const p2_ns = common.nowNs() - t0;
+
+    const result = @as(i64, @intCast(phi_val)) + @as(i64, @intCast(a)) - 1 - p2;
+    return .{
+        .pi = @intCast(result),
+        .y = y,
+        .a = a,
+        .limit = limit,
+        .bytes = (limit / 64 + 1) * 16, // bits[] + ckpt[], 8 bytes per word each
+        .leaves = ctr.leaves,
+        .nodes = ctr.nodes,
+        .build_ns = build_ns,
+        .phi_ns = phi_ns,
+        .p2_ns = p2_ns,
+    };
+}
+
+pub const YResult = struct {
+    pi: u64,
+    y: u64,
+    a: usize,
+    limit: u64,
+    bytes: usize,
+    leaves: u64,
+    nodes: u64,
+    build_ns: u64,
+    phi_ns: u64,
+    p2_ns: u64,
+    pub fn totalNs(self: YResult) u64 {
+        return self.build_ns + self.phi_ns + self.p2_ns;
+    }
+};
+
+/// Tuning constant: y = α·x^(1/3), as the 3/2 numerator over ALPHA_DEN.
+/// α = 3/2 with the capped cutoff measured strictly better than the classical
+/// α = 1 on BOTH axes at x = 10^11 (100.0 ms / 3.4 MB vs 105.5 ms / 5.1 MB) —
+/// the capped table is x^(2/3)/α, so raising α shrinks it while φ barely moves.
+const ALPHA_NUM = 3;
+const ALPHA_DEN = 2;
 
 pub fn pi(gpa: std.mem.Allocator, x: u64) !u64 {
     if (x < 2) return 0;
-    const cbrt_x = icbrt(x); // ⌊x^(1/3)⌋
-    const sqrt_x = common.isqrt(x); // ⌊x^(1/2)⌋
-    const primes = try rs.basePrimes(gpa, sqrt_x); // primes ≤ √x (need up to √x for P₂)
-    defer gpa.free(primes);
-
-    // a = π(x^(1/3))
-    var a: usize = 0;
-    for (primes) |p| {
-        if (p <= cbrt_x) a += 1 else break;
-    }
-
-    // compact π-table up to x^(2/3): used by both the φ leaf cutoff and P₂.
-    var tbl = try PiTable.init(gpa, x / cbrt_x);
-    defer tbl.deinit(gpa);
-
-    const phi_val = phi(x, a, primes, &tbl);
-
-    // P₂(x,a) = Σ_{cbrt_x < p ≤ sqrt_x} (π(x/p) − π(p) + 1)
-    var p2: i64 = 0;
-    for (primes, 0..) |p, j| {
-        if (p <= cbrt_x) continue;
-        if (p > sqrt_x) break;
-        const pi_xp: i64 = @intCast(tbl.pi(x / p));
-        const pi_p: i64 = @intCast(j + 1); // p is the (j+1)-th prime
-        p2 += pi_xp - pi_p + 1;
-    }
-
-    const result = @as(i64, @intCast(phi_val)) + @as(i64, @intCast(a)) - 1 - p2;
-    return @intCast(result);
+    // Integer y keeps the y ≥ x^(1/3) correctness floor exact (below it the
+    // identity needs P₃): icbrt(x) already satisfies it, and we only go up.
+    const y = icbrt(x) * ALPHA_NUM / ALPHA_DEN;
+    const r = try piWithY(gpa, x, y, true);
+    return r.pi;
 }
