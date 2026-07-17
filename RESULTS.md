@@ -299,7 +299,7 @@ closed form since those primes have indices a+1..A.
 | 10¹¹ | 4,118,054,813 | 0.09 s | 0.10 s | 1.1× | — |
 | 10¹² | 37,607,912,018 | 0.42 s | 0.69 s | 1.6× | 0.655 |
 | 10¹³ | 346,065,536,839 | 1.94 s | 5.81 s | 3.0× | 0.661 |
-| 10¹⁴ | 3,204,941,750,802 | 2.83 s | 41.3 s | **14.6×** | 0.654 |
+| 10¹⁴ | 3,204,941,750,802 | 2.42 s | 41.3 s | **17.1×** | 0.654 |
 | 10¹⁵ | 29,844,570,422,669 | 15.2 s | — (OOM) | — | 0.658 |
 | 10¹⁶ | 279,238,341,033,925 | 72.9 s | — (OOM) | — | **0.681** |
 
@@ -403,7 +403,8 @@ The 10¹⁴ column, step by step — each is a separate committed measurement:
 | → P₂ fused onto the counter | 4.97 s | 1.22× |
 | → α = 4 | 4.13 s | 1.20× |
 | → 3-level counter, power-of-2 blocks | 3.54 s | 1.17× |
-| → class-(1) binomial (LMO p.555 / DR §6.1) | **2.83 s** | 1.27× |
+| → class-(1) binomial (LMO p.555 / DR §6.1) | 2.83 s | 1.27× |
+| → π-table for classes (2)/(3)-easy | **2.42 s** | 1.17× |
 
 ## What the papers actually say (literature/, read after the fact)
 
@@ -452,10 +453,31 @@ Verified differentially, which is the point: the fused path never enumerates cla
 is bit-identical to `specialS2Segmented`, which enumerates every leaf — and the leaf *counts* match,
 so the binomial counts exactly the set it skips.
 
-**Still on the table** (LMO p.555 classes (2)–(3), DR §6.3–6.4): the *trivial* leaves — for
-√(x/y) < p ≤ x^(1/3), every q > x/p² also gives φ = 1, contributing Σ(π(y) − π(x/p²)) in O(x^(1/3))
-— and the *easy* leaves, x/(pq) ≤ y, readable straight from a π table over [1, y]. Both need that
-O(y) π table, which is the piece previously dismissed for the wrong reason.
+**Classes (2) and (3)-easy: one rule, not four cases.** Working the conditions through, every
+cheap class reduces to the same test — **v ≤ y and p² > v** ⇒ φ(v,b−1) = 1 + max(0, π(v) − (b−1))
+straight from a π table over **[1, y]** (O(y) space, 0.74 MB at 10¹⁴, ~34 MB at 10¹⁹):
+
+- **class (2)**, p > √(x/y): v < x/p² < y, and p > x^(1/3)/2 > x^(1/4) ⇒ p⁴ > x ⇒ v ≤ x/p² < p².
+- **class (3)-easy**, q ≥ x/(yp): v ≤ y, and p² > (x/y²)² > y ≥ v — which requires **x² > y⁵, i.e.
+  y ≤ x^(2/5)**. *That is why LMO's Truncation Rule T′ caps y at x^(2/5)*: it is exactly the
+  condition that keeps this class's m prime and p² above v. α=4 satisfies it for x ≥ 4¹⁵ ≈ 10⁹.
+
+The table only spans [1, y], never [1, z] — every leaf it serves has v ≤ y by construction. That
+distinction is the whole reason the earlier flat-prefix-array attempt failed (it built an O(z)
+structure to serve O(leaves) queries at z/leaves ≈ 27).
+
+Measured share of the leaves surviving the binomial that this rule catches — **it grows with x**:
+
+| x | 10⁹ | 10¹⁰ | 10¹¹ | 10¹² | 10¹³ | 10¹⁴ |
+|---|---:|---:|---:|---:|---:|---:|
+| π-table evaluable | 43.1% | 47.8% | 52.5% | 55.9% | 60.2% | **64.2%** |
+
+Worth **1.17×** at 10¹⁴ (2827 → 2426 ms), also growing with x (1.11× at 10⁹). Cumulative with the
+binomial: **1.46×** (3.54 → 2.42 s). Remaining for the sieve: class (3)-hard (v > y) and class (4).
+
+**Still on the table:** DR §6.2+ *clustering* — computing many special leaves at once, which is the
+second log factor and DR's actual novelty. The local PDF is 6 of 11 pages, so §6.5 onward and the
+complexity analysis are missing.
 
 **Where we are ahead.** LMO's array a(i,j) in (3.9)–(3.10) — a binary hierarchy of counts, queried
 by decomposing l into powers of two — **is a Fenwick tree**, never named as such. LMO's own analysis

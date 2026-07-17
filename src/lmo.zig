@@ -646,6 +646,36 @@ pub fn p2Segmented(gpa: std.mem.Allocator, x: u64, y: u64, seg: usize) !i128 {
     return sum_pi_xp - sub;
 }
 
+/// φ(v, b−1) for one special leaf — LMO p.555 classes (2) and (3)-easy.
+///
+/// If p² > v then no coprime composite is ≤ v (the smallest is p², and p = p_b is the
+/// least prime not yet removed), so the survivors are exactly 1 plus the primes in
+/// [p, v]:  **φ(v, b−1) = 1 + max(0, π(v) − (b−1))**. If additionally v ≤ y, that π
+/// comes from a table over [1, y] — O(y) space, which is O(x^(1/3)) and affordable.
+/// This one rule covers all three cheap classes:
+///   • class (2), p > √(x/y): v < x/p² < y, and p > x^(1/3)/2 > x^(1/4) so p⁴ > x
+///     ⇒ v ≤ x/p² < p².
+///   • class (3)-easy, q ≥ x/(yp): v ≤ y, and p² > (x/y²)² > y ≥ v — which needs
+///     x² > y⁵, i.e. **y ≤ x^(2/5)**. That is exactly why LMO's Truncation Rule T′
+///     caps y there. α=4 satisfies it for x ≥ 4^15 ≈ 10^9.
+/// Everything else (class (3)-hard, class (4)) still needs the sieve.
+inline fn leafPhi(
+    v: u64,
+    p: u64,
+    bi: usize,
+    lo: u64,
+    y: u64,
+    pi_tab: []const u32,
+    ctr: anytype,
+    phi_run: []const i64,
+) i64 {
+    if (v <= y and p * p > v) {
+        const piv: i64 = pi_tab[@intCast(v)];
+        return 1 + @max(0, piv - @as(i64, @intCast(bi)));
+    }
+    return phi_run[bi] + ctr.prefix(@intCast(v - lo));
+}
+
 // ------------------------------------------------------------- fused sweep
 
 /// S2 and P₂ from ONE pass over [1, z] — P₂ reads the SAME counter, for free.
@@ -727,6 +757,19 @@ pub fn s2AndP2FusedGen(comptime C: type, gpa: std.mem.Allocator, x: u64, y: u64,
     //
     // p*p*p would overflow (p ≤ y = 4x^(1/3) ⇒ p³ ≤ 64x = 6.4e20 at 10^19), so the
     // threshold comes from icbrt: the least p with p³ ≥ x.
+    // π(m) for m ≤ y — O(y) build, O(1) query. The table only needs to span [1, y],
+    // NOT [1, z]: every leaf it serves has v ≤ y by construction. Assuming otherwise
+    // is what sank the earlier flat-prefix-array attempt.
+    const pi_tab = try gpa.alloc(u32, @intCast(y + 1));
+    defer gpa.free(pi_tab);
+    {
+        var c: u32 = 0;
+        for (0..@as(usize, @intCast(y + 1))) |m| {
+            if (m >= 2 and t.lpf[m] == m) c += 1; // lpf[m] == m ⇔ m prime
+            pi_tab[m] = c;
+        }
+    }
+
     const c3 = icbrt(x);
     const p_cube_min = if (c3 * c3 * c3 == x) c3 else c3 + 1;
     var n1: u64 = 0;
@@ -767,8 +810,8 @@ pub fn s2AndP2FusedGen(comptime C: type, gpa: std.mem.Allocator, x: u64, y: u64,
                     if (v >= lo) {
                         const mm = t.mu[@intCast(m)];
                         if (mm != 0 and t.lpf[@intCast(m)] > p) {
-                            if (p * p > v) easy += 1;
-                            const phi_v = phi_run[bi] + ctr.prefix(@intCast(v - lo));
+                            if (v <= y and p * p > v) easy += 1;
+                            const phi_v = leafPhi(v, p, bi, lo, y, pi_tab, &ctr, phi_run);
                             s2 += @as(i128, -mm) * @as(i128, phi_v);
                             leaves += 1;
                         }
@@ -785,8 +828,8 @@ pub fn s2AndP2FusedGen(comptime C: type, gpa: std.mem.Allocator, x: u64, y: u64,
                     if (v >= hi) break;
                     walk += 1;
                     if (v >= lo) {
-                        if (p * p > v) easy += 1;
-                        s2 += @as(i128, phi_run[bi] + ctr.prefix(@intCast(v - lo)));
+                        if (v <= y and p * p > v) easy += 1;
+                        s2 += @as(i128, leafPhi(v, p, bi, lo, y, pi_tab, &ctr, phi_run));
                         leaves += 1;
                     }
                     qi -= 1;
