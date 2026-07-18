@@ -224,10 +224,13 @@ const Counter3P = struct {
 };
 
 // ------------------------------------------------------------- segmented π
-/// Answer π at every point in `pts` (order preserved in `out`) with no O(z) table:
-/// sort the query points, sweep [1,z] in cache-sized segments carrying a running π,
-/// and read each query off as the walk passes it. base = primes ≤ √z (a prefix of
-/// s.primes). O(z) time, O(SEG + n) memory.
+/// Answer π at every point in `pts` (order preserved in `out`), no O(z) table: sort
+/// the queries, sweep [1,z] in cache-sized segments carrying a running π, read each
+/// query off as the walk passes it. base = primes ≤ √z. O(z) time, O(SEG+n) memory.
+///
+/// mod-2 WHEEL: only ODD integers are represented (2 is the sole even prime), so the
+/// array, marking, and walk are all halved. π(v) = 1 + (odd primes ≤ v) for v ≥ 2 —
+/// all of B's query points are ≥ √x, so this branch is always taken.
 fn answerPi(gpa: std.mem.Allocator, base: []const u32, pts: []const u64, out: []u64, z: u64) !void {
     const n = pts.len;
     const ord = try gpa.alloc(usize, n);
@@ -241,36 +244,37 @@ fn answerPi(gpa: std.mem.Allocator, base: []const u32, pts: []const u64, out: []
     };
     std.mem.sort(usize, ord, Ctx{ .p = pts }, Ctx.lt);
 
-    const SEG: usize = 1 << 18;
-    const seg = try gpa.alloc(bool, SEG);
+    const SEG: usize = 1 << 18; // even; segment spans SEG integers = SEG/2 odds
+    const seg = try gpa.alloc(bool, SEG / 2 + 1); // composite? per odd position
     defer gpa.free(seg);
 
     var qi: usize = 0;
     while (qi < n and pts[ord[qi]] < 2) : (qi += 1) out[ord[qi]] = 0; // π(0)=π(1)=0
-    var pi_run: u64 = 0;
-    var lo: u64 = 0;
+    var odd_pi: u64 = 0; // running count of ODD primes < lo
+    var lo: u64 = 0; // always even
     while (lo <= z) : (lo += SEG) {
         const hi = @min(lo + SEG, z + 1);
-        const len: usize = @intCast(hi - lo);
-        @memset(seg[0..len], false);
+        const nodd: usize = @intCast((hi - lo) / 2); // odds in [lo,hi): lo+1, lo+3, …
+        @memset(seg[0..nodd], false);
         for (base) |p32| {
             const p: u64 = p32;
+            if (p == 2) continue; // evens aren't represented
             if (p * p >= hi) break;
-            var j: u64 = @max(p * p, ((lo + p - 1) / p) * p); // first multiple of p ≥ lo, ≥ p²
-            while (j < hi) : (j += p) seg[@intCast(j - lo)] = true;
+            const L = @max(p * p, lo);
+            var w = ((L + p - 1) / p) * p; // first multiple of p ≥ L
+            if (w % 2 == 0) w += p; // ← make it odd (p odd ⇒ w+p flips parity)
+            while (w < hi) : (w += 2 * p) seg[@intCast((w - lo - 1) / 2)] = true;
         }
-        if (lo == 0) {
-            seg[0] = true; // 0 not prime
-            if (len > 1) seg[1] = true; // 1 not prime
-        }
-        var k: usize = 0;
-        while (k < len) : (k += 1) {
-            if (!seg[k]) pi_run += 1; // (lo+k) is prime
-            const val = lo + @as(u64, k);
-            while (qi < n and pts[ord[qi]] == val) : (qi += 1) out[ord[qi]] = pi_run;
+        if (lo == 0 and nodd > 0) seg[0] = true; // integer 1 is not prime
+        var j: usize = 0;
+        while (j < nodd) : (j += 1) {
+            const nn = lo + 1 + 2 * @as(u64, j); // the odd integer at this position
+            if (!seg[j]) odd_pi += 1;
+            // v answered once we've passed the largest odd ≤ v (∈ {nn, nn+1})
+            while (qi < n and pts[ord[qi]] <= nn + 1) : (qi += 1) out[ord[qi]] = 1 + odd_pi;
         }
     }
-    while (qi < n) : (qi += 1) out[ord[qi]] = pi_run; // (defensive: none expected > z)
+    while (qi < n) : (qi += 1) out[ord[qi]] = 1 + odd_pi; // defensive
 }
 
 /// π(v) for v ≤ √x by binary search on the prime list (which holds every prime ≤ √x).
