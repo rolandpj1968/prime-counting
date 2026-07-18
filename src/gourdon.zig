@@ -293,6 +293,68 @@ const Counter3P = struct {
     }
 };
 
+/// 2-level variant (one count array ≈ √nwords blocks): O(1) kill with ONE decrement
+/// (vs 3P's two), O(√nwords) prefix (vs 3P's ~nwords^(1/3)). Same MASK30 reset +
+/// branchless kill as Counter3P — the ONLY difference is the count level, to A/B the
+/// kill-heavy vs query-heavy tradeoff. gourdon's ω is kill-dominated (C/D offload).
+const Counter2P = struct {
+    bits: []u64,
+    cnt: []u32,
+    s1: u6,
+    nwords: usize,
+    total: i64,
+
+    fn init(gpa: std.mem.Allocator, seg: usize) !Counter2P {
+        const nwords = (seg + 63) / 64;
+        const s1: u6 = @intCast((log2Floor(nwords) + 1) / 2); // block ≈ √nwords
+        const nblocks = (nwords >> s1) + 1;
+        return .{ .bits = try gpa.alloc(u64, nwords), .cnt = try gpa.alloc(u32, nblocks), .s1 = s1, .nwords = nwords, .total = 0 };
+    }
+    fn deinit(self: *Counter2P, gpa: std.mem.Allocator) void {
+        gpa.free(self.bits);
+        gpa.free(self.cnt);
+    }
+    fn reset(self: *Counter2P, len: usize) void {
+        const nw = (len + 63) / 64;
+        for (0..nw) |w| self.bits[w] = MASK30[w % 15];
+        if (len % 64 != 0) self.bits[nw - 1] &= (@as(u64, 1) << @as(u6, @intCast(len % 64))) - 1;
+        @memset(self.bits[nw..self.nwords], 0);
+        @memset(self.cnt, 0);
+        var tot: i64 = 0;
+        for (self.bits, 0..) |word, w| {
+            const c: u32 = @popCount(word);
+            self.cnt[w >> self.s1] += c;
+            tot += c;
+        }
+        self.total = tot;
+    }
+    inline fn kill(self: *Counter2P, i: usize) void {
+        const w = i >> 6;
+        const b = @as(u64, 1) << @as(u6, @intCast(i & 63));
+        const alive: u32 = @intFromBool(self.bits[w] & b != 0);
+        self.bits[w] &= ~b;
+        self.cnt[w >> self.s1] -= alive;
+        self.total -= @as(i64, alive);
+    }
+    fn prefix(self: *const Counter2P, i: usize) i64 {
+        const w = i >> 6;
+        const blk = w >> self.s1;
+        var s: i64 = 0;
+        for (self.cnt[0..blk]) |c| s += c;
+        for (self.bits[blk << self.s1 .. w]) |word| s += @popCount(word);
+        const r: u6 = @intCast(i & 63);
+        const mask: u64 = if (r == 63) ~@as(u64, 0) else (@as(u64, 1) << (r + 1)) - 1;
+        s += @popCount(self.bits[w] & mask);
+        return s;
+    }
+};
+
+/// ω+B counter: MEASURED Counter2P > Counter3P for gourdon (~8.5% faster @10^14).
+/// gourdon's ω is kill-dominated (C/D offloads most queries), so 3P's extra per-kill
+/// decrement costs more than its cheaper query saves — the opposite of lmo's S2, where
+/// the query-heavy pattern makes 3P win. Swap to Counter3P to re-measure.
+const Ctr = Counter2P;
+
 // ------------------------------------------------------------- segmented π
 /// Answer π at every point in `pts` (order preserved in `out`), no O(z) table: sort
 /// the queries, sweep [1,z] in cache-sized segments carrying a running π, read each
@@ -621,7 +683,7 @@ fn computeB(comptime INST: bool, gpa: std.mem.Allocator, s: anytype, x: u64, y: 
 /// 10^12 — so one pass serves both, beating lmo's separate S2-fold + fused-P₂.
 /// C/D leaf evaluator: closed form (C, is_d=false) when x/pm < p² and π(v) is cheap,
 /// else the counter (D, is_d=true — the leaf needs a cross-block φ correction).
-inline fn evalPhi(comptime INST: bool, st: *Stats, vv: u64, b: usize, pp: u64, pi_tab: []const u32, prs: anytype, pr_bi: i64, ct: *const Counter3P, l: u64, sx: u64, yy: u64) struct { phi: i64, is_d: bool } {
+inline fn evalPhi(comptime INST: bool, st: *Stats, vv: u64, b: usize, pp: u64, pi_tab: []const u32, prs: anytype, pr_bi: i64, ct: *const Ctr, l: u64, sx: u64, yy: u64) struct { phi: i64, is_d: bool } {
     var piv: i64 = -1;
     if (pp * pp > vv) {
         if (vv <= yy) piv = @intCast(pi_tab[@intCast(vv)]) else if (vv <= sx) piv = @intCast(piLE(prs, vv));
@@ -658,7 +720,7 @@ const Stats = struct {
 
 /// Per-thread scratch: the counter + all cursors.
 const Scratch = struct {
-    ctr: Counter3P,
+    ctr: Ctr,
     cur: []u64,
     next: []u64,
     wpos: []u8,
@@ -666,7 +728,7 @@ const Scratch = struct {
     phi_run: []i64,
     fn init(gpa: std.mem.Allocator, nax: usize, naz: usize, segw: usize) !Scratch {
         return .{
-            .ctr = try Counter3P.init(gpa, segw),
+            .ctr = try Ctr.init(gpa, segw),
             .cur = try gpa.alloc(u64, nax),
             .next = try gpa.alloc(u64, naz),
             .wpos = try gpa.alloc(u8, naz),
