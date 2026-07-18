@@ -435,11 +435,18 @@ fn computeB(gpa: std.mem.Allocator, s: *const Sieve, x: u64, y: u64, z: u64, sqx
 /// blocks, carry φ(·,bi) across segments in phi_run[bi], and per prime keep a
 /// descending m-cursor and a wheel fold-cursor. Folds only primes ≤ x* (2,3,5 are
 /// pre-struck by the reset; p=3,5 leaves use phiSmall). φ(v,bi)=phi_run[bi]+prefix(v−lo).
-fn omegaCounter(gpa: std.mem.Allocator, s: *const Sieve, x: u64, y: u64, z: u64, xstar: u64) !i128 {
+fn omegaCounter(comptime INST: bool, gpa: std.mem.Allocator, s: *const Sieve, x: u64, y: u64, z: u64, xstar: u64) !i128 {
     const primes = s.primes;
+    const sqx = isqrt(x);
     const nax: usize = piLE(primes, xstar); // # primes ≤ x* (fold + leaf range)
     if (nax == 0) return 0;
     const segw: usize = 273 * 960; // ≈256 KiB counter, MASK30-aligned (lcm(30,64)=960)
+    var n_seg: u64 = 0;
+    var n_mwalk: u64 = 0; // m-cursor iterations (incl. rejected)
+    var n_small: u64 = 0; // bi≤2 (phiSmall)
+    var n_easy: u64 = 0; // easy-leaf closed form
+    var n_hard: u64 = 0; // counter prefix() calls
+    var n_kill: u64 = 0; // fold kills
 
     var ctr = try Counter3P.init(gpa, segw);
     defer ctr.deinit(gpa);
@@ -469,6 +476,7 @@ fn omegaCounter(gpa: std.mem.Allocator, s: *const Sieve, x: u64, y: u64, z: u64,
         const hi = @min(lo + @as(u64, segw), z + 1);
         const len: usize = @intCast(hi - lo);
         ctr.reset(len);
+        if (INST) n_seg += 1;
         for (0..nax) |bi| {
             const p: u64 = primes[bi];
             if (bi >= 3) seg_cnt[bi] = ctr.total; // φ(·,bi) count for this segment
@@ -476,17 +484,36 @@ fn omegaCounter(gpa: std.mem.Allocator, s: *const Sieve, x: u64, y: u64, z: u64,
                 var m: u64 = cur[bi];
                 const mlo: u64 = y / p; // m ∈ (y/p, y]
                 while (m > mlo) {
+                    if (INST) n_mwalk += 1;
                     const v: u64 = x / (m * p);
                     if (v >= hi) break; // v rises as m falls — done with this segment
                     if (v >= lo) {
                         const mm = s.mu[@intCast(m)];
                         if (mm != 0 and s.delta[@intCast(m)] > p) { // δ(m) > p
-                            const phi_v: i64 = if (bi <= 2)
-                                phiSmall(v, bi)
-                            else if (v <= y and p * p > v) // easy leaf: closed form, no counter
-                                1 + @max(0, @as(i64, s.pi_tab[@intCast(v)]) - @as(i64, @intCast(bi)))
-                            else
-                                phi_run[bi] + ctr.prefix(@intCast(v - lo));
+                            var phi_v: i64 = undefined;
+                            if (bi <= 2) {
+                                if (INST) n_small += 1;
+                                phi_v = phiSmall(v, bi);
+                            } else {
+                                // Gourdon's C term: x/pm < p² ⇒ φ = 1 + π(v) − bi (closed
+                                // form). π(v) is cheap for v ≤ √x (pi_tab / piLE); only the
+                                // rare v > √x C-leaf (large x, x*=x/y²) falls to the counter.
+                                var piv: i64 = -1;
+                                if (p * p > v) {
+                                    if (v <= y) {
+                                        piv = @intCast(s.pi_tab[@intCast(v)]);
+                                    } else if (v <= sqx) {
+                                        piv = @intCast(piLE(primes, v));
+                                    }
+                                }
+                                if (piv >= 0) {
+                                    if (INST) n_easy += 1;
+                                    phi_v = 1 + @max(0, piv - @as(i64, @intCast(bi)));
+                                } else { // D term: counter
+                                    if (INST) n_hard += 1;
+                                    phi_v = phi_run[bi] + ctr.prefix(@intCast(v - lo));
+                                }
+                            }
                             omega += @as(i128, -mm) * @as(i128, phi_v);
                         }
                     }
@@ -498,6 +525,7 @@ fn omegaCounter(gpa: std.mem.Allocator, s: *const Sieve, x: u64, y: u64, z: u64,
                 var j: u64 = next[bi];
                 var wp: u8 = wpos[bi];
                 while (j < hi) {
+                    if (INST) n_kill += 1;
                     ctr.kill(@intCast(j - lo));
                     j += p * W30GAP[wp];
                     wp = (wp + 1) & 7;
@@ -508,6 +536,7 @@ fn omegaCounter(gpa: std.mem.Allocator, s: *const Sieve, x: u64, y: u64, z: u64,
         }
         for (3..nax) |bi| phi_run[bi] += seg_cnt[bi];
     }
+    if (INST) std.debug.print("  ω-stats: nax={d} segs={d} mwalk={d} leaves(small/C/D)={d}/{d}/{d} kills={d}\n", .{ nax, n_seg, n_mwalk, n_small, n_easy, n_hard, n_kill });
     return omega;
 }
 
@@ -614,7 +643,7 @@ pub fn piGourdonV(gpa: std.mem.Allocator, x: u64, y_in: ?u64, verbose: bool) !GR
     const B = try computeB(gpa, &s, x, y, z, sqx);
     lap(verbose, &tp, "B");
 
-    const omega = try omegaCounter(gpa, &s, x, y, z, xstar);
+    const omega = try omegaCounter(false, gpa, &s, x, y, z, xstar);
     lap(verbose, &tp, "omega");
 
     // φ₀ = Σ_{n≤y, n odd, μ(n)≠0} μ(n)·φ(x/n,1), φ(u,1)=u−⌊u/2⌋   [k=1]
@@ -660,7 +689,7 @@ pub fn main() !void {
         const pi = try buildPi(gpa, z);
         defer gpa.free(pi);
         const on = omegaNaive(s.primes, s.mu, s.delta, pi, x, y, xstar);
-        const oc = try omegaCounter(gpa, &s, x, y, z, xstar);
+        const oc = try omegaCounter(false, gpa, &s, x, y, z, xstar);
         std.debug.print("  {d:>12}  naive={d:>14} counter={d:>14}  {s}\n", .{ x, on, oc, if (on == oc) "match" else "MISMATCH" });
     }
 
@@ -682,6 +711,17 @@ pub fn main() !void {
     }
     std.debug.print("\nper-term profile @ 10^12:\n", .{});
     _ = try piGourdonV(gpa, 1_000_000_000_000, null, true);
+
+    std.debug.print("\nω instrumentation:\n", .{});
+    for ([_]u64{ 1_000_000_000_000, 100_000_000_000_000 }) |x| {
+        const y = chooseY(x);
+        const z = x / y;
+        const xstar = @max(isqrtsq(x), x / (y * y));
+        var s = try Sieve.init(gpa, isqrt(x), y);
+        defer s.deinit(gpa);
+        std.debug.print("  x=10^{d}: ", .{std.math.log10_int(x)});
+        _ = try omegaCounter(true, gpa, &s, x, y, z, xstar);
+    }
 
     // Ceiling test: past the old O(z) π-table limit, gourdon-only vs known values.
     std.debug.print("\nceiling test (gourdon only, vs known):\n", .{});
