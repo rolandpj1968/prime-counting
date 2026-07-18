@@ -567,6 +567,26 @@ Speedup peaks ~4.4× at 10¹⁴ and settles to ~3.3–3.5× at scale (bandwidth-
 So π(10¹⁹) — the last power of ten under 2⁶⁴, and M. Deléglise's 1996 record — now falls in
 **12 minutes** on a 6-core laptop.
 
+**4-core sweep with memory** (4 pinned physical cores, k_over=8 — the bandwidth
+bang-for-buck point; carried up to 10²⁰). Peak RSS is `getrusage` maxrss:
+
+| x | π(x) | 4-core | speedup | peak RSS |
+|---|------|-------:|--------:|---------:|
+| 10¹⁴ | 3,204,941,750,802 | 0.38 s | 3.05× | 13 MB |
+| 10¹⁵ | 29,844,570,422,669 | 1.78 s | 2.94× | 27 MB |
+| 10¹⁶ | 279,238,341,033,925 | 7.01 s | 3.30× | 54 MB |
+| 10¹⁷ | 2,623,557,157,654,233 | 31.8 s | 3.24× | 110 MB |
+| 10¹⁸ | 24,739,954,287,740,860 | 2.55 min | 3.25× | 226 MB |
+| 10¹⁹ | 234,057,667,276,344,607 | 13.1 min | 3.24× | 467 MB |
+| 10²⁰ | 2,220,819,602,560,918,840 | **1.08 h** | 3.18× | 964 MB |
+
+Steady ~3.2× on 4 cores. RSS decomposes as shared read-only tables O(y) (~16%),
+per-thread sweep scratch ×N (~28%), and the O(nb·a) cross-block reduction arrays
+(~60%, dominant). Gourdon's *M = π(√(x/y))* bound (empirically the largest prime
+index that ever carries a cross-block μ-correction, ~6.5× below a = π(y) and confirmed
+to the prime here) caps those arrays for a ~2× total cut — deferred until memory gates,
+and structural-for-free in `gourdon.zig`.
+
 ## Verification methodology
 
 Correctness held through ~40 commits of aggressive optimisation via three independent oracles:

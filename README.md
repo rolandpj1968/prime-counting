@@ -30,30 +30,34 @@ and verified against every known value 10 → 10¹⁹ (plus exhaustively over [0
 Presented most-advanced first.
 
 All timings on one quiet mini-PC: **AVX2 (no AVX-512), L1d 32 KiB / L2 512 KiB /
-L3 16 MiB per core, 28 GiB RAM**, `zig 0.16 build-exe -O ReleaseFast -mcpu=native`,
-single-threaded.
+L3 16 MiB per core, 28 GiB RAM** (6-core Ryzen 5 6600H), `zig 0.16 build-exe -O
+ReleaseFast -mcpu=native`. Both single-core and 4-core (pinned) times shown.
 
 ### Combinatorial π(x): LMO / Deléglise–Rivat (`lmo.zig`)
 
 The current frontier. π(x) = φ(x,a) + a − 1 − P₂(x,a) with y = 4·x^(1/3), a = π(y),
 run at the **2/3 exponent in Θ(x^(1/3)) memory**:
 
-| x | π(x) | time | peak RSS |
-|---|------|-----:|---------:|
-| 10¹⁴ | 3,204,941,750,802 | 1.16 s | 2.7 MB |
-| 10¹⁵ | 29,844,570,422,669 | 5.23 s | ~5 MB |
-| 10¹⁶ | 279,238,341,033,925 | 23.1 s | 11 MB |
-| 10¹⁷ | 2,623,557,157,654,233 | 1.72 min | ~24 MB |
-| 10¹⁸ | 24,739,954,287,740,860 | 8.3 min | ~52 MB |
-| 10¹⁹ | 234,057,667,276,344,607 | 42.4 min | ~109 MB |
-| 10²⁰ | 2,220,819,602,560,918,840 | 3.44 h | ~230 MB |
+| x | π(x) | 1-core | 4-core | 4-core RSS |
+|---|------|-----:|-----:|---------:|
+| 10¹⁴ | 3,204,941,750,802 | 1.16 s | 0.38 s | 13 MB |
+| 10¹⁵ | 29,844,570,422,669 | 5.23 s | 1.78 s | 27 MB |
+| 10¹⁶ | 279,238,341,033,925 | 23.1 s | 7.01 s | 54 MB |
+| 10¹⁷ | 2,623,557,157,654,233 | 1.72 min | 31.8 s | 110 MB |
+| 10¹⁸ | 24,739,954,287,740,860 | 8.3 min | 2.55 min | 226 MB |
+| 10¹⁹ | 234,057,667,276,344,607 | 42.4 min | 13.1 min | 467 MB |
+| 10²⁰ | 2,220,819,602,560,918,840 | 3.44 h | 1.08 h | 964 MB |
 
 Least-squares scaling exponent **0.658**, just under the theoretical 2/3. π(10¹⁹)
-matches M. Deléglise's 1996 computation — reproduced here single-threaded in less
+matches M. Deléglise's 1996 computation — reproduced here single-core in less
 time than his HP-730 took for a value **four powers of ten smaller**. Sieving 10²⁰ would
 take years; the lead over sieving *widens* with x, which is why records reach 10³⁰
 combinatorially and never by enumeration. 10²⁰ (2,220,819,602,560,918,840) is the first value
 past 2⁶⁴, reached via u128 with a ≤ few-% wide-arithmetic tax, matching the published value.
+The 4-core column is a steady **~3.2×** (DRAM-bandwidth-bound — see Parallelism). The
+*single-core* footprint stays Θ(x^(1/3)) — 2.7 MB at 10¹⁴ to ~230 MB at 10²⁰; the 4-core
+RSS above is larger because each thread carries its own sweep scratch and the
+cross-block reduction arrays scale with block count (O(nb·a)).
 
 How it earns the exponent and the footprint:
 
@@ -110,11 +114,24 @@ On the 6-core Ryzen 5 6600H it reaches **~4.7× at 10¹⁴**, falling to ~3.8× 
 the ceiling is DRAM bandwidth, not cores. Pinned experiments show HT gives a real
 ~1.3× per-core gain but adds nothing once the cores saturate memory bandwidth.
 
+A full **4-core** sweep (pinned physical cores, k_over=8) holds a steady **~3.0–3.3×**
+from 10¹⁴ to 10²⁰ — 4 cores is the bandwidth bang-for-buck point on this box, so it
+is the default in the Status table. Peak RSS grows 13 MB → 964 MB across that range;
+the dominant term is the O(nb·a) cross-block reduction arrays (block totals + μ-sums
+per block). Reading Gourdon (`literature/gourdon.ps`) pinned the natural fix: those
+arrays only ever carry non-zero corrections for prime index ≤ π(√(x/y)) (his *M*),
+which is ~6.5× below a = π(y) — a ~2× total-memory cut, deferred until it gates.
+
 ### Next
 
-Gourdon's algorithm (a better decomposition than DR, ~2.3×) and his per-block
-transfer-size reduction (to push past the bandwidth wall); the 3.8× implementation
-gap to primecount-DR (fast division).
+Gourdon's algorithm (a better decomposition than DR, ~2.3×) is now scaffolded
+top-down in `gourdon.zig` — π(x) = A − B + ω + φ₀ + Σ, every term transcribed and
+validated against `lmo.zig` from 10⁴ to 10¹⁰ with naive helpers (correct but ~8–48×
+slower, the point being to swap each term onto the O(1)-kill counter next). The
+prize is Gourdon's decomposition on our O(1)-kill counter — a configuration that
+exists in neither the literature nor primecount, which both keep the O(log x) tree.
+Also open: his per-block transfer-size reduction (past the bandwidth wall) and the
+3.8× implementation gap to primecount-DR (fast division).
 
 ## Empirical highlights
 
