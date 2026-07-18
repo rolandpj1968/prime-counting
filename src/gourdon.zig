@@ -28,23 +28,33 @@ var g_bmarks: u64 = 0; // INST-only: B sieve marks (composite bit-clears in answ
 fn isqrt(n: u64) u64 {
     return common.isqrt(n);
 }
-fn icbrt(x: u64) u64 {
+// Generic-width roots of x (result always fits u64). Copied from lmo.zig.
+fn icbrtG(comptime T: type, x: T) u64 {
     if (x == 0) return 0;
-    var r: u64 = 1;
-    while ((r + 1) * (r + 1) * (r + 1) <= x) r += 1;
-    while (r * r * r > x) r -= 1;
+    var r: u64 = @intFromFloat(std.math.pow(f64, @floatFromInt(x), 1.0 / 3.0));
+    if (r == 0) r = 1;
+    while (@as(T, r) * @as(T, r) * @as(T, r) > x) r -= 1;
+    while (@as(T, r + 1) * @as(T, r + 1) * @as(T, r + 1) <= x) r += 1;
     return r;
 }
-fn isqrtsq(x: u64) u64 { // x^(1/4)
-    return isqrt(isqrt(x));
+fn isqrtG(comptime T: type, n: T) u64 {
+    if (n < 2) return @intCast(n);
+    var x: u64 = @intFromFloat(@sqrt(@as(f64, @floatFromInt(n))));
+    while (@as(T, x) * @as(T, x) > n) x -= 1;
+    while (@as(T, x + 1) * @as(T, x + 1) <= n) x += 1;
+    return x;
+}
+/// ⌊x/d⌋ with x wide (X) and d a u64 that fits — result fits u64 (it's ≤ z or √x).
+inline fn xdiv(comptime X: type, x: X, d: u64) u64 {
+    return @intCast(x / @as(X, d));
 }
 
 // --------------------------------------------------------------- small sieve
 /// Primes ≤ nmax by a SEGMENTED Eratosthenes: base primes ≤ √nmax mark each cache-
 /// sized segment in turn, so the transient sieve buffer is O(SEG), not O(nmax/8).
 /// (The returned prime list is still O(nmax/ln) — that's the persistent cost.)
-fn sievePrimes(gpa: std.mem.Allocator, nmax: u64) ![]u32 {
-    if (nmax < 2) return gpa.alloc(u32, 0);
+fn sievePrimes(comptime P: type, gpa: std.mem.Allocator, nmax: u64) ![]P {
+    if (nmax < 2) return gpa.alloc(P, 0);
     const rt: usize = @intCast(isqrt(nmax)); // base primes needed up to √nmax
     // base primes ≤ rt (simple; rt = x^(1/4) here, tiny)
     const bcomp = try gpa.alloc(bool, rt + 1);
@@ -79,7 +89,7 @@ fn sievePrimes(gpa: std.mem.Allocator, nmax: u64) ![]u32 {
     const ln: u64 = @max(1, (@as(u64, log2Floor(@intCast(nmax))) * 693) / 1000);
     const t1: u64 = nmax / ln;
     const cap: usize = @max(@as(usize, 16), @as(usize, @intCast(t1 + (t1 * 1276) / (ln * 1000) + 64)));
-    var primes = try gpa.alloc(u32, cap);
+    var primes = try gpa.alloc(P, cap); // base primes stay u32 (≤ √nmax = x^(1/4))
     errdefer gpa.free(primes);
     var cnt: usize = 0;
 
@@ -114,14 +124,16 @@ fn sievePrimes(gpa: std.mem.Allocator, nmax: u64) ![]u32 {
 
 /// Persistent tables: primes ≤ √x (for piLE and the term loops), and δ/μ only to y
 /// (ω leaves, φ₀ — never read past y). No O(√x) factor tables.
-const Sieve = struct {
-    mu: []i8, // [0..y]
-    delta: []u32, // smallest prime factor, [0..y]
-    pi_tab: []u32, // π(v) for v ≤ y (O(1), for ω's easy-leaf shortcut)
-    primes: []u32, // ascending, ≤ √x
+fn Sieve(comptime P: type) type {
+    return struct {
+        const Self = @This();
+        mu: []i8, // [0..y]
+        delta: []u32, // smallest prime factor, [0..y]
+        pi_tab: []u32, // π(v) for v ≤ y (O(1), for ω's easy-leaf shortcut)
+        primes: []P, // ascending, ≤ √x (P = u32 for u64-x, u64 for u128-x)
 
-    fn init(gpa: std.mem.Allocator, sqx: u64, y: u64) !Sieve {
-        const primes = try sievePrimes(gpa, sqx);
+    fn init(gpa: std.mem.Allocator, sqx: u64, y: u64) !Self {
+        const primes = try sievePrimes(P, gpa, sqx);
         const Ny: usize = @intCast(y + 1);
         const delta = try gpa.alloc(u32, Ny);
         @memset(delta, 0);
@@ -152,13 +164,14 @@ const Sieve = struct {
         }
         return .{ .mu = mu, .delta = delta, .pi_tab = pi_tab, .primes = primes };
     }
-    fn deinit(self: *Sieve, gpa: std.mem.Allocator) void {
+    fn deinit(self: *Self, gpa: std.mem.Allocator) void {
         gpa.free(self.mu);
         gpa.free(self.delta);
         gpa.free(self.pi_tab);
         gpa.free(self.primes);
     }
-};
+    };
+}
 
 // ============================================================================
 // COPIED from lmo.zig: mod-30 wheel + 3-level O(1)-kill counter (Counter3P).
@@ -353,7 +366,7 @@ fn answerPi(comptime INST: bool, gpa: std.mem.Allocator, base: []const u32, pts:
 /// π(v) for v ≤ √x by binary search on the prime list (which holds every prime ≤ √x).
 /// Correct ONLY for v ≤ √x — the terms that use it are all bounded there; B is not,
 /// and takes the sweep instead.
-fn piLE(primes: []const u32, v: u64) u64 {
+fn piLE(primes: anytype, v: u64) u64 { // primes: []const (u32|u64)
     if (v < 2) return 0;
     var lo: usize = 0;
     var hi: usize = primes.len;
@@ -379,35 +392,35 @@ const Terms = struct {
 /// A, Σ₄/₅/₆ and the scalars use piLE (all query points ≤ √x — proven). Only B has
 /// v = x/p up to z > √x, so B alone takes a segmented sweep over its ~π(√x) points.
 /// π-free terms (ω, φ₀, Σ₀–₃) are handled in piGourdonV.
-fn computeTerms(s: *const Sieve, x: u64, y: u64, sqx: u64, x13: u64, sqz: u64, xstar: u64) Terms {
+fn computeTerms(comptime X: type, s: anytype, x: X, y: u64, sqx: u64, x13: u64, sqz: u64, xstar: u64) Terms {
     const pr = s.primes;
     const a: i128 = @intCast(piLE(pr, y));
     const b: i128 = @intCast(piLE(pr, x13));
     const c: i128 = @intCast(piLE(pr, sqz));
     const d: i128 = @intCast(piLE(pr, xstar));
-    const P: i128 = @intCast(piLE(pr, sqx));
+    const Pi: i128 = @intCast(piLE(pr, sqx));
 
     // A = Σ_{x*<p≤x^1/3} Σ_{p<q≤√(x/p)} χ(x/pq) π(x/pq),  χ = 2 if x/pq<y else 1.
     // For fixed p, q ascends ⇒ v=x/pq descends ⇒ π(v) only decreases: a monotone
     // cursor pc = π(v) replaces the per-pair binary search (O(1) amortized, no table).
     var A: i128 = 0;
     for (pr, 0..) |p32, pidx| {
-        const p: u64 = p32;
+        const p: u64 = @intCast(p32);
         if (p <= xstar) continue;
         if (p > x13) break;
-        const qhi = isqrt(x / p);
+        const qhi = isqrtG(X, x / @as(X, p));
         var qi = pidx + 1;
         var pc: usize = 0; // π(v) cursor, seeded on the first q
         var seeded = false;
         while (qi < pr.len) : (qi += 1) {
-            const qq: u64 = pr[qi];
+            const qq: u64 = @intCast(pr[qi]);
             if (qq > qhi) break;
-            const v = x / (p * qq); // < √x
+            const v = xdiv(X, x, p * qq); // < √x
             if (!seeded) {
                 pc = piLE(pr, v);
                 seeded = true;
             } else {
-                while (pc > 0 and pr[pc - 1] > v) pc -= 1;
+                while (pc > 0 and @as(u64, @intCast(pr[pc - 1])) > v) pc -= 1;
             }
             const chi: i128 = if (v < y) 2 else 1;
             A += chi * @as(i128, @intCast(pc));
@@ -416,39 +429,39 @@ fn computeTerms(s: *const Sieve, x: u64, y: u64, sqx: u64, x13: u64, sqz: u64, x
     // Σ₄ = a·Σ_{x*<p≤√(x/y)} π(x/py)   (v ≤ x^{5/12} < √x)
     var sig4: i128 = 0;
     for (pr) |p32| {
-        const p: u64 = p32;
+        const p: u64 = @intCast(p32);
         if (p <= xstar) continue;
         if (p > sqz) break;
-        sig4 += @intCast(piLE(pr, x / (p * y)));
+        sig4 += @intCast(piLE(pr, xdiv(X, x, p * y)));
     }
     sig4 *= a;
     // Σ₅ = Σ_{√(x/y)<p≤x^1/3} π(x/p²)   (v < y ≤ √x)
     var sig5: i128 = 0;
     for (pr) |p32| {
-        const p: u64 = p32;
+        const p: u64 = @intCast(p32);
         if (p <= sqz) continue;
         if (p > x13) break;
-        sig5 += @intCast(piLE(pr, x / (p * p)));
+        sig5 += @intCast(piLE(pr, xdiv(X, x, p * p)));
     }
     // Σ₆ = −Σ_{x*<p≤x^1/3} π(√(x/p))²   (v ≤ x^{3/8} < √x)
     var sig6: i128 = 0;
     for (pr) |p32| {
-        const p: u64 = p32;
+        const p: u64 = @intCast(p32);
         if (p <= xstar) continue;
         if (p > x13) break;
-        const t: i128 = @intCast(piLE(pr, isqrt(x / p)));
+        const t: i128 = @intCast(piLE(pr, isqrt(xdiv(X, x, p))));
         sig6 += t * t;
     }
-    return .{ .A = A, .sig4 = sig4, .sig5 = sig5, .sig6 = -sig6, .a = a, .b = b, .c = c, .d = d, .P = P };
+    return .{ .A = A, .sig4 = sig4, .sig5 = sig5, .sig6 = -sig6, .a = a, .b = b, .c = c, .d = d, .P = Pi };
 }
 
 /// B = Σ_{y<p≤√x} π(x/p). The only term needing π(v) for v > √x (v ∈ [√x, z]).
 /// Answered by a running-π segmented sweep over just [√x, z], starting at π(√x).
-fn computeB(comptime INST: bool, gpa: std.mem.Allocator, s: *const Sieve, x: u64, y: u64, z: u64, sqx: u64) !i128 {
+fn computeB(comptime INST: bool, gpa: std.mem.Allocator, s: anytype, x: u64, y: u64, z: u64, sqx: u64) !i128 {
     const pr = s.primes;
     var nb: usize = 0;
     for (pr) |p32| {
-        const p: u64 = p32;
+        const p: u64 = @intCast(p32);
         if (p <= y) continue;
         if (p > sqx) break;
         nb += 1;
@@ -459,7 +472,7 @@ fn computeB(comptime INST: bool, gpa: std.mem.Allocator, s: *const Sieve, x: u64
     defer gpa.free(bans);
     var k: usize = 0;
     for (pr) |p32| {
-        const p: u64 = p32;
+        const p: u64 = @intCast(p32);
         if (p <= y) continue;
         if (p > sqx) break;
         bpts[k] = x / p;
@@ -478,9 +491,9 @@ fn computeB(comptime INST: bool, gpa: std.mem.Allocator, s: *const Sieve, x: u64
 /// π(√z) − 1 is read straight off it (Legendre; valid since z < y² ⇒ no product of
 /// two primes > √z is ≤ z). Gourdon folds π(√z) primes vs lmo's π(y) — ~6× fewer at
 /// 10^12 — so one pass serves both, beating lmo's separate S2-fold + fused-P₂.
-fn omegaCounter(comptime INST: bool, gpa: std.mem.Allocator, s: *const Sieve, x: u64, y: u64, z: u64, xstar: u64) !struct { omega: i128, b: i128 } {
+fn omegaCounter(comptime INST: bool, comptime X: type, gpa: std.mem.Allocator, s: anytype, x: X, y: u64, z: u64, xstar: u64) !struct { omega: i128, b: i128 } {
     const primes = s.primes;
-    const sqx = isqrt(x);
+    const sqx = isqrtG(X, x);
     const sqrt_y = isqrt(y); // dense/sparse split point (DR/LMO): p≤√y dense, else sparse
     const sqz = isqrt(z); // √z: the fold bound (Legendre a′ = π(√z))
     const nay: usize = piLE(primes, y); // π(y): index nay−1 is the largest prime ≤ y
@@ -513,15 +526,15 @@ fn omegaCounter(comptime INST: bool, gpa: std.mem.Allocator, s: *const Sieve, x:
 
     @memset(phi_run, 0);
     for (0..nax) |bi| {
-        cur[bi] = if (primes[bi] <= sqrt_y) y else @as(u64, nay - 1);
+        cur[bi] = if (@as(u64, @intCast(primes[bi])) <= sqrt_y) y else @as(u64, nay - 1);
     }
     for (3..naz) |bi| {
-        next[bi] = primes[bi]; // p·1 (p≥7 ⇒ coprime to 30), wpos=W30IDX[1]=0
+        next[bi] = @intCast(primes[bi]); // p·1 (p≥7 ⇒ coprime to 30), wpos=W30IDX[1]=0
         wpos[bi] = 0;
     }
 
     const evalPhi = struct {
-        inline fn f(comptime IN: bool, vv: u64, b: usize, pp: u64, ss: *const Sieve, prs: []const u32, pr_bi: i64, ct: *const Counter3P, l: u64, sx: u64, yy: u64, cE: *u64, cH: *u64) i64 {
+        inline fn f(comptime IN: bool, vv: u64, b: usize, pp: u64, ss: anytype, prs: anytype, pr_bi: i64, ct: *const Counter3P, l: u64, sx: u64, yy: u64, cE: *u64, cH: *u64) i64 {
             var piv: i64 = -1;
             if (pp * pp > vv) {
                 if (vv <= yy) piv = @intCast(ss.pi_tab[@intCast(vv)]) else if (vv <= sx) piv = @intCast(piLE(prs, vv));
@@ -546,7 +559,7 @@ fn omegaCounter(comptime INST: bool, gpa: std.mem.Allocator, s: *const Sieve, x:
         ctr.reset(len);
         if (INST) n_seg += 1;
         for (0..naz) |bi| {
-            const p: u64 = primes[bi];
+            const p: u64 = @intCast(primes[bi]);
             if (bi < nax) {
                 if (bi >= 3) seg_cnt[bi] = ctr.total; // φ(·,bi) for this segment
                 if (p > 2 and p <= sqrt_y) {
@@ -555,7 +568,7 @@ fn omegaCounter(comptime INST: bool, gpa: std.mem.Allocator, s: *const Sieve, x:
                     const mlo: u64 = y / p;
                     while (m > mlo) {
                         if (INST) n_mwalk += 1;
-                        const v: u64 = x / (m * p);
+                        const v: u64 = xdiv(X, x, m * p);
                         if (v >= hi) break;
                         if (v >= lo) {
                             const mm = s.mu[@intCast(m)];
@@ -575,8 +588,8 @@ fn omegaCounter(comptime INST: bool, gpa: std.mem.Allocator, s: *const Sieve, x:
                     var qc: usize = @intCast(cur[bi]);
                     while (qc > bi) {
                         if (INST) n_mwalk += 1;
-                        const q: u64 = primes[qc];
-                        const v: u64 = x / (p * q);
+                        const q: u64 = @intCast(primes[qc]);
+                        const v: u64 = xdiv(X, x, p * q);
                         if (v >= hi) break;
                         if (v >= lo) omega += @as(i128, evalPhi(INST, v, bi, p, s, primes, phi_run[bi], &ctr, lo, sqx, y, &n_easy, &n_hard));
                         qc -= 1;
@@ -598,8 +611,8 @@ fn omegaCounter(comptime INST: bool, gpa: std.mem.Allocator, s: *const Sieve, x:
             }
         }
         // Counter now holds φ(·,π(√z)) for this segment — read B's π(x/p) off it.
-        while (pB > nay and x / @as(u64, primes[pB - 1]) < hi) {
-            const v: u64 = x / @as(u64, primes[pB - 1]);
+        while (pB > nay and xdiv(X, x, @intCast(primes[pB - 1])) < hi) {
+            const v: u64 = xdiv(X, x, @intCast(primes[pB - 1]));
             if (v >= lo) {
                 if (INST) n_bq += 1;
                 b_sum += @as(i128, phi_run_full + ctr.prefix(@intCast(v - lo)) + naz_i - 1);
@@ -675,29 +688,33 @@ pub const GResult = struct {
     y: u64,
 };
 
-fn chooseY(x: u64) u64 {
-    const lo = icbrt(x) + 1;
-    const hi = isqrt(x) -| 1;
-    var y = 4 * icbrt(x);
+fn chooseY(comptime X: type, x: X) u64 {
+    const cr = icbrtG(X, x);
+    const lo = cr + 1;
+    const hi = isqrtG(X, x) -| 1;
+    var y = 4 * cr;
     if (y < lo) y = lo;
     if (y > hi) y = hi;
     return y;
 }
 
-pub fn piGourdon(gpa: std.mem.Allocator, x: u64, y_in: ?u64) !GResult {
-    return piGourdonV(gpa, x, y_in, false);
+/// Dispatch: u64 path for x ≤ 2⁶⁴ (u32 primes), u128 path beyond (u64 primes).
+pub fn piGourdon(gpa: std.mem.Allocator, x: u128, y_in: ?u64) !GResult {
+    if (x <= std.math.maxInt(u64)) return piGourdonV(u64, gpa, @intCast(x), y_in, false);
+    return piGourdonV(u128, gpa, x, y_in, false);
 }
 
-pub fn piGourdonV(gpa: std.mem.Allocator, x: u64, y_in: ?u64, verbose: bool) !GResult {
+pub fn piGourdonV(comptime X: type, gpa: std.mem.Allocator, x: X, y_in: ?u64, verbose: bool) !GResult {
+    const P = if (X == u64) u32 else u64; // prime element type: √x < 2³² ⇔ X = u64
     var tp = common.nowNs();
-    const y = y_in orelse chooseY(x);
-    const z = x / y;
-    const sqx = isqrt(x);
-    const x13 = icbrt(x);
+    const y = y_in orelse chooseY(X, x);
+    const z: u64 = xdiv(X, x, y);
+    const sqx = isqrtG(X, x);
+    const x13 = icbrtG(X, x);
     const sqz = isqrt(z);
-    const xstar = @max(isqrtsq(x), x / (y * y));
+    const xstar = @max(isqrt(sqx), xdiv(X, x, y * y));
 
-    var s = try Sieve.init(gpa, sqx, y);
+    var s = try Sieve(P).init(gpa, sqx, y);
     defer s.deinit(gpa);
     const lap = struct {
         fn f(v: bool, tpp: *u64, name: []const u8) void {
@@ -710,11 +727,11 @@ pub fn piGourdonV(gpa: std.mem.Allocator, x: u64, y_in: ?u64, verbose: bool) !GR
     lap(verbose, &tp, "sieve");
 
     // A/Σ via binary-search π (all points ≤ √x).
-    const t = computeTerms(&s, x, y, sqx, x13, sqz, xstar);
+    const t = computeTerms(X, &s, x, y, sqx, x13, sqz, xstar);
     lap(verbose, &tp, "A/Σ");
 
     // ω and B fused: one counter folded to √z serves ω's leaves and B's π(x/p).
-    const wb = try omegaCounter(false, gpa, &s, x, y, z, xstar);
+    const wb = try omegaCounter(false, X, gpa, &s, x, y, z, xstar);
     const omega = wb.omega;
     const B = wb.b;
     lap(verbose, &tp, "ω+B");
@@ -726,7 +743,7 @@ pub fn piGourdonV(gpa: std.mem.Allocator, x: u64, y_in: ?u64, verbose: bool) !GR
         while (n <= y) : (n += 1) {
             if (s.mu[@intCast(n)] == 0) continue;
             if (n % 2 == 0) continue;
-            const u = x / n;
+            const u: u64 = xdiv(X, x, n);
             phi0 += @as(i128, s.mu[@intCast(n)]) * @as(i128, @intCast(u - u / 2));
         }
     }
@@ -737,8 +754,8 @@ pub fn piGourdonV(gpa: std.mem.Allocator, x: u64, y_in: ?u64, verbose: bool) !GR
     const bb = t.b;
     const cc = t.c;
     const dd = t.d;
-    const P = t.P;
-    const sig0: i128 = a - 1 + @divExact(P * (P - 1), 2) - @divExact(a * (a - 1), 2);
+    const Psx = t.P; // π(√x)
+    const sig0: i128 = a - 1 + @divExact(Psx * (Psx - 1), 2) - @divExact(a * (a - 1), 2);
     const sig1: i128 = @divExact((a - bb) * (a - bb - 1), 2);
     const sig2: i128 = a * (bb - cc - @divExact(cc * (cc - 3), 2) + @divExact(dd * (dd - 3), 2));
     const sig3: i128 = @divExact(bb * (bb - 1) * (2 * bb - 1), 6) - bb - @divExact(dd * (dd - 1) * (2 * dd - 1), 6) + dd;
@@ -754,15 +771,15 @@ pub fn main() !void {
     // ω differential check: naive recurrence vs O(1)-kill counter, must match exactly.
     std.debug.print("ω check (naive vs counter):\n", .{});
     for ([_]u64{ 100_000, 1_000_000, 10_000_000, 100_000_000, 1_000_000_000 }) |x| {
-        const y = chooseY(x);
+        const y = chooseY(u64, x);
         const z = x / y;
-        const xstar = @max(isqrtsq(x), x / (y * y));
-        var s = try Sieve.init(gpa, isqrt(x), y);
+        const xstar = @max(isqrt(isqrt(x)), x / (y * y));
+        var s = try Sieve(u32).init(gpa, isqrt(x), y);
         defer s.deinit(gpa);
         const pi = try buildPi(gpa, z);
         defer gpa.free(pi);
         const on = omegaNaive(s.primes, s.mu, s.delta, pi, x, y, xstar);
-        const wb = try omegaCounter(false, gpa, &s, x, y, z, xstar);
+        const wb = try omegaCounter(false, u64, gpa, &s, x, y, z, xstar);
         const b_ref = try computeB(false, gpa, &s, x, y, z, isqrt(x)); // standalone B reference
         std.debug.print("  {d:>12}  ω naive={d:>14} counter={d:>14} {s}   B fused={d} ref={d} {s}\n", .{ x, on, wb.omega, if (on == wb.omega) "match" else "MISMATCH", wb.b, b_ref, if (wb.b == b_ref) "match" else "MISMATCH" });
     }
@@ -784,25 +801,33 @@ pub fn main() !void {
         std.debug.print("{d:>14} {d:>16} {s:>4} {d:>11.3} {d:>11.3} {d:>8.2}\n", .{ x, g.pi, if (ok) "y" else "NO", gs, ls, gs / ls });
     }
     std.debug.print("\nper-term profile @ 10^12:\n", .{});
-    _ = try piGourdonV(gpa, 1_000_000_000_000, null, true);
+    _ = try piGourdonV(u64, gpa, 1_000_000_000_000, null, true);
 
     std.debug.print("\nop-count comparison (gourdon ω/B vs lmo S2/P₂), matched x,y:\n", .{});
     for ([_]u64{ 1_000_000_000_000, 100_000_000_000_000 }) |x| {
-        const y = chooseY(x);
+        const y = chooseY(u64, x);
         const z = x / y;
-        const xstar = @max(isqrtsq(x), x / (y * y));
-        var s = try Sieve.init(gpa, isqrt(x), y);
+        const xstar = @max(isqrt(isqrt(x)), x / (y * y));
+        var s = try Sieve(u32).init(gpa, isqrt(x), y);
         defer s.deinit(gpa);
         std.debug.print("x=10^{d} (y={d}, z={d}):\n", .{ std.math.log10_int(x), y, z });
         std.debug.print("  gourdon(fused) ", .{});
-        _ = try omegaCounter(true, gpa, &s, x, y, z, xstar); // prints ωB-stats (√z fold + B queries)
+        _ = try omegaCounter(true, u64, gpa, &s, x, y, z, xstar); // prints ωB-stats (√z fold + B queries)
         const lr = try lmo.s2AndP2FusedInstrumented(gpa, @intCast(x), y, y);
         std.debug.print("  lmo:           S2 kills={d}  S2 prefix(hard)={d}  P₂ prefix(np)={d}\n", .{ lr.kills, lr.s2q, lr.np });
     }
 
-    // Ceiling test: past the old O(z) π-table limit, gourdon-only vs known values.
+    // u128-path validation: force X=u128 on x<2⁶⁴; must equal the u64 path bit-for-bit.
+    std.debug.print("\nu128-path check (X=u128 on x<2^64 must match u64):\n", .{});
+    for ([_]u64{ 1_000_000_000_000, 100_000_000_000_000, 10_000_000_000_000_000 }) |x| {
+        const g64 = try piGourdonV(u64, gpa, x, null, false);
+        const g128 = try piGourdonV(u128, gpa, @as(u128, x), null, false);
+        std.debug.print("  x=10^{d}: u64={d} u128={d} {s}\n", .{ std.math.log10_int(x), g64.pi, g128.pi, if (g64.pi == g128.pi) "match" else "MISMATCH" });
+    }
+
+    // Ceiling test: gourdon-only vs known values (u128 x reaches past 2⁶⁴).
     std.debug.print("\nceiling test (gourdon only, vs known):\n", .{});
-    const cases = [_]struct { x: u64, want: i128 }{
+    const cases = [_]struct { x: u128, want: i128 }{
         .{ .x = 10_000_000_000_000, .want = 346_065_536_839 },
         .{ .x = 100_000_000_000_000, .want = 3_204_941_750_802 },
         .{ .x = 1_000_000_000_000_000, .want = 29_844_570_422_669 },
@@ -814,6 +839,6 @@ pub fn main() !void {
         const gs = @as(f64, @floatFromInt(common.nowNs() - t0)) / 1e9;
         const ru = std.posix.getrusage(std.posix.rusage.SELF);
         const rss_mb = @divTrunc(ru.maxrss, 1024);
-        std.debug.print("  {d:>16} pi={d:>16} {s:>4}  {d:>7.2} s  peakRSS={d} MB\n", .{ cc.x, g.pi, if (g.pi == cc.want) "y" else "NO", gs, rss_mb });
+        std.debug.print("  {d:>20} pi={d:>19} {s:>4}  {d:>7.2} s  peakRSS={d} MB\n", .{ cc.x, g.pi, if (g.pi == cc.want) "y" else "NO", gs, rss_mb });
     }
 }
