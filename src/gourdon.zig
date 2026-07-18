@@ -48,6 +48,12 @@ fn isqrtG(comptime T: type, n: T) u64 {
 inline fn xdiv(comptime X: type, x: X, d: u64) u64 {
     return @intCast(x / @as(X, d));
 }
+/// Pin the calling thread to one logical CPU (best-effort). Copied from lmo.zig.
+fn pinToCpu(cpu: u32) void {
+    var set: std.os.linux.cpu_set_t = @splat(0);
+    set[cpu / @bitSizeOf(usize)] |= @as(usize, 1) << @intCast(cpu % @bitSizeOf(usize));
+    std.os.linux.sched_setaffinity(0, &set) catch {};
+}
 
 // --------------------------------------------------------------- small sieve
 /// Primes ≤ nmax by a SEGMENTED Eratosthenes: base primes ≤ √nmax mark each cache-
@@ -452,6 +458,128 @@ fn computeTerms(comptime X: type, s: anytype, x: X, y: u64, sqx: u64, x13: u64, 
         const t: i128 = @intCast(piLE(pr, isqrt(xdiv(X, x, p))));
         sig6 += t * t;
     }
+    return .{ .A = A, .sig4 = sig4, .sig5 = sig5, .sig6 = -sig6, .a = a, .b = b, .c = c, .d = d, .P = Pi };
+}
+
+const Partial = struct { A: i128 = 0, sig4: i128 = 0, sig5: i128 = 0, sig6: i128 = 0 };
+
+/// Parallel A/Σ (Model-A phase 1): embarrassingly parallel over the prime range
+/// (x*, x^1/3]. Workers pull index chunks from an atomic dispenser, accumulate a
+/// thread-local Partial (shared read-only prime list, no cross-thread state), and the
+/// partials are summed. Scalars a,b,c,d,P are serial (5 binary searches).
+fn computeTermsPar(comptime X: type, gpa: std.mem.Allocator, s: anytype, x: X, y: u64, sqx: u64, x13: u64, sqz: u64, xstar: u64, nthreads: usize, pins: ?[]const u32) !Terms {
+    const pr = s.primes;
+    const a: i128 = @intCast(piLE(pr, y));
+    const b: i128 = @intCast(piLE(pr, x13));
+    const c: i128 = @intCast(piLE(pr, sqz));
+    const d: i128 = @intCast(piLE(pr, xstar));
+    const Pi: i128 = @intCast(piLE(pr, sqx));
+
+    const i_lo = piLE(pr, xstar); // first prime index with p > x*
+    const i_hi = piLE(pr, x13); // one past last prime ≤ x^1/3
+    const n_primes = if (i_hi > i_lo) i_hi - i_lo else 0;
+    const nchunks = @max(@as(usize, 1), @min(n_primes, nthreads * 16)); // over-partition: small p ⇒ more work
+    const csize = (n_primes + nchunks - 1) / nchunks;
+
+    const Ctx = struct {
+        disp: std.atomic.Value(usize),
+        s: @TypeOf(s),
+        x: X,
+        y: u64,
+        x13: u64,
+        sqz: u64,
+        xstar: u64,
+        i_lo: usize,
+        i_hi: usize,
+        csize: usize,
+        nchunks: usize,
+    };
+    var ctx = Ctx{
+        .disp = std.atomic.Value(usize).init(0),
+        .s = s,
+        .x = x,
+        .y = y,
+        .x13 = x13,
+        .sqz = sqz,
+        .xstar = xstar,
+        .i_lo = i_lo,
+        .i_hi = i_hi,
+        .csize = csize,
+        .nchunks = nchunks,
+    };
+    const partials = try gpa.alloc(Partial, nthreads);
+    defer gpa.free(partials);
+    @memset(partials, Partial{});
+
+    const Worker = struct {
+        fn run(cx: *Ctx, out: *Partial, cpu: ?u32) void {
+            if (cpu) |cp| pinToCpu(cp);
+            const prr = cx.s.primes;
+            var A: i128 = 0;
+            var s4: i128 = 0;
+            var s5: i128 = 0;
+            var s6: i128 = 0;
+            while (true) {
+                const ch = cx.disp.fetchAdd(1, .monotonic);
+                if (ch >= cx.nchunks) break;
+                const lo = cx.i_lo + ch * cx.csize;
+                const hi = @min(cx.i_lo + (ch + 1) * cx.csize, cx.i_hi);
+                var idx = lo;
+                while (idx < hi) : (idx += 1) {
+                    const p: u64 = @intCast(prr[idx]);
+                    if (p > cx.xstar and p <= cx.x13) {
+                        // A: monotone π-cursor over q ∈ (p, √(x/p)]
+                        const qhi = isqrtG(X, cx.x / @as(X, p));
+                        var qi = idx + 1;
+                        var pc: usize = 0;
+                        var seeded = false;
+                        while (qi < prr.len) : (qi += 1) {
+                            const qq: u64 = @intCast(prr[qi]);
+                            if (qq > qhi) break;
+                            const v = xdiv(X, cx.x, p * qq);
+                            if (!seeded) {
+                                pc = piLE(prr, v);
+                                seeded = true;
+                            } else {
+                                while (pc > 0 and @as(u64, @intCast(prr[pc - 1])) > v) pc -= 1;
+                            }
+                            const chi: i128 = if (v < cx.y) 2 else 1;
+                            A += chi * @as(i128, @intCast(pc));
+                        }
+                        const t: i128 = @intCast(piLE(prr, isqrt(xdiv(X, cx.x, p)))); // Σ₆
+                        s6 += t * t;
+                    }
+                    if (p > cx.xstar and p <= cx.sqz) s4 += @intCast(piLE(prr, xdiv(X, cx.x, p * cx.y))); // Σ₄
+                    if (p > cx.sqz and p <= cx.x13) s5 += @intCast(piLE(prr, xdiv(X, cx.x, p * p))); // Σ₅
+                }
+            }
+            out.* = .{ .A = A, .sig4 = s4, .sig5 = s5, .sig6 = s6 };
+        }
+    };
+
+    const threads = try gpa.alloc(std.Thread, nthreads);
+    defer gpa.free(threads);
+    var spawned: usize = 0;
+    for (1..nthreads) |i| {
+        const cpu: ?u32 = if (pins) |pp| pp[i] else null;
+        threads[i] = std.Thread.spawn(.{}, Worker.run, .{ &ctx, &partials[i], cpu }) catch break;
+        spawned = i;
+    }
+    Worker.run(&ctx, &partials[0], if (pins) |pp| pp[0] else null);
+    var j: usize = 1;
+    while (j <= spawned) : (j += 1) threads[j].join();
+
+    var A: i128 = 0;
+    var sig4: i128 = 0;
+    var sig5: i128 = 0;
+    var sig6: i128 = 0;
+    for (partials) |pt| {
+        A += pt.A;
+        sig4 += pt.sig4;
+        sig5 += pt.sig5;
+        sig6 += pt.sig6;
+    }
+    sig4 *= a;
     return .{ .A = A, .sig4 = sig4, .sig5 = sig5, .sig6 = -sig6, .a = a, .b = b, .c = c, .d = d, .P = Pi };
 }
 
@@ -867,6 +995,30 @@ pub fn main() !void {
         const wb7 = try omegaBlocked(false, u64, gpa, &s, x, y, z, xstar, 7);
         const blk_ok = wb4.omega == wb.omega and wb4.b == wb.b and wb7.omega == wb.omega and wb7.b == wb.b;
         std.debug.print("  {d:>12}  ω naive={d:>14} counter={d:>14} {s}   B fused={d} ref={d} {s}   blocks(4,7){s}\n", .{ x, on, wb.omega, if (on == wb.omega) "match" else "MISMATCH", wb.b, b_ref, if (wb.b == b_ref) "match" else "MISMATCH", if (blk_ok) "=✓" else "=MISMATCH" });
+    }
+
+    // A/Σ parallel check: 4-thread partial-sum must equal serial (phase 1 of Model-A).
+    std.debug.print("\nA/Σ parallel check (serial vs 4-thread, cores 0/2/4/6):\n", .{});
+    {
+        const pins = [_]u32{ 0, 2, 4, 6 };
+        for ([_]u64{ 1_000_000_000, 100_000_000_000, 1_000_000_000_000 }) |x| {
+            const y = chooseY(u64, x);
+            const z = x / y;
+            const sqx = isqrt(x);
+            const x13 = icbrtG(u64, x);
+            const sqz = isqrt(z);
+            const xstar = @max(isqrt(isqrt(x)), x / (y * y));
+            var s = try Sieve(u32).init(gpa, sqx, y);
+            defer s.deinit(gpa);
+            const t0 = common.nowNs();
+            const ser = computeTerms(u64, &s, x, y, sqx, x13, sqz, xstar);
+            const st = @as(f64, @floatFromInt(common.nowNs() - t0)) / 1e9;
+            const t1 = common.nowNs();
+            const par = try computeTermsPar(u64, gpa, &s, x, y, sqx, x13, sqz, xstar, 4, &pins);
+            const pt = @as(f64, @floatFromInt(common.nowNs() - t1)) / 1e9;
+            const ok = ser.A == par.A and ser.sig4 == par.sig4 and ser.sig5 == par.sig5 and ser.sig6 == par.sig6;
+            std.debug.print("  x=10^{d}: {s}  serial {d:.4}s  4-thread {d:.4}s  ({d:.2}x)\n", .{ std.math.log10_int(x), if (ok) "match" else "MISMATCH", st, pt, st / pt });
+        }
     }
 
     // Correctness + timing: Gourdon (counter-ω, segmented-π) vs lmo, both serial.
