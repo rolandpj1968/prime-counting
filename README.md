@@ -50,7 +50,7 @@ run at the **2/3 exponent in Θ(x^(1/3)) memory**:
 
 Least-squares scaling exponent **0.658**, just under the theoretical 2/3. π(10¹⁹)
 matches M. Deléglise's 1996 computation — reproduced here single-threaded in less
-time than his HP-730 took for a value **four decades smaller**. Sieving 10²⁰ would
+time than his HP-730 took for a value **four powers of ten smaller**. Sieving 10²⁰ would
 take years; the lead over sieving *widens* with x, which is why records reach 10³⁰
 combinatorially and never by enumeration. 10²⁰ (2,220,819,602,560,918,840) is the first value
 past 2⁶⁴, reached via u128 with a ≤ few-% wide-arithmetic tax, matching the published value.
@@ -83,7 +83,7 @@ correctness oracle (`phiOfXY`). A compact bit-sieve + per-word checkpoints keeps
 the π-table cache-resident (memory *and* speed), but the algorithm is unchanged, so
 it runs at the historical **~0.8 exponent** and hits an **O(x^(2/3)) memory wall**:
 10¹⁴ = 3,204,941,750,802 in 41 s, ~0.5 GB — where LMO does the same in ~1.2 s and
-2.7 MB, and reaches four decades further.
+2.7 MB, and reaches four powers of ten further.
 
 ### Straight sieving (`sieve.zig` + friends)
 

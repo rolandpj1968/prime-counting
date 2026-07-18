@@ -27,7 +27,7 @@ each cross-checked differentially against an independent reference (`specialS2Se
 Least-squares scaling exponent **0.658** over 10¹²–10¹⁹, just under the theoretical 2/3.
 π(10²⁰) is the first value **past 2⁶⁴** (via u128; π(10¹⁹) is the last under it) and matches the published value (Oliveira e Silva 2006 Table IV / Gourdon 2001). π(10¹⁹) matches M. Deléglise's 1996 computation —
 reproduced here single-threaded in less time than his HP-730 took for a value four
-decades smaller. We implement *neither* of DR's two log-factor optimisations
+powers of ten smaller. We implement *neither* of DR's two log-factor optimisations
 (see [dead ends](#what-didnt-work-dead-ends-and-unhelpful-literature)) — they were made
 unnecessary on this hardware, not skipped.
 
@@ -118,7 +118,7 @@ made cheap:
 That is why using neither of their log factors is not a handicap here: we did not skip them,
 we made them unnecessary on this hardware (the raw speed gap over their 1996 run is largely
 native 64-bit width, not algorithm — see Results). It also retires the α_opt puzzle (below):
-six sweeps said α_opt = 4 flat over five decades against a literature that says α ~ log³x —
+six sweeps said α_opt = 4 flat over five powers of ten against a literature that says α ~ log³x —
 never a contradiction, because DR's α is large *because* their leaves are expensive.
 
 **Meta-lesson.** Cost models were unreliable at nearly every step. Two rules survived:
@@ -347,7 +347,7 @@ x^(1/3), so one knob):
 
 The curve is steeply asymmetric — gentle below, catastrophic above (the α² leaf term).
 α_opt moved 1.5 → 2 → **4** as the m-walk waste was removed (each fix flattened the high-α
-side), and then held at **4 across five decades (10¹¹–10¹⁶)**. That flatness looked like a
+side), and then held at **4 across five powers of ten (10¹¹–10¹⁶)**. That flatness looked like a
 contradiction of the literature's α ~ log³x for a long time; it is not — see the
 [scorecard](#what-the-papers-actually-say-scorecard). P₂ monotonically wants large α (its
 cost ~1/α) but is too small a share to move the optimum.
@@ -369,7 +369,7 @@ at every segment boundary, because the running φ per b is exactly what lets us 
 
 ## The scaling exponent and the drift
 
-A cautionary tale about 2-point deltas. Per-decade exponents read
+A cautionary tale about 2-point deltas. The per-step exponents (each from one ×10 in x) read
 0.665 / 0.655 / 0.658 / 0.681 / **0.705** / 0.660 / 0.712 — they *alternate*, which is
 run-to-run noise on single unrepeated runs (28 min each at the top), and it fooled the
 analysis twice in *both* directions: first into "the exponent is climbing to 0.705", then
@@ -386,7 +386,7 @@ The overall exponent is **0.658**, just under 2/3, with a real but mild drift (+
 DR leaf classes *lowered* the exponent but barely touched the drift — informative, because
 stripping ~half the leaf work should have weakened a *leaf-driven* drift and did not. So the
 residual lives on the kill/fold/counter side, consistent with the L1-miss climb
-(0.78% → 2.15%) after the wheel shrank the working set. ~3% over seven decades; not chased.
+(0.78% → 2.15%) after the wheel shrank the working set. ~3% over seven powers of ten; not chased.
 
 Two candidate mechanisms for the residual, neither established: (1) *cache* — the a-sized
 arrays cross L2 around 10¹⁵; (2) *query growth* — the counter query ~3·nwords^(1/3) grows as
@@ -413,7 +413,7 @@ only *after* the implementation was measured into its current shape.
 - **LMO Truncation Rule T′: "x^(2/5) ≥ y ≥ x^(1/3)"** — recalled from memory, exact.
 
 **The α_opt puzzle, resolved.** LMO p. 556: *"We choose **y = c·x^(1/3)** … a good value of
-the constant **c was determined empirically**."* Our α_opt = 4, flat over five decades and
+the constant **c was determined empirically**."* Our α_opt = 4, flat over five powers of ten and
 found empirically, **is LMO's own prescription.** The α ~ log³x measured against is DR's
 *asymptotic space bound*, infeasible at 10¹⁸ anyway (log³x = 71,197 vs the y ≤ √x cap of
 α ≤ 1000). Six sweeps were compared to the wrong paper's constant.

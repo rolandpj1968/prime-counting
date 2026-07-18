@@ -1,8 +1,8 @@
-//! LMO (Lagarias–Miller–Odlyzko) φ(x,a): sub-linear π(x) in O(x^(1/3)) memory.
-//! Measured exponent 0.66 (the theoretical 2/3); π(10^14) exact in ~4.1 s, 10× the
-//! Meissel–Lehmer in meissel.zig. NOT the path to π(10^18) in seconds on its own —
-//! extrapolating 0.66 puts plain LMO at ~40 min single-threaded there. Closing that
-//! needs Deléglise–Rivat plus parallelism; see RESULTS.md.
+//! LMO (Lagarias–Miller–Odlyzko / Deléglise–Rivat) φ(x,a): sub-linear π(x) in
+//! O(x^(1/3)) memory. Measured exponent 0.66 (the theoretical 2/3); π(10^14) exact
+//! in ~1.2 s, ~34× the Meissel–Lehmer in meissel.zig; reaches π(10^20) past 2^64
+//! (u128) in 3.4 h single-threaded. Single-thread it is ~3.8× off primecount's DR;
+//! parallelism (untouched) is the biggest remaining lever. See COMBINATORIAL.md.
 //!
 //! DERIVED FROM OUR OWN RECURSION, not from memory. φ(x,a)=φ(x,a−1)−φ(x/p_a,a−1)
 //! takes primes in DECREASING index order, so with F(n,b) = μ(n)·φ(x/n,b):
@@ -63,7 +63,7 @@ fn isqrtG(comptime T: type, n: T) u64 {
 /// It was 2 before the √y enumeration split. The old m-walk waste ALSO rode α², so
 /// removing it flattened the high-α side (α=8 cost +250%, now +41%) and let the
 /// optimum drift up — worth a further ~23%. α_opt has never scaled with x here:
-/// flat 1.5 in capped Meissel, flat 2, now flat 4 over four decades, where the
+/// flat 1.5 in capped Meissel, flat 2, now flat 4 over four powers of ten, where the
 /// literature's α ~ log³x would demand a steady rise.
 ///
 /// y is clamped to √x. The identity π(x) = φ(x,a) + a − 1 − P₂ needs every one of
