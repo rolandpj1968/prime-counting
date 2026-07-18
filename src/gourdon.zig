@@ -1261,7 +1261,7 @@ pub fn piGourdonV(comptime X: type, gpa: std.mem.Allocator, x: X, y_in: ?u64, ve
         while (n <= y) : (n += 1) {
             if (s.mu[@intCast(n)] == 0) continue;
             if (n % 2 == 0) continue;
-            const u: u64 = xdiv(X, x, n);
+            const u: X = x / @as(X, n); // NOT xdiv: for x>2^64 and n∈{1,3,5}, x/n exceeds u64
             phi0 += @as(i128, s.mu[@intCast(n)]) * @as(i128, @intCast(u - u / 2));
         }
     }
