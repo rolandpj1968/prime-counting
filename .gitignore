@@ -3,8 +3,10 @@
 zig-out/
 
 # Ad-hoc benchmark binaries (built with `zig build-exe -femit-bin=...`)
-/sieve
-/sieve-*
+/sieve*
+
+# Copyrighted reference papers — kept locally, not redistributed
+/literature/
 
 # Editor cruft (Emacs autosave/lock/backup)
 \#*\#
