@@ -1229,7 +1229,7 @@ pub fn s2P2Blocks(comptime C: type, comptime INST: bool, comptime X: type, gpa: 
 /// and each run BlkCtx.runBlock with their OWN scratch, sharing the read-only tables
 /// (built once) and the per-block output arrays (disjoint writes). INST is always false
 /// — diagnostics are a serial analysis path. Result is identical to s2P2Blocks(nb).
-pub fn s2P2Parallel(comptime C: type, comptime X: type, gpa: std.mem.Allocator, x: X, y: u64, seg: usize, nb: usize, nthreads: usize) !FusedResult {
+pub fn s2P2Parallel(comptime C: type, comptime X: type, gpa: std.mem.Allocator, x: X, y: u64, seg: usize, nb: usize, nthreads: usize, blk_ns: ?[]u64) !FusedResult {
     const segw = @max(@as(usize, 960), ((seg + 959) / 960) * 960);
     var t = try SmallTables.init(gpa, y);
     defer t.deinit(gpa);
@@ -1322,14 +1322,20 @@ pub fn s2P2Parallel(comptime C: type, comptime X: type, gpa: std.mem.Allocator, 
     // Atomic-counter dispenser. std.Thread.Mutex was removed in Zig 0.16's Io rework;
     // an atomic fetch-add is simpler and the contention is O(0) anyway (a block is
     // seconds of work, a fetch-add is nanoseconds). Overshoot past nb is harmless.
-    const Disp = struct { next: std.atomic.Value(usize), nb: usize };
-    var disp = Disp{ .next = std.atomic.Value(usize).init(0), .nb = nb };
+    const Disp = struct { next: std.atomic.Value(usize), nb: usize, blk_ns: ?[]u64 };
+    var disp = Disp{ .next = std.atomic.Value(usize).init(0), .nb = nb, .blk_ns = blk_ns };
     const Worker = struct {
         fn run(ctxp: *Ctx, dp: *Disp) void {
             while (true) {
                 const blk = dp.next.fetchAdd(1, .monotonic);
                 if (blk >= dp.nb) break;
-                ctxp.runBlock(false, blk);
+                if (dp.blk_ns) |ns| {
+                    const t0 = common.nowNs();
+                    ctxp.runBlock(false, blk);
+                    ns[blk] = common.nowNs() - t0;
+                } else {
+                    ctxp.runBlock(false, blk);
+                }
             }
         }
     };
@@ -1387,7 +1393,7 @@ pub fn piLMOPar(gpa: std.mem.Allocator, x: u128, nthreads: usize, k_over: usize)
 
 fn piImplPar(comptime X: type, gpa: std.mem.Allocator, x: X, y: u64, seg: usize, nb: usize, nthreads: usize) !PiResult {
     const s1 = try ordinaryS1Gen(X, gpa, x, y);
-    const f = try s2P2Parallel(Counter3P, X, gpa, x, y, seg, nb, nthreads);
+    const f = try s2P2Parallel(Counter3P, X, gpa, x, y, seg, nb, nthreads, null);
     const phi = s1.s1 + f.s2;
     const r = phi + @as(i128, @intCast(f.a)) - 1 - f.p2;
     return .{ .pi = @intCast(r), .phi = phi, .p2 = f.p2, .y = y, .a = f.a, .z = f.z, .leaves = 0 };
