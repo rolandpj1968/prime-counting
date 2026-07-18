@@ -856,6 +856,235 @@ pub fn s2AndP2FusedGen(comptime C: type, comptime INST: bool, comptime X: type, 
     return s2P2Blocks(C, INST, X, gpa, x, y, seg, 1);
 }
 
+/// Everything one block sweep touches. The read-only tables/scalars have shared slice
+/// headers (immutable during the sweep, so threads share them); the scratch is
+/// per-thread; the blk_* outputs are written by absolute block index, so threads never
+/// contend. runBlock is the single source of truth for the sweep — the serial driver
+/// and the (future) threaded one both call it.
+fn BlkCtx(comptime C: type, comptime X: type) type {
+    return struct {
+        const Self = @This();
+        // read-only shared
+        primes: []const u32,
+        mu: []const i8,
+        lpf: []const u32,
+        pi_tab: []const u32,
+        bp4: []const u64,
+        x: X,
+        y: u64,
+        z: u64,
+        sqrt_x: u64,
+        sqrt_y: u64,
+        p_cube_min: u64,
+        segw: usize,
+        a: usize,
+        nb: usize,
+        do_p2: bool,
+        // per-thread scratch
+        ctr: C,
+        phi_run: []i64,
+        seg_cnt: []i64,
+        cur: []u64,
+        next: []u64,
+        wpos: []u8,
+        pbuf: []bool,
+        mu_sum: []i64,
+        // per-block outputs (disjoint writes)
+        blk_s2: []i128,
+        blk_pi: []i128,
+        blk_np: []u64,
+        blk_total: []i64,
+        blk_mu: []i64,
+        // INST diagnostics (per-thread; summed after)
+        leaves: u64 = 0,
+        easy: u64 = 0,
+        walk: u64 = 0,
+
+        fn runBlock(self: *Self, comptime INST: bool, blk: usize) void {
+            const x = self.x;
+            const y = self.y;
+            const z = self.z;
+            const a = self.a;
+            const segw = self.segw;
+            const sqrt_y = self.sqrt_y;
+            const sqrt_x = self.sqrt_x;
+            const p_cube_min = self.p_cube_min;
+            const do_p2 = self.do_p2;
+            const pi_tab = self.pi_tab;
+            const bp4 = self.bp4;
+            const cur = self.cur;
+            const next = self.next;
+            const wpos = self.wpos;
+            const phi_run = self.phi_run;
+            const seg_cnt = self.seg_cnt;
+            const mu_sum = self.mu_sum;
+            const pbuf = self.pbuf;
+
+            const nsegs = z / segw + 1;
+            const block_lo: u64 = @min(@as(u64, blk * nsegs / self.nb) * segw, z + 1);
+            const block_hi: u64 = @min(@as(u64, (blk + 1) * nsegs / self.nb) * segw, z + 1);
+            if (block_lo >= block_hi) { // empty (nb > nsegs)
+                self.blk_s2[blk] = 0;
+                self.blk_pi[blk] = 0;
+                self.blk_np[blk] = 0;
+                @memset(self.blk_total[blk * (a + 1) ..][0 .. a + 1], 0);
+                @memset(self.blk_mu[blk * (a + 1) ..][0 .. a + 1], 0);
+                return;
+            }
+
+            // Fast-forward cursors to block_lo.
+            for (self.primes, 0..) |p32, bi| {
+                const p: u64 = p32;
+                if (block_lo == 0) {
+                    cur[bi] = if (p <= sqrt_y) y else a - 1;
+                    next[bi] = p;
+                    wpos[bi] = 0;
+                } else {
+                    const mmax: u64 = @min(y, @as(u64, @intCast(x / (@as(X, p) * @as(X, block_lo)))));
+                    cur[bi] = if (p <= sqrt_y)
+                        mmax
+                    else if (pi_tab[@intCast(mmax)] > 0)
+                        pi_tab[@intCast(mmax)] - 1
+                    else
+                        0;
+                    var m0 = (block_lo + p - 1) / p; // ceil(block_lo/p)
+                    if (m0 == 0) m0 = 1;
+                    while (!COP30[@intCast(m0 % 30)]) m0 += 1;
+                    next[bi] = p * m0;
+                    wpos[bi] = W30IDX[@intCast(m0 % 30)];
+                }
+            }
+            @memset(phi_run, 0);
+            @memset(mu_sum, 0);
+
+            var s2: i128 = 0;
+            var sum_pi_xp: i128 = 0;
+            var np: usize = 0;
+
+            var lo: u64 = block_lo;
+            while (lo < block_hi) : (lo += segw) {
+                const hi = @min(lo + segw, block_hi);
+                const len: usize = @intCast(hi - lo);
+
+                self.ctr.reset(len);
+                for (self.primes, 0..) |p32, bi| {
+                    const p: u64 = p32;
+                    if (bi >= 3) seg_cnt[bi] = self.ctr.total;
+
+                    if (p <= sqrt_y) {
+                        var m = cur[bi];
+                        const mlo = y / p;
+                        while (m > mlo) {
+                            const v: u64 = @intCast(x / @as(X, m * p));
+                            if (v >= hi) break;
+                            if (INST) self.walk += 1;
+                            if (v >= lo) {
+                                const mm = self.mu[@intCast(m)];
+                                if (mm != 0 and self.lpf[@intCast(m)] > p) {
+                                    if (INST and v <= y and p * p > v) self.easy += 1;
+                                    const phi_v = leafPhiP(v, p, bi, lo, y, pi_tab, &self.ctr, phi_run, -@as(i64, mm), mu_sum);
+                                    s2 += @as(i128, -mm) * @as(i128, phi_v);
+                                    if (INST) self.leaves += 1;
+                                }
+                            }
+                            m -= 1;
+                        }
+                        cur[bi] = m;
+                    } else if (p < p_cube_min) {
+                        var qi = cur[bi];
+                        while (qi > bi) {
+                            const q: u64 = self.primes[@intCast(qi)];
+                            const v: u64 = @intCast(x / @as(X, p * q));
+                            if (v >= hi) break;
+                            if (INST) self.walk += 1;
+                            if (v >= lo) {
+                                if (INST and v <= y and p * p > v) self.easy += 1;
+                                s2 += @as(i128, leafPhiP(v, p, bi, lo, y, pi_tab, &self.ctr, phi_run, 1, mu_sum));
+                                if (INST) self.leaves += 1;
+                            }
+                            qi -= 1;
+                        }
+                        cur[bi] = qi;
+                    }
+
+                    if (bi >= 3) {
+                        var j = next[bi];
+                        var wp = wpos[bi];
+                        while (j < hi) {
+                            self.ctr.kill(@intCast(j - lo));
+                            j += p * W30GAP[wp];
+                            wp = (wp + 1) & 7;
+                        }
+                        next[bi] = j;
+                        wpos[bi] = wp;
+                    }
+                }
+
+                seg_cnt[a] = self.ctr.total;
+                if (do_p2) {
+                    const p_hi = if (lo == 0) sqrt_x else @min(@as(u64, @intCast(x / @as(X, lo))), sqrt_x);
+                    const p_lo = @max(@as(u64, @intCast(x / @as(X, hi))), y);
+                    if (p_hi > p_lo) {
+                        const w: usize = @intCast(p_hi - p_lo);
+                        @memset(pbuf[0..w], true);
+                        for (bp4) |q| {
+                            if (q * q > p_hi) break;
+                            var j = @max(q * q, ((p_lo + q) / q) * q);
+                            while (j <= p_hi) : (j += q) pbuf[@intCast(j - p_lo - 1)] = false;
+                        }
+                        var k: usize = w;
+                        while (k > 0) {
+                            k -= 1;
+                            if (!pbuf[k]) continue;
+                            const v: u64 = @intCast(x / @as(X, p_lo + 1 + @as(u64, k)));
+                            const phi_va = phi_run[a] + self.ctr.prefix(@intCast(v - lo));
+                            sum_pi_xp += phi_va - 1 + @as(i64, @intCast(a));
+                            np += 1;
+                        }
+                    }
+                }
+                for (3..@max(3, a + 1)) |bi| phi_run[bi] += seg_cnt[bi];
+            }
+
+            self.blk_s2[blk] = s2;
+            self.blk_pi[blk] = sum_pi_xp;
+            self.blk_np[blk] = np;
+            for (0..a + 1) |bi| {
+                self.blk_total[blk * (a + 1) + bi] = phi_run[bi];
+                self.blk_mu[blk * (a + 1) + bi] = mu_sum[bi];
+            }
+        }
+    };
+}
+
+/// Stitch the per-block outputs into (S2, P₂). prefix[bi] runs Σ of lower blocks'
+/// block_total[bi]; each block's local φ is corrected by prefix, and P₂ by prefix[a].
+fn reduceBlocks(a: usize, nb: usize, do_p2: bool, blk_s2: []const i128, blk_pi: []const i128, blk_np: []const u64, blk_total: []const i64, blk_mu: []const i64, s1_closed: i128, gpa: std.mem.Allocator) !struct { s2: i128, p2: i128 } {
+    const prefix = try gpa.alloc(i64, a + 1);
+    defer gpa.free(prefix);
+    @memset(prefix, 0);
+    var s2: i128 = s1_closed;
+    var sum_pi_xp: i128 = 0;
+    var np: u64 = 0;
+    for (0..nb) |blk| {
+        s2 += blk_s2[blk];
+        sum_pi_xp += blk_pi[blk];
+        var corr: i128 = 0;
+        for (3..@max(3, a + 1)) |bi| corr += @as(i128, prefix[bi]) * @as(i128, blk_mu[blk * (a + 1) + bi]);
+        s2 += corr;
+        sum_pi_xp += @as(i128, prefix[a]) * @as(i128, @intCast(blk_np[blk]));
+        np += blk_np[blk];
+        for (3..@max(3, a + 1)) |bi| prefix[bi] += blk_total[blk * (a + 1) + bi];
+    }
+    var p2: i128 = 0;
+    if (do_p2 and np > 0) {
+        const Ai: i128 = @intCast(@as(u64, a) + np);
+        const ai: i128 = @intCast(a);
+        p2 = sum_pi_xp - (@divExact((Ai - 1) * Ai, 2) - @divExact(ai * (ai - 1), 2));
+    }
+    return .{ .s2 = s2, .p2 = p2 };
+}
+
 /// The fused sweep, split into `nb` contiguous blocks of [1, z] run SERIALLY here —
 /// the block decomposition + cross-block φ reduction that parallelism needs, proven
 /// correct against the single-block path before any threads are involved. Each block
@@ -930,8 +1159,7 @@ pub fn s2P2Blocks(comptime C: type, comptime INST: bool, comptime X: type, gpa: 
     }
     const s1_closed: i128 = @divTrunc(@as(i128, @intCast(n1)) * @as(i128, @intCast(n1 -| 1)), 2);
 
-    // Per-block scratch (re-seeded each block): fold cursors next/wpos, leaf cursor
-    // cur, and mu_sum (hard-leaf −μ sums for the cross-block correction).
+    // Per-block scratch (fold cursors, leaf cursor, mu_sum) + per-block outputs.
     const next = try gpa.alloc(u64, a);
     defer gpa.free(next);
     const wpos = try gpa.alloc(u8, a);
@@ -940,224 +1168,187 @@ pub fn s2P2Blocks(comptime C: type, comptime INST: bool, comptime X: type, gpa: 
     defer gpa.free(cur);
     const mu_sum = try gpa.alloc(i64, a + 1);
     defer gpa.free(mu_sum);
-
-    // Per-block outputs, stitched after the loop.
     const blk_s2 = try gpa.alloc(i128, nb);
     defer gpa.free(blk_s2);
     const blk_pi = try gpa.alloc(i128, nb);
     defer gpa.free(blk_pi);
     const blk_np = try gpa.alloc(u64, nb);
     defer gpa.free(blk_np);
-    const blk_total = try gpa.alloc(i64, nb * (a + 1)); // final phi_run per block
+    const blk_total = try gpa.alloc(i64, nb * (a + 1));
     defer gpa.free(blk_total);
-    const blk_mu = try gpa.alloc(i64, nb * (a + 1)); // mu_sum per block
+    const blk_mu = try gpa.alloc(i64, nb * (a + 1));
     defer gpa.free(blk_mu);
 
-    var leaves: u64 = 0;
-    var easy: u64 = 0;
-    var walk: u64 = 0;
-    if (!INST) { // keep them addressable so !INST does not trip "never mutated"
-        _ = &leaves;
-        _ = &easy;
-        _ = &walk;
-    }
+    var ctx = BlkCtx(C, X){
+        .primes = t.primes,
+        .mu = t.mu,
+        .lpf = t.lpf,
+        .pi_tab = pi_tab,
+        .bp4 = bp4,
+        .x = x,
+        .y = y,
+        .z = z,
+        .sqrt_x = sqrt_x,
+        .sqrt_y = sqrt_y,
+        .p_cube_min = p_cube_min,
+        .segw = segw,
+        .a = a,
+        .nb = nb,
+        .do_p2 = do_p2,
+        .ctr = ctr,
+        .phi_run = phi_run,
+        .seg_cnt = seg_cnt,
+        .cur = cur,
+        .next = next,
+        .wpos = wpos,
+        .pbuf = pbuf,
+        .mu_sum = mu_sum,
+        .blk_s2 = blk_s2,
+        .blk_pi = blk_pi,
+        .blk_np = blk_np,
+        .blk_total = blk_total,
+        .blk_mu = blk_mu,
+    };
+    // Serial: one block at a time. The threaded driver spawns workers that each call
+    // ctx.runBlock (with their own scratch) over dispensed blocks — identical results.
+    for (0..nb) |blk| ctx.runBlock(INST, blk);
 
-    // Blocks tile the segments of [0, z] — each is a contiguous run of segments, so
-    // its bounds are segw-aligned (last ends at z+1). The partition is clean because
-    // m ↦ v = x/(m·p) is monotone: the m's with v ≥ block_lo are exactly m ≤
-    // ⌊x/(p·block_lo)⌋, which is the fast-forward seed below.
-    const nsegs = z / segw + 1;
-    for (0..nb) |blk| {
-        const block_lo: u64 = @min(@as(u64, blk * nsegs / nb) * segw, z + 1);
-        const block_hi: u64 = @min(@as(u64, (blk + 1) * nsegs / nb) * segw, z + 1);
-        if (block_lo >= block_hi) { // empty (nb > nsegs)
-            blk_s2[blk] = 0;
-            blk_pi[blk] = 0;
-            blk_np[blk] = 0;
-            @memset(blk_total[blk * (a + 1) ..][0 .. a + 1], 0);
-            @memset(blk_mu[blk * (a + 1) ..][0 .. a + 1], 0);
-            continue;
-        }
-
-        // Fast-forward cursors to block_lo.
-        for (t.primes, 0..) |p32, bi| {
-            const p: u64 = p32;
-            if (block_lo == 0) {
-                cur[bi] = if (p <= sqrt_y) y else a - 1;
-                next[bi] = p;
-                wpos[bi] = 0;
-            } else {
-                const mmax: u64 = @min(y, @as(u64, @intCast(x / (@as(X, p) * @as(X, block_lo)))));
-                cur[bi] = if (p <= sqrt_y)
-                    mmax
-                else if (pi_tab[@intCast(mmax)] > 0)
-                    pi_tab[@intCast(mmax)] - 1
-                else
-                    0;
-                var m0 = (block_lo + p - 1) / p; // ceil(block_lo/p)
-                if (m0 == 0) m0 = 1;
-                while (!COP30[@intCast(m0 % 30)]) m0 += 1;
-                next[bi] = p * m0;
-                wpos[bi] = W30IDX[@intCast(m0 % 30)];
-            }
-        }
-        @memset(phi_run, 0);
-        @memset(mu_sum, 0);
-
-        var s2: i128 = 0;
-        var sum_pi_xp: i128 = 0;
-        var np: usize = 0;
-
-        var lo: u64 = block_lo; // segw-aligned throughout this block
-        while (lo < block_hi) : (lo += segw) {
-            const hi = @min(lo + segw, block_hi);
-            const len: usize = @intCast(hi - lo);
-
-            // --- S2
-            ctr.reset(len);
-            for (t.primes, 0..) |p32, bi| {
-                const p: u64 = p32;
-                if (bi >= 3) seg_cnt[bi] = ctr.total; // bi ≤ 2 is closed-form, no counter
-
-                if (p <= sqrt_y) {
-                    var m = cur[bi];
-                    const mlo = y / p;
-                    while (m > mlo) {
-                        const v: u64 = @intCast(x / @as(X, m * p)); // ≤ z, fits u64
-                        if (v >= hi) break;
-                        if (INST) walk += 1;
-                        if (v >= lo) {
-                            const mm = t.mu[@intCast(m)];
-                            if (mm != 0 and t.lpf[@intCast(m)] > p) {
-                                if (INST and v <= y and p * p > v) easy += 1;
-                                const phi_v = leafPhiP(v, p, bi, lo, y, pi_tab, &ctr, phi_run, -@as(i64, mm), mu_sum);
-                                s2 += @as(i128, -mm) * @as(i128, phi_v);
-                                if (INST) leaves += 1;
-                            }
-                        }
-                        m -= 1;
-                    }
-                    cur[bi] = m;
-                } else if (p < p_cube_min) {
-                    // sparse: m = q prime in (p, y]. μ(q) = −1, so −μ(m) = +1.
-                    var qi = cur[bi];
-                    while (qi > bi) {
-                        const q: u64 = t.primes[@intCast(qi)];
-                        const v: u64 = @intCast(x / @as(X, p * q)); // ≤ z, fits u64
-                        if (v >= hi) break;
-                        if (INST) walk += 1;
-                        if (v >= lo) {
-                            if (INST and v <= y and p * p > v) easy += 1;
-                            s2 += @as(i128, leafPhiP(v, p, bi, lo, y, pi_tab, &ctr, phi_run, 1, mu_sum));
-                            if (INST) leaves += 1;
-                        }
-                        qi -= 1;
-                    }
-                    cur[bi] = qi;
-                }
-                // else p³ ≥ x: the whole class is s1_closed — nothing to enumerate, no
-                // queries. We still fold p below: P₂ reads the FULLY folded counter.
-
-                // Fold p, visiting ONLY multiples p·m with m coprime to 30 — that is the
-                // ~6× win (0.46z visits instead of 2.76z). The cursor persists across
-                // segments, so j ≥ lo always and no division is needed.
-                if (bi >= 3) {
-                    var j = next[bi];
-                    var wp = wpos[bi];
-                    while (j < hi) {
-                        ctr.kill(@intCast(j - lo));
-                        j += p * W30GAP[wp];
-                        wp = (wp + 1) & 7;
-                    }
-                    next[bi] = j;
-                    wpos[bi] = wp;
-                }
-            }
-
-            // --- P₂ off the SAME counter: all a primes are folded now, so
-            //     φ(v, a) = 1 + π(v) − a  ⇒  π(v) = φ(v,a) − 1 + a.
-            seg_cnt[a] = ctr.total;
-            if (do_p2) {
-                // lo = 0 in the first segment now (mask alignment), and x/0 traps. lo = 0
-                // means "no upper bound from lo", i.e. p_hi = √x — and that segment ends
-                // up empty anyway since v = x/p ≥ √x > hi for any p ≤ √x.
-                const p_hi = if (lo == 0) sqrt_x else @min(@as(u64, @intCast(x / @as(X, lo))), sqrt_x); // x/p ≥ lo ⇔ p ≤ ⌊x/lo⌋
-                const p_lo = @max(@as(u64, @intCast(x / @as(X, hi))), y); //     x/p < hi ⇔ p > ⌊x/hi⌋
-                if (p_hi > p_lo) {
-                    const w: usize = @intCast(p_hi - p_lo); // pbuf[i] ↔ p_lo+1+i
-                    @memset(pbuf[0..w], true);
-                    for (bp4) |q| {
-                        if (q * q > p_hi) break;
-                        var j = @max(q * q, ((p_lo + q) / q) * q); // ceil((p_lo+1)/q)·q
-                        while (j <= p_hi) : (j += q) pbuf[@intCast(j - p_lo - 1)] = false;
-                    }
-                    // descending p ⇒ v = x/p ascends, matching this segment
-                    var k: usize = w;
-                    while (k > 0) {
-                        k -= 1;
-                        if (!pbuf[k]) continue;
-                        const v: u64 = @intCast(x / @as(X, p_lo + 1 + @as(u64, k))); // = x/p ∈ [lo,hi)
-                        const phi_va = phi_run[a] + ctr.prefix(@intCast(v - lo));
-                        sum_pi_xp += phi_va - 1 + @as(i64, @intCast(a));
-                        np += 1;
-                    }
-                }
-            }
-            // @max guards tiny x: a = π(y) can be < 3 (y ≤ 4), where 3..a+1 would have
-            // start > end. Safe because a < 3 ⟹ y ≤ 4 ⟹ !do_p2, and every leaf there has
-            // bi ≤ 2 and is closed-form — the counter is never read.
-            for (3..@max(3, a + 1)) |bi| phi_run[bi] += seg_cnt[bi];
-        } // end segment while
-
-        // record this block's boundary data for the reduction
-        blk_s2[blk] = s2;
-        blk_pi[blk] = sum_pi_xp;
-        blk_np[blk] = np;
-        for (0..a + 1) |bi| {
-            blk_total[blk * (a + 1) + bi] = phi_run[bi];
-            blk_mu[blk * (a + 1) + bi] = mu_sum[bi];
-        }
-    } // end block for
-
-    // --- REDUCTION. prefix[bi] = Σ_{blocks below} block_total[·][bi]. For a hard leaf
-    // in block t, the true φ = local + prefix_at_t[b−1], so S2 gains Σ_bi
-    // prefix_at_t[bi]·mu_sum[t][bi]; P₂'s π(v) gains prefix_at_t[a] per leaf, so
-    // sum_pi_xp gains prefix_at_t[a]·np[t]. Done in block order, serial and cheap.
-    const prefix = try gpa.alloc(i64, a + 1);
-    defer gpa.free(prefix);
-    @memset(prefix, 0);
-    var s2: i128 = s1_closed; // the binomial class, added once
-    var sum_pi_xp: i128 = 0;
-    var np: u64 = 0;
-    for (0..nb) |blk| {
-        s2 += blk_s2[blk];
-        sum_pi_xp += blk_pi[blk];
-        var corr: i128 = 0;
-        // @max guards tiny x where a = π(y) < 3 (y ≤ 4): the range 3..a+1 would
-        // underflow. Those x have only closed-form leaves and no P₂, so no correction.
-        for (3..@max(3, a + 1)) |bi| corr += @as(i128, prefix[bi]) * @as(i128, blk_mu[blk * (a + 1) + bi]);
-        s2 += corr;
-        sum_pi_xp += @as(i128, prefix[a]) * @as(i128, @intCast(blk_np[blk]));
-        np += blk_np[blk];
-        for (3..@max(3, a + 1)) |bi| prefix[bi] += blk_total[blk * (a + 1) + bi];
-    }
-
-    // Σ_{y<p≤√x} (π(p) − 1) = Σ_{j=a}^{A−1} j, since those p have indices a+1..A.
-    var p2: i128 = 0;
-    if (do_p2 and np > 0) {
-        const Ai: i128 = @intCast(@as(u64, a) + np);
-        const ai: i128 = @intCast(a);
-        p2 = sum_pi_xp - (@divExact((Ai - 1) * Ai, 2) - @divExact(ai * (ai - 1), 2));
-    }
+    const r = try reduceBlocks(a, nb, do_p2, blk_s2, blk_pi, blk_np, blk_total, blk_mu, s1_closed, gpa);
     return .{
-        .s2 = s2,
-        .p2 = p2,
-        .leaves = if (INST) leaves + @as(u64, @intCast(s1_closed)) else 0,
-        .easy = easy,
-        .walk = walk,
+        .s2 = r.s2,
+        .p2 = r.p2,
+        .leaves = if (INST) ctx.leaves + @as(u64, @intCast(s1_closed)) else 0,
+        .easy = ctx.easy,
+        .walk = ctx.walk,
         .z = z,
         .a = a,
     };
+}
+
+/// Threaded fused sweep: `nthreads` workers pull blocks from a mutex-guarded counter
+/// and each run BlkCtx.runBlock with their OWN scratch, sharing the read-only tables
+/// (built once) and the per-block output arrays (disjoint writes). INST is always false
+/// — diagnostics are a serial analysis path. Result is identical to s2P2Blocks(nb).
+pub fn s2P2Parallel(comptime C: type, comptime X: type, gpa: std.mem.Allocator, x: X, y: u64, seg: usize, nb: usize, nthreads: usize) !FusedResult {
+    const segw = @max(@as(usize, 960), ((seg + 959) / 960) * 960);
+    var t = try SmallTables.init(gpa, y);
+    defer t.deinit(gpa);
+    const z: u64 = @intCast(x / @as(X, y));
+    const a = t.a;
+    const sqrt_x = isqrtG(X, x);
+    const sqrt_y = common.isqrt(y);
+    const bp4 = try rs.basePrimes(gpa, @max(common.isqrt(sqrt_x), 2));
+    defer gpa.free(bp4);
+    const do_p2 = y < sqrt_x;
+
+    const pi_tab = try gpa.alloc(u32, @intCast(y + 1));
+    defer gpa.free(pi_tab);
+    {
+        var c: u32 = 0;
+        for (0..@as(usize, @intCast(y + 1))) |m| {
+            if (m >= 2 and t.lpf[m] == m) c += 1;
+            pi_tab[m] = c;
+        }
+    }
+    const c3 = icbrtG(X, x);
+    const p_cube_min = if (@as(X, c3) * @as(X, c3) * @as(X, c3) == x) c3 else c3 + 1;
+    var n1: u64 = 0;
+    for (t.primes) |p32| {
+        const p: u64 = p32;
+        if (p > sqrt_y and p >= p_cube_min) n1 += 1;
+    }
+    const s1_closed: i128 = @divTrunc(@as(i128, @intCast(n1)) * @as(i128, @intCast(n1 -| 1)), 2);
+
+    // shared per-block outputs
+    const blk_s2 = try gpa.alloc(i128, nb);
+    defer gpa.free(blk_s2);
+    const blk_pi = try gpa.alloc(i128, nb);
+    defer gpa.free(blk_pi);
+    const blk_np = try gpa.alloc(u64, nb);
+    defer gpa.free(blk_np);
+    const blk_total = try gpa.alloc(i64, nb * (a + 1));
+    defer gpa.free(blk_total);
+    const blk_mu = try gpa.alloc(i64, nb * (a + 1));
+    defer gpa.free(blk_mu);
+
+    const Ctx = BlkCtx(C, X);
+    const ctxs = try gpa.alloc(Ctx, nthreads);
+    defer gpa.free(ctxs);
+    var allocd: usize = 0;
+    defer for (0..allocd) |i| {
+        ctxs[i].ctr.deinit(gpa);
+        gpa.free(ctxs[i].phi_run);
+        gpa.free(ctxs[i].seg_cnt);
+        gpa.free(ctxs[i].cur);
+        gpa.free(ctxs[i].next);
+        gpa.free(ctxs[i].wpos);
+        gpa.free(ctxs[i].pbuf);
+        gpa.free(ctxs[i].mu_sum);
+    };
+    for (0..nthreads) |i| {
+        ctxs[i] = Ctx{
+            .primes = t.primes,
+            .mu = t.mu,
+            .lpf = t.lpf,
+            .pi_tab = pi_tab,
+            .bp4 = bp4,
+            .x = x,
+            .y = y,
+            .z = z,
+            .sqrt_x = sqrt_x,
+            .sqrt_y = sqrt_y,
+            .p_cube_min = p_cube_min,
+            .segw = segw,
+            .a = a,
+            .nb = nb,
+            .do_p2 = do_p2,
+            .ctr = try C.init(gpa, segw),
+            .phi_run = try gpa.alloc(i64, a + 1),
+            .seg_cnt = try gpa.alloc(i64, a + 1),
+            .cur = try gpa.alloc(u64, a),
+            .next = try gpa.alloc(u64, a),
+            .wpos = try gpa.alloc(u8, a),
+            .pbuf = try gpa.alloc(bool, segw),
+            .mu_sum = try gpa.alloc(i64, a + 1),
+            .blk_s2 = blk_s2,
+            .blk_pi = blk_pi,
+            .blk_np = blk_np,
+            .blk_total = blk_total,
+            .blk_mu = blk_mu,
+        };
+        allocd = i + 1;
+    }
+
+    // Atomic-counter dispenser. std.Thread.Mutex was removed in Zig 0.16's Io rework;
+    // an atomic fetch-add is simpler and the contention is O(0) anyway (a block is
+    // seconds of work, a fetch-add is nanoseconds). Overshoot past nb is harmless.
+    const Disp = struct { next: std.atomic.Value(usize), nb: usize };
+    var disp = Disp{ .next = std.atomic.Value(usize).init(0), .nb = nb };
+    const Worker = struct {
+        fn run(ctxp: *Ctx, dp: *Disp) void {
+            while (true) {
+                const blk = dp.next.fetchAdd(1, .monotonic);
+                if (blk >= dp.nb) break;
+                ctxp.runBlock(false, blk);
+            }
+        }
+    };
+
+    // Spawn nthreads-1 workers; the master runs one too. Spawn failure degrades
+    // gracefully — fewer workers still drain every block.
+    const threads = try gpa.alloc(std.Thread, nthreads);
+    defer gpa.free(threads);
+    var spawned: usize = 0;
+    for (1..nthreads) |i| {
+        threads[i] = std.Thread.spawn(.{}, Worker.run, .{ &ctxs[i], &disp }) catch break;
+        spawned = i;
+    }
+    Worker.run(&ctxs[0], &disp);
+    var j: usize = 1;
+    while (j <= spawned) : (j += 1) threads[j].join();
+
+    const r = try reduceBlocks(a, nb, do_p2, blk_s2, blk_pi, blk_np, blk_total, blk_mu, s1_closed, gpa);
+    return .{ .s2 = r.s2, .p2 = r.p2, .leaves = 0, .easy = 0, .walk = 0, .z = z, .a = a };
 }
 
 // ---------------------------------------------------------------------- π(x)
@@ -1177,6 +1368,29 @@ pub fn piLMO(gpa: std.mem.Allocator, x: u128, y_in: ?u64, seg_in: ?usize) !PiRes
     } else {
         return piImpl(u128, gpa, x, y, seg);
     }
+}
+
+/// Parallel π(x): nb = nthreads·k_over blocks over the same decomposition, dispensed
+/// dynamically to nthreads workers. k_over is the over-partition factor for load
+/// balance (blocks are equal-segment-width for now — cost-balanced partition is next).
+pub fn piLMOPar(gpa: std.mem.Allocator, x: u128, nthreads: usize, k_over: usize) !PiResult {
+    if (x < 2) return .{ .pi = 0, .phi = 0, .p2 = 0, .y = 0, .a = 0, .z = 0, .leaves = 0 };
+    const y = defaultY(x);
+    const seg: usize = @max(y, 1024);
+    const nb = @max(@as(usize, 1), nthreads * k_over);
+    if (x <= std.math.maxInt(u64)) {
+        return piImplPar(u64, gpa, @intCast(x), y, seg, nb, nthreads);
+    } else {
+        return piImplPar(u128, gpa, x, y, seg, nb, nthreads);
+    }
+}
+
+fn piImplPar(comptime X: type, gpa: std.mem.Allocator, x: X, y: u64, seg: usize, nb: usize, nthreads: usize) !PiResult {
+    const s1 = try ordinaryS1Gen(X, gpa, x, y);
+    const f = try s2P2Parallel(Counter3P, X, gpa, x, y, seg, nb, nthreads);
+    const phi = s1.s1 + f.s2;
+    const r = phi + @as(i128, @intCast(f.a)) - 1 - f.p2;
+    return .{ .pi = @intCast(r), .phi = phi, .p2 = f.p2, .y = y, .a = f.a, .z = f.z, .leaves = 0 };
 }
 
 fn piImpl(comptime X: type, gpa: std.mem.Allocator, x: X, y: u64, seg: usize) !PiResult {
