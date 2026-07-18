@@ -945,6 +945,56 @@ fn omegaBlocked(comptime INST: bool, comptime X: type, gpa: std.mem.Allocator, s
     return r;
 }
 
+/// Threaded ω+B (Model-A phase 2): nthreads workers pull blocks from an atomic
+/// dispenser, each with its own Scratch + Stats; block outputs are disjoint so no
+/// locks. Serial reduceOmB stitches after join. nb = nthreads·k_over (over-partition).
+fn omegaBlockedPar(comptime INST: bool, comptime X: type, gpa: std.mem.Allocator, s: anytype, x: X, y: u64, z: u64, xstar: u64, nb: usize, nthreads: usize, pins: ?[]const u32) !OmegaB {
+    const P = std.meta.Child(@TypeOf(s.primes));
+    var ctx = (try initBlkCtx(X, P, gpa, s, x, y, z, xstar, nb)) orelse return .{ .omega = 0, .b = 0 };
+    defer freeBlkCtx(X, P, gpa, &ctx);
+
+    const scratches = try gpa.alloc(Scratch, nthreads);
+    defer gpa.free(scratches);
+    var ninit: usize = 0;
+    defer for (0..ninit) |k| scratches[k].deinit(gpa);
+    for (0..nthreads) |i| {
+        scratches[i] = try Scratch.init(gpa, ctx.nax, ctx.naz, ctx.segw);
+        ninit = i + 1;
+    }
+    const stats = try gpa.alloc(Stats, nthreads);
+    defer gpa.free(stats);
+    @memset(stats, Stats{});
+
+    const Worker = struct {
+        fn run(cx: *BlkCtx(X, P), sc: *Scratch, stt: *Stats, cpu: ?u32) void {
+            if (cpu) |c| pinToCpu(c);
+            while (true) {
+                const t = cx.disp.fetchAdd(1, .monotonic);
+                if (t >= cx.nb) break;
+                runOneBlock(INST, X, P, cx, sc, stt, t);
+            }
+        }
+    };
+    const threads = try gpa.alloc(std.Thread, nthreads);
+    defer gpa.free(threads);
+    var spawned: usize = 0;
+    for (1..nthreads) |i| {
+        const cpu: ?u32 = if (pins) |pp| pp[i] else null;
+        threads[i] = std.Thread.spawn(.{}, Worker.run, .{ &ctx, &scratches[i], &stats[i], cpu }) catch break;
+        spawned = i;
+    }
+    Worker.run(&ctx, &scratches[0], &stats[0], if (pins) |pp| pp[0] else null);
+    var j: usize = 1;
+    while (j <= spawned) : (j += 1) threads[j].join();
+
+    if (INST) {
+        var st = Stats{};
+        for (stats) |ss| st.add(ss);
+        std.debug.print("  ωB-par-stats: nb={d} nthreads={d} segs={d} kills={d} Bqueries={d}\n", .{ nb, nthreads, st.n_seg, st.n_kill, st.n_bq });
+    }
+    return reduceOmB(X, P, gpa, &ctx);
+}
+
 // ---------------------------------------------- ω reference (for the diff-check)
 fn phiRec(primes: []const u32, pi: []const u32, u: u64, b: usize) i64 {
     if (u == 0) return 0;
@@ -1019,11 +1069,17 @@ fn chooseY(comptime X: type, x: X) u64 {
 
 /// Dispatch: u64 path for x ≤ 2⁶⁴ (u32 primes), u128 path beyond (u64 primes).
 pub fn piGourdon(gpa: std.mem.Allocator, x: u128, y_in: ?u64) !GResult {
-    if (x <= std.math.maxInt(u64)) return piGourdonV(u64, gpa, @intCast(x), y_in, false);
-    return piGourdonV(u128, gpa, x, y_in, false);
+    if (x <= std.math.maxInt(u64)) return piGourdonV(u64, gpa, @intCast(x), y_in, false, 1, null);
+    return piGourdonV(u128, gpa, x, y_in, false, 1, null);
 }
 
-pub fn piGourdonV(comptime X: type, gpa: std.mem.Allocator, x: X, y_in: ?u64, verbose: bool) !GResult {
+/// Parallel entry: nthreads workers (pinned per `pins` if given).
+pub fn piGourdonPar(gpa: std.mem.Allocator, x: u128, nthreads: usize, pins: ?[]const u32) !GResult {
+    if (x <= std.math.maxInt(u64)) return piGourdonV(u64, gpa, @intCast(x), null, false, nthreads, pins);
+    return piGourdonV(u128, gpa, x, null, false, nthreads, pins);
+}
+
+pub fn piGourdonV(comptime X: type, gpa: std.mem.Allocator, x: X, y_in: ?u64, verbose: bool, nthreads: usize, pins: ?[]const u32) !GResult {
     const P = if (X == u64) u32 else u64; // prime element type: √x < 2³² ⇔ X = u64
     var tp = common.nowNs();
     const y = y_in orelse chooseY(X, x);
@@ -1045,12 +1101,18 @@ pub fn piGourdonV(comptime X: type, gpa: std.mem.Allocator, x: X, y_in: ?u64, ve
     }.f;
     lap(verbose, &tp, "sieve");
 
-    // A/Σ via binary-search π (all points ≤ √x).
-    const t = computeTerms(X, &s, x, y, sqx, x13, sqz, xstar);
+    // A/Σ via binary-search π (all points ≤ √x). Phase 1 (parallel if nthreads>1).
+    const t = if (nthreads > 1)
+        try computeTermsPar(X, gpa, &s, x, y, sqx, x13, sqz, xstar, nthreads, pins)
+    else
+        computeTerms(X, &s, x, y, sqx, x13, sqz, xstar);
     lap(verbose, &tp, "A/Σ");
 
-    // ω and B fused: one counter folded to √z serves ω's leaves and B's π(x/p).
-    const wb = try omegaCounter(false, X, gpa, &s, x, y, z, xstar);
+    // ω+B fused. Phase 2: block-and-scan (nb = nthreads·8 over-partition) if parallel.
+    const wb = if (nthreads > 1)
+        try omegaBlockedPar(false, X, gpa, &s, x, y, z, xstar, nthreads * 8, nthreads, pins)
+    else
+        try omegaCounter(false, X, gpa, &s, x, y, z, xstar);
     const omega = wb.omega;
     const B = wb.b;
     lap(verbose, &tp, "ω+B");
@@ -1131,6 +1193,21 @@ pub fn main() !void {
         }
     }
 
+    // Full parallel total: piGourdonPar(4) must equal piGourdon (serial), + speedup.
+    std.debug.print("\nparallel total (serial vs 4-thread, cores 0/2/4/6):\n", .{});
+    {
+        const pins = [_]u32{ 0, 2, 4, 6 };
+        for ([_]u64{ 1_000_000_000_000, 100_000_000_000_000 }) |x| {
+            const t0 = common.nowNs();
+            const ser = try piGourdon(gpa, x, null);
+            const st = @as(f64, @floatFromInt(common.nowNs() - t0)) / 1e9;
+            const t1 = common.nowNs();
+            const par = try piGourdonPar(gpa, x, 4, &pins);
+            const pt = @as(f64, @floatFromInt(common.nowNs() - t1)) / 1e9;
+            std.debug.print("  x=10^{d}: pi={d} {s}  serial {d:.3}s  4-thread {d:.3}s  ({d:.2}x)\n", .{ std.math.log10_int(x), par.pi, if (ser.pi == par.pi) "match" else "MISMATCH", st, pt, st / pt });
+        }
+    }
+
     // Correctness + timing: Gourdon (counter-ω, segmented-π) vs lmo, both serial.
     std.debug.print("\ntotal (gourdon vs lmo):\n", .{});
     const xs = [_]u64{ 1_000_000_000, 10_000_000_000, 100_000_000_000, 1_000_000_000_000 };
@@ -1148,7 +1225,7 @@ pub fn main() !void {
         std.debug.print("{d:>14} {d:>16} {s:>4} {d:>11.3} {d:>11.3} {d:>8.2}\n", .{ x, g.pi, if (ok) "y" else "NO", gs, ls, gs / ls });
     }
     std.debug.print("\nper-term profile @ 10^12:\n", .{});
-    _ = try piGourdonV(u64, gpa, 1_000_000_000_000, null, true);
+    _ = try piGourdonV(u64, gpa, 1_000_000_000_000, null, true, 1, null);
 
     std.debug.print("\nop-count comparison (gourdon ω/B vs lmo S2/P₂), matched x,y:\n", .{});
     for ([_]u64{ 1_000_000_000_000, 100_000_000_000_000 }) |x| {
@@ -1167,8 +1244,8 @@ pub fn main() !void {
     // u128-path validation: force X=u128 on x<2⁶⁴; must equal the u64 path bit-for-bit.
     std.debug.print("\nu128-path check (X=u128 on x<2^64 must match u64):\n", .{});
     for ([_]u64{ 1_000_000_000_000, 100_000_000_000_000, 10_000_000_000_000_000 }) |x| {
-        const g64 = try piGourdonV(u64, gpa, x, null, false);
-        const g128 = try piGourdonV(u128, gpa, @as(u128, x), null, false);
+        const g64 = try piGourdonV(u64, gpa, x, null, false, 1, null);
+        const g128 = try piGourdonV(u128, gpa, @as(u128, x), null, false, 1, null);
         std.debug.print("  x=10^{d}: u64={d} u128={d} {s}\n", .{ std.math.log10_int(x), g64.pi, g128.pi, if (g64.pi == g128.pi) "match" else "MISMATCH" });
     }
 
