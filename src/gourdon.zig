@@ -127,6 +127,16 @@ inline fn log2Floor(n: usize) u6 {
 }
 const W30 = [8]u8{ 1, 7, 11, 13, 17, 19, 23, 29 };
 const W30GAP = [8]u8{ 6, 4, 2, 4, 2, 4, 6, 2 };
+const COP30: [30]bool = blk: {
+    var c: [30]bool = undefined;
+    for (0..30) |r| c[r] = (r % 2 != 0 and r % 3 != 0 and r % 5 != 0);
+    break :blk c;
+};
+const W30IDX: [30]u8 = blk: { // residue r (coprime to 30) → its index in W30
+    var t: [30]u8 = @splat(0);
+    for (W30, 0..) |res, i| t[res] = @intCast(i);
+    break :blk t;
+};
 const MASK30: [15]u64 = blk: {
     @setEvalBranchQuota(20000);
     var m: [15]u64 = @splat(0);
@@ -228,9 +238,11 @@ const Counter3P = struct {
 /// the queries, sweep [1,z] in cache-sized segments carrying a running π, read each
 /// query off as the walk passes it. base = primes ≤ √z. O(z) time, O(SEG+n) memory.
 ///
-/// mod-2 WHEEL: only ODD integers are represented (2 is the sole even prime), so the
-/// array, marking, and walk are all halved. π(v) = 1 + (odd primes ≤ v) for v ≥ 2 —
-/// all of B's query points are ≥ √x, so this branch is always taken.
+/// mod-30 WHEEL, BIT-PACKED: one bit per integer, each word initialised to MASK30
+/// (2,3,5 pre-struck). Composites of p≥7 are cleared by wheel-stepping (bit ops, no
+/// div); primes are counted 64-at-a-time by popcount. Survivors in [0,v] = {1} ∪
+/// {coprime-30 primes ≤ v}, so π(v) = 2 + popcount([0,v]) for v ≥ 7 (the +2 = 3 for
+/// {2,3,5} − 1 for the spurious "1"). All B query points are ≥ √x ≥ 7.
 fn answerPi(gpa: std.mem.Allocator, base: []const u32, pts: []const u64, out: []u64, z: u64) !void {
     const n = pts.len;
     const ord = try gpa.alloc(usize, n);
@@ -244,37 +256,56 @@ fn answerPi(gpa: std.mem.Allocator, base: []const u32, pts: []const u64, out: []
     };
     std.mem.sort(usize, ord, Ctx{ .p = pts }, Ctx.lt);
 
-    const SEG: usize = 1 << 18; // even; segment spans SEG integers = SEG/2 odds
-    const seg = try gpa.alloc(bool, SEG / 2 + 1); // composite? per odd position
-    defer gpa.free(seg);
+    const SEG: usize = 960 * 256; // multiple of lcm(30,64)=960 ⇒ MASK30[w%15] tiles
+    const NW = SEG / 64;
+    const bits = try gpa.alloc(u64, NW);
+    defer gpa.free(bits);
 
     var qi: usize = 0;
-    while (qi < n and pts[ord[qi]] < 2) : (qi += 1) out[ord[qi]] = 0; // π(0)=π(1)=0
-    var odd_pi: u64 = 0; // running count of ODD primes < lo
-    var lo: u64 = 0; // always even
+    // small v (< 7): π(0..6) = 0,0,1,2,2,3,3 — the wheel formula (2+…) only holds v≥7.
+    while (qi < n and pts[ord[qi]] < 7) : (qi += 1) {
+        const v = pts[ord[qi]];
+        out[ord[qi]] = if (v < 2) 0 else if (v < 3) 1 else if (v < 5) 2 else 3;
+    }
+    var gc: u64 = 0; // survivor popcount in [0, lo)
+    var lo: u64 = 0; // multiple of SEG (hence of 960)
     while (lo <= z) : (lo += SEG) {
         const hi = @min(lo + SEG, z + 1);
-        const nodd: usize = @intCast((hi - lo) / 2); // odds in [lo,hi): lo+1, lo+3, …
-        @memset(seg[0..nodd], false);
+        const len: usize = @intCast(hi - lo);
+        const nw: usize = (len + 63) / 64;
+        for (0..nw) |w| bits[w] = MASK30[w % 15];
+        if (len % 64 != 0) bits[nw - 1] &= (@as(u64, 1) << @as(u6, @intCast(len % 64))) - 1;
         for (base) |p32| {
             const p: u64 = p32;
-            if (p == 2) continue; // evens aren't represented
+            if (p < 7) continue; // 2,3,5 already struck by MASK30
             if (p * p >= hi) break;
             const L = @max(p * p, lo);
-            var w = ((L + p - 1) / p) * p; // first multiple of p ≥ L
-            if (w % 2 == 0) w += p; // ← make it odd (p odd ⇒ w+p flips parity)
-            while (w < hi) : (w += 2 * p) seg[@intCast((w - lo - 1) / 2)] = true;
+            var k = (L + p - 1) / p;
+            while (!COP30[@intCast(k % 30)]) k += 1; // first coprime-30 multiplier
+            var w = p * k;
+            var widx: u8 = W30IDX[@intCast(k % 30)];
+            while (w < hi) {
+                const i: usize = @intCast(w - lo);
+                bits[i >> 6] &= ~(@as(u64, 1) << @as(u6, @intCast(i & 63)));
+                w += p * W30GAP[widx];
+                widx = (widx + 1) & 7;
+            }
         }
-        if (lo == 0 and nodd > 0) seg[0] = true; // integer 1 is not prime
-        var j: usize = 0;
-        while (j < nodd) : (j += 1) {
-            const nn = lo + 1 + 2 * @as(u64, j); // the odd integer at this position
-            if (!seg[j]) odd_pi += 1;
-            // v answered once we've passed the largest odd ≤ v (∈ {nn, nn+1})
-            while (qi < n and pts[ord[qi]] <= nn + 1) : (qi += 1) out[ord[qi]] = 1 + odd_pi;
+        var rc: u64 = 0; // survivor popcount in [lo, lo+w·64)
+        var w: usize = 0;
+        while (w < nw) : (w += 1) {
+            const word = bits[w];
+            const wbase = lo + @as(u64, w) * 64;
+            while (qi < n and pts[ord[qi]] < wbase + 64 and pts[ord[qi]] < hi) : (qi += 1) {
+                const b: u6 = @intCast(pts[ord[qi]] - wbase);
+                const mask: u64 = if (b == 63) ~@as(u64, 0) else (@as(u64, 1) << (b + 1)) - 1;
+                out[ord[qi]] = 2 + gc + rc + @popCount(word & mask);
+            }
+            rc += @popCount(word);
         }
+        gc += rc;
     }
-    while (qi < n) : (qi += 1) out[ord[qi]] = 1 + odd_pi; // defensive
+    while (qi < n) : (qi += 1) out[ord[qi]] = 2 + gc; // defensive
 }
 
 /// π(v) for v ≤ √x by binary search on the prime list (which holds every prime ≤ √x).
