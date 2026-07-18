@@ -196,6 +196,18 @@ const Fenwick = struct {
 const W30 = [8]u8{ 1, 7, 11, 13, 17, 19, 23, 29 }; // residues coprime to 30
 const W30GAP = [8]u8{ 6, 4, 2, 4, 2, 4, 6, 2 }; // 1→7→11→13→17→19→23→29→31; Σ = 30
 
+// Coprimality lookups mod 30, for fast-forwarding the fold cursor to a block start.
+const COP30: [30]bool = blk: {
+    var c: [30]bool = undefined;
+    for (0..30) |r| c[r] = (r % 2 != 0 and r % 3 != 0 and r % 5 != 0);
+    break :blk c;
+};
+const W30IDX: [30]u8 = blk: { // residue r (coprime to 30) → its index in W30
+    var t: [30]u8 = @splat(0);
+    for (W30, 0..) |res, i| t[res] = @intCast(i);
+    break :blk t;
+};
+
 /// Bit pattern of "coprime to 30" over u64 words. lcm(30, 64) = 960 bits = 15 words,
 /// so a segment starting at a multiple of 960 has mask MASK30[w % 15].
 const MASK30: [15]u64 = blk: {
@@ -327,7 +339,6 @@ pub const Counter = struct {
 /// Power-of-two variants, so `w / wpb` in kill() becomes a shift. Counter's block
 /// size is isqrt(nwords), a runtime divisor — a real division on the hot kill path.
 /// Counter2P isolates that effect from the level count; Counter3P adds the level.
-
 inline fn log2Floor(n: usize) u6 {
     return @intCast(63 - @clz(@as(u64, @max(n, 1))));
 }
@@ -762,6 +773,33 @@ inline fn leafPhi(
     return phi_run[bi] + ctr.prefix(@intCast(v - lo));
 }
 
+/// leafPhi, plus the block-parallel bookkeeping: only the HARD path uses phi_run
+/// (the running φ), so only there does the cross-block correction apply. We record
+/// mu_sum[bi] += sign (the leaf's −μ(m) contribution) for exactly those leaves, so
+/// the master can add prefix_φ_at_block_start[bi]·mu_sum[bi] after the fact. Closed-
+/// form and π-table leaves are block-local and need no correction. For single-block
+/// (serial) runs mu_sum is accumulated but never read, so the result is unchanged.
+inline fn leafPhiP(
+    v: u64,
+    p: u64,
+    bi: usize,
+    lo: u64,
+    y: u64,
+    pi_tab: []const u32,
+    ctr: anytype,
+    phi_run: []const i64,
+    sign: i64,
+    mu_sum: []i64,
+) i64 {
+    if (bi <= 2) return phiSmall(v, bi);
+    if (v <= y and p * p > v) {
+        const piv: i64 = pi_tab[@intCast(v)];
+        return 1 + @max(0, piv - @as(i64, @intCast(bi)));
+    }
+    mu_sum[bi] += sign; // hard leaf: this bi contributes to the cross-block φ correction
+    return phi_run[bi] + ctr.prefix(@intCast(v - lo));
+}
+
 // ------------------------------------------------------------- fused sweep
 
 /// S2 and P₂ from ONE pass over [1, z] — P₂ reads the SAME counter, for free.
@@ -815,6 +853,16 @@ pub fn s2AndP2FusedInstrumented(gpa: std.mem.Allocator, x: u64, y: u64, seg: usi
 /// the numerator are X-wide; every quotient (z, v = x/(m·p), x/p) fits u64 and is cast
 /// down immediately, so y, a, primes, m, p, q and the whole counter stay u64.
 pub fn s2AndP2FusedGen(comptime C: type, comptime INST: bool, comptime X: type, gpa: std.mem.Allocator, x: X, y: u64, seg: usize) !FusedResult {
+    return s2P2Blocks(C, INST, X, gpa, x, y, seg, 1);
+}
+
+/// The fused sweep, split into `nb` contiguous blocks of [1, z] run SERIALLY here —
+/// the block decomposition + cross-block φ reduction that parallelism needs, proven
+/// correct against the single-block path before any threads are involved. Each block
+/// sweeps its sub-range with a LOCAL running φ (phi_run init 0), records its boundary
+/// totals and mu_sum, and the reduction stitches them: φ(v,b−1) in block t is
+/// local + Σ_{t'<t} block_total[t'][b−1]. nb = 1 reproduces the monolithic sweep.
+pub fn s2P2Blocks(comptime C: type, comptime INST: bool, comptime X: type, gpa: std.mem.Allocator, x: X, y: u64, seg: usize, nb: usize) !FusedResult {
     // Segments must start at a multiple of 960 = lcm(30, 64) for MASK30 to be
     // word-aligned, so round the segment length up to one.
     const segw = @max(@as(usize, 960), ((seg + 959) / 960) * 960);
@@ -835,8 +883,7 @@ pub fn s2AndP2FusedGen(comptime C: type, comptime INST: bool, comptime X: type, 
     defer gpa.free(bp4);
     const pbuf = try gpa.alloc(bool, segw); // p-range sieve; width ≤ seg ≤ segw
     defer gpa.free(pbuf);
-    const do_p2 = y < sqrt_x;
-    var np: usize = 0; // primes found in (y, √x] ⇒ π(√x) = a + np
+    const do_p2 = y < sqrt_x; // np (primes in (y, √x]) is now accumulated per block
 
     var ctr = try C.init(gpa, segw);
     defer ctr.deinit(gpa);
@@ -883,24 +930,29 @@ pub fn s2AndP2FusedGen(comptime C: type, comptime INST: bool, comptime X: type, 
     }
     const s1_closed: i128 = @divTrunc(@as(i128, @intCast(n1)) * @as(i128, @intCast(n1 -| 1)), 2);
 
-    // Wheel fold cursors: next[bi] = next multiple p·m (m coprime to 30) at or above
-    // the current lo; wpos[bi] = m's index in W30. Starts at m = 1, i.e. j = p.
-    // 2, 3 and 5 are never folded — MASK30 pre-strikes them in reset().
+    // Per-block scratch (re-seeded each block): fold cursors next/wpos, leaf cursor
+    // cur, and mu_sum (hard-leaf −μ sums for the cross-block correction).
     const next = try gpa.alloc(u64, a);
     defer gpa.free(next);
     const wpos = try gpa.alloc(u8, a);
     defer gpa.free(wpos);
-    for (t.primes, 0..) |p32, bi| {
-        next[bi] = p32;
-        wpos[bi] = 0;
-    }
-
     const cur = try gpa.alloc(u64, a);
     defer gpa.free(cur);
-    for (t.primes, 0..) |p32, bi| cur[bi] = if (p32 <= sqrt_y) y else a - 1;
+    const mu_sum = try gpa.alloc(i64, a + 1);
+    defer gpa.free(mu_sum);
 
-    var s2: i128 = 0;
-    var sum_pi_xp: i128 = 0;
+    // Per-block outputs, stitched after the loop.
+    const blk_s2 = try gpa.alloc(i128, nb);
+    defer gpa.free(blk_s2);
+    const blk_pi = try gpa.alloc(i128, nb);
+    defer gpa.free(blk_pi);
+    const blk_np = try gpa.alloc(u64, nb);
+    defer gpa.free(blk_np);
+    const blk_total = try gpa.alloc(i64, nb * (a + 1)); // final phi_run per block
+    defer gpa.free(blk_total);
+    const blk_mu = try gpa.alloc(i64, nb * (a + 1)); // mu_sum per block
+    defer gpa.free(blk_mu);
+
     var leaves: u64 = 0;
     var easy: u64 = 0;
     var walk: u64 = 0;
@@ -910,118 +962,195 @@ pub fn s2AndP2FusedGen(comptime C: type, comptime INST: bool, comptime X: type, 
         _ = &walk;
     }
 
-    var lo: u64 = 0; // multiple of 960 throughout; k=0 is not coprime to 30, so dead
-    while (lo <= z) : (lo += segw) {
-        const hi = @min(lo + segw, z + 1);
-        const len: usize = @intCast(hi - lo);
+    // Blocks tile the segments of [0, z] — each is a contiguous run of segments, so
+    // its bounds are segw-aligned (last ends at z+1). The partition is clean because
+    // m ↦ v = x/(m·p) is monotone: the m's with v ≥ block_lo are exactly m ≤
+    // ⌊x/(p·block_lo)⌋, which is the fast-forward seed below.
+    const nsegs = z / segw + 1;
+    for (0..nb) |blk| {
+        const block_lo: u64 = @min(@as(u64, blk * nsegs / nb) * segw, z + 1);
+        const block_hi: u64 = @min(@as(u64, (blk + 1) * nsegs / nb) * segw, z + 1);
+        if (block_lo >= block_hi) { // empty (nb > nsegs)
+            blk_s2[blk] = 0;
+            blk_pi[blk] = 0;
+            blk_np[blk] = 0;
+            @memset(blk_total[blk * (a + 1) ..][0 .. a + 1], 0);
+            @memset(blk_mu[blk * (a + 1) ..][0 .. a + 1], 0);
+            continue;
+        }
 
-        // --- S2
-        ctr.reset(len);
+        // Fast-forward cursors to block_lo.
         for (t.primes, 0..) |p32, bi| {
             const p: u64 = p32;
-            if (bi >= 3) seg_cnt[bi] = ctr.total; // bi ≤ 2 is closed-form, no counter
+            if (block_lo == 0) {
+                cur[bi] = if (p <= sqrt_y) y else a - 1;
+                next[bi] = p;
+                wpos[bi] = 0;
+            } else {
+                const mmax: u64 = @min(y, @as(u64, @intCast(x / (@as(X, p) * @as(X, block_lo)))));
+                cur[bi] = if (p <= sqrt_y)
+                    mmax
+                else if (pi_tab[@intCast(mmax)] > 0)
+                    pi_tab[@intCast(mmax)] - 1
+                else
+                    0;
+                var m0 = (block_lo + p - 1) / p; // ceil(block_lo/p)
+                if (m0 == 0) m0 = 1;
+                while (!COP30[@intCast(m0 % 30)]) m0 += 1;
+                next[bi] = p * m0;
+                wpos[bi] = W30IDX[@intCast(m0 % 30)];
+            }
+        }
+        @memset(phi_run, 0);
+        @memset(mu_sum, 0);
 
-            if (p <= sqrt_y) {
-                var m = cur[bi];
-                const mlo = y / p;
-                while (m > mlo) {
-                    const v: u64 = @intCast(x / @as(X, m * p)); // ≤ z, fits u64
-                    if (v >= hi) break;
-                    if (INST) walk += 1;
-                    if (v >= lo) {
-                        const mm = t.mu[@intCast(m)];
-                        if (mm != 0 and t.lpf[@intCast(m)] > p) {
+        var s2: i128 = 0;
+        var sum_pi_xp: i128 = 0;
+        var np: usize = 0;
+
+        var lo: u64 = block_lo; // segw-aligned throughout this block
+        while (lo < block_hi) : (lo += segw) {
+            const hi = @min(lo + segw, block_hi);
+            const len: usize = @intCast(hi - lo);
+
+            // --- S2
+            ctr.reset(len);
+            for (t.primes, 0..) |p32, bi| {
+                const p: u64 = p32;
+                if (bi >= 3) seg_cnt[bi] = ctr.total; // bi ≤ 2 is closed-form, no counter
+
+                if (p <= sqrt_y) {
+                    var m = cur[bi];
+                    const mlo = y / p;
+                    while (m > mlo) {
+                        const v: u64 = @intCast(x / @as(X, m * p)); // ≤ z, fits u64
+                        if (v >= hi) break;
+                        if (INST) walk += 1;
+                        if (v >= lo) {
+                            const mm = t.mu[@intCast(m)];
+                            if (mm != 0 and t.lpf[@intCast(m)] > p) {
+                                if (INST and v <= y and p * p > v) easy += 1;
+                                const phi_v = leafPhiP(v, p, bi, lo, y, pi_tab, &ctr, phi_run, -@as(i64, mm), mu_sum);
+                                s2 += @as(i128, -mm) * @as(i128, phi_v);
+                                if (INST) leaves += 1;
+                            }
+                        }
+                        m -= 1;
+                    }
+                    cur[bi] = m;
+                } else if (p < p_cube_min) {
+                    // sparse: m = q prime in (p, y]. μ(q) = −1, so −μ(m) = +1.
+                    var qi = cur[bi];
+                    while (qi > bi) {
+                        const q: u64 = t.primes[@intCast(qi)];
+                        const v: u64 = @intCast(x / @as(X, p * q)); // ≤ z, fits u64
+                        if (v >= hi) break;
+                        if (INST) walk += 1;
+                        if (v >= lo) {
                             if (INST and v <= y and p * p > v) easy += 1;
-                            const phi_v = leafPhi(v, p, bi, lo, y, pi_tab, &ctr, phi_run);
-                            s2 += @as(i128, -mm) * @as(i128, phi_v);
+                            s2 += @as(i128, leafPhiP(v, p, bi, lo, y, pi_tab, &ctr, phi_run, 1, mu_sum));
                             if (INST) leaves += 1;
                         }
+                        qi -= 1;
                     }
-                    m -= 1;
+                    cur[bi] = qi;
                 }
-                cur[bi] = m;
-            } else if (p < p_cube_min) {
-                // sparse: m = q prime in (p, y]. μ(q) = −1, so −μ(m) = +1.
-                var qi = cur[bi];
-                while (qi > bi) {
-                    const q: u64 = t.primes[@intCast(qi)];
-                    const v: u64 = @intCast(x / @as(X, p * q)); // ≤ z, fits u64
-                    if (v >= hi) break;
-                    if (INST) walk += 1;
-                    if (v >= lo) {
-                        if (INST and v <= y and p * p > v) easy += 1;
-                        s2 += @as(i128, leafPhi(v, p, bi, lo, y, pi_tab, &ctr, phi_run));
-                        if (INST) leaves += 1;
+                // else p³ ≥ x: the whole class is s1_closed — nothing to enumerate, no
+                // queries. We still fold p below: P₂ reads the FULLY folded counter.
+
+                // Fold p, visiting ONLY multiples p·m with m coprime to 30 — that is the
+                // ~6× win (0.46z visits instead of 2.76z). The cursor persists across
+                // segments, so j ≥ lo always and no division is needed.
+                if (bi >= 3) {
+                    var j = next[bi];
+                    var wp = wpos[bi];
+                    while (j < hi) {
+                        ctr.kill(@intCast(j - lo));
+                        j += p * W30GAP[wp];
+                        wp = (wp + 1) & 7;
                     }
-                    qi -= 1;
+                    next[bi] = j;
+                    wpos[bi] = wp;
                 }
-                cur[bi] = qi;
             }
-            // else p³ ≥ x: the whole class is s1_closed — nothing to enumerate, no
-            // queries. We still fold p below: P₂ reads the FULLY folded counter.
 
-            // Fold p, visiting ONLY multiples p·m with m coprime to 30 — that is the
-            // ~6× win (0.46z visits instead of 2.76z). The cursor persists across
-            // segments, so j ≥ lo always and no division is needed.
-            if (bi >= 3) {
-                var j = next[bi];
-                var wp = wpos[bi];
-                while (j < hi) {
-                    ctr.kill(@intCast(j - lo));
-                    j += p * W30GAP[wp];
-                    wp = (wp + 1) & 7;
+            // --- P₂ off the SAME counter: all a primes are folded now, so
+            //     φ(v, a) = 1 + π(v) − a  ⇒  π(v) = φ(v,a) − 1 + a.
+            seg_cnt[a] = ctr.total;
+            if (do_p2) {
+                // lo = 0 in the first segment now (mask alignment), and x/0 traps. lo = 0
+                // means "no upper bound from lo", i.e. p_hi = √x — and that segment ends
+                // up empty anyway since v = x/p ≥ √x > hi for any p ≤ √x.
+                const p_hi = if (lo == 0) sqrt_x else @min(@as(u64, @intCast(x / @as(X, lo))), sqrt_x); // x/p ≥ lo ⇔ p ≤ ⌊x/lo⌋
+                const p_lo = @max(@as(u64, @intCast(x / @as(X, hi))), y); //     x/p < hi ⇔ p > ⌊x/hi⌋
+                if (p_hi > p_lo) {
+                    const w: usize = @intCast(p_hi - p_lo); // pbuf[i] ↔ p_lo+1+i
+                    @memset(pbuf[0..w], true);
+                    for (bp4) |q| {
+                        if (q * q > p_hi) break;
+                        var j = @max(q * q, ((p_lo + q) / q) * q); // ceil((p_lo+1)/q)·q
+                        while (j <= p_hi) : (j += q) pbuf[@intCast(j - p_lo - 1)] = false;
+                    }
+                    // descending p ⇒ v = x/p ascends, matching this segment
+                    var k: usize = w;
+                    while (k > 0) {
+                        k -= 1;
+                        if (!pbuf[k]) continue;
+                        const v: u64 = @intCast(x / @as(X, p_lo + 1 + @as(u64, k))); // = x/p ∈ [lo,hi)
+                        const phi_va = phi_run[a] + ctr.prefix(@intCast(v - lo));
+                        sum_pi_xp += phi_va - 1 + @as(i64, @intCast(a));
+                        np += 1;
+                    }
                 }
-                next[bi] = j;
-                wpos[bi] = wp;
             }
-        }
+            // @max guards tiny x: a = π(y) can be < 3 (y ≤ 4), where 3..a+1 would have
+            // start > end. Safe because a < 3 ⟹ y ≤ 4 ⟹ !do_p2, and every leaf there has
+            // bi ≤ 2 and is closed-form — the counter is never read.
+            for (3..@max(3, a + 1)) |bi| phi_run[bi] += seg_cnt[bi];
+        } // end segment while
 
-        // --- P₂ off the SAME counter: all a primes are folded now, so
-        //     φ(v, a) = 1 + π(v) − a  ⇒  π(v) = φ(v,a) − 1 + a.
-        seg_cnt[a] = ctr.total;
-        if (do_p2) {
-            // lo = 0 in the first segment now (mask alignment), and x/0 traps. lo = 0
-            // means "no upper bound from lo", i.e. p_hi = √x — and that segment ends
-            // up empty anyway since v = x/p ≥ √x > hi for any p ≤ √x.
-            const p_hi = if (lo == 0) sqrt_x else @min(@as(u64, @intCast(x / @as(X, lo))), sqrt_x); // x/p ≥ lo ⇔ p ≤ ⌊x/lo⌋
-            const p_lo = @max(@as(u64, @intCast(x / @as(X, hi))), y); //     x/p < hi ⇔ p > ⌊x/hi⌋
-            if (p_hi > p_lo) {
-                const w: usize = @intCast(p_hi - p_lo); // pbuf[i] ↔ p_lo+1+i
-                @memset(pbuf[0..w], true);
-                for (bp4) |q| {
-                    if (q * q > p_hi) break;
-                    var j = @max(q * q, ((p_lo + q) / q) * q); // ceil((p_lo+1)/q)·q
-                    while (j <= p_hi) : (j += q) pbuf[@intCast(j - p_lo - 1)] = false;
-                }
-                // descending p ⇒ v = x/p ascends, matching this segment
-                var k: usize = w;
-                while (k > 0) {
-                    k -= 1;
-                    if (!pbuf[k]) continue;
-                    const v: u64 = @intCast(x / @as(X, p_lo + 1 + @as(u64, k))); // = x/p ∈ [lo,hi)
-                    const phi_va = phi_run[a] + ctr.prefix(@intCast(v - lo));
-                    sum_pi_xp += phi_va - 1 + @as(i64, @intCast(a));
-                    np += 1;
-                }
-            }
+        // record this block's boundary data for the reduction
+        blk_s2[blk] = s2;
+        blk_pi[blk] = sum_pi_xp;
+        blk_np[blk] = np;
+        for (0..a + 1) |bi| {
+            blk_total[blk * (a + 1) + bi] = phi_run[bi];
+            blk_mu[blk * (a + 1) + bi] = mu_sum[bi];
         }
-        // @max guards tiny x: a = π(y) can be < 3 (y ≤ 4), where 3..a+1 would have
-        // start > end. Safe because a < 3 ⟹ y ≤ 4 ⟹ !do_p2, and every leaf there has
-        // bi ≤ 2 and is closed-form — the counter is never read.
-        for (3..@max(3, a + 1)) |bi| phi_run[bi] += seg_cnt[bi];
+    } // end block for
+
+    // --- REDUCTION. prefix[bi] = Σ_{blocks below} block_total[·][bi]. For a hard leaf
+    // in block t, the true φ = local + prefix_at_t[b−1], so S2 gains Σ_bi
+    // prefix_at_t[bi]·mu_sum[t][bi]; P₂'s π(v) gains prefix_at_t[a] per leaf, so
+    // sum_pi_xp gains prefix_at_t[a]·np[t]. Done in block order, serial and cheap.
+    const prefix = try gpa.alloc(i64, a + 1);
+    defer gpa.free(prefix);
+    @memset(prefix, 0);
+    var s2: i128 = s1_closed; // the binomial class, added once
+    var sum_pi_xp: i128 = 0;
+    var np: u64 = 0;
+    for (0..nb) |blk| {
+        s2 += blk_s2[blk];
+        sum_pi_xp += blk_pi[blk];
+        var corr: i128 = 0;
+        // @max guards tiny x where a = π(y) < 3 (y ≤ 4): the range 3..a+1 would
+        // underflow. Those x have only closed-form leaves and no P₂, so no correction.
+        for (3..@max(3, a + 1)) |bi| corr += @as(i128, prefix[bi]) * @as(i128, blk_mu[blk * (a + 1) + bi]);
+        s2 += corr;
+        sum_pi_xp += @as(i128, prefix[a]) * @as(i128, @intCast(blk_np[blk]));
+        np += blk_np[blk];
+        for (3..@max(3, a + 1)) |bi| prefix[bi] += blk_total[blk * (a + 1) + bi];
     }
 
     // Σ_{y<p≤√x} (π(p) − 1) = Σ_{j=a}^{A−1} j, since those p have indices a+1..A.
-    // A = π(√x) = a + np — counted as we went, never stored.
     var p2: i128 = 0;
     if (do_p2 and np > 0) {
-        const Ai: i128 = @intCast(a + np);
+        const Ai: i128 = @intCast(@as(u64, a) + np);
         const ai: i128 = @intCast(a);
         p2 = sum_pi_xp - (@divExact((Ai - 1) * Ai, 2) - @divExact(ai * (ai - 1), 2));
     }
-    // fold in the closed-form class; count its leaves so the a²/2 law still checks out
     return .{
-        .s2 = s2 + s1_closed,
+        .s2 = s2,
         .p2 = p2,
         .leaves = if (INST) leaves + @as(u64, @intCast(s1_closed)) else 0,
         .easy = easy,
