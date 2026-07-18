@@ -3,20 +3,20 @@
 //!   π(x) = A − B + ω + φ₀ + Σ          (Theorem 1 / eq (5) of gourdon.ps)
 //!
 //! Term status (top-down build; lmo.zig referees the total):
-//!   ω   — SEGMENTED O(1)-kill counter (= lmo's S2 leaf truncated at x*), O(SEG)
-//!         memory. Gourdon's C/D split: leaves with x/pm<p² use the closed form
-//!         1+max(0,π(v)−bi) (π via pi_tab/piLE), only true D leaves hit the counter.
-//!         Leaf enumeration is dense/sparse (DR/LMO): p≤√y walks all m; p>√y walks
-//!         only the primes q∈(p,y] (δ(m)>p forces m prime — zero rejection).
-//!   π   — A, Σ₄/₅/₆ and the scalars query π only at points ≤ √x (proven); a monotone
-//!         cursor / binary search on the prime list answers them — no table, no sweep.
-//!         Only B has v = x/p up to z > √x, so B alone takes a running-π sweep.
+//!   ω+B — FUSED on ONE segmented O(1)-kill counter folded to √z. ω's leaves query
+//!         φ(v,bi) at stage bi<π(x*) DURING the fold; after the full fold the counter
+//!         is φ(·,π(√z)), so B's π(x/p)=φ(x/p,π(√z))+π(√z)−1 is read straight off it
+//!         (Legendre; z<y² ⇒ P₂ term vanishes). Gourdon folds π(√z) primes vs lmo's
+//!         π(y) — fewer kills AND fewer prefix queries → beats lmo (op-counts confirm).
+//!         ω uses Gourdon's C/D split (x/pm<p² ⇒ closed form 1+max(0,π(v)−bi), π via
+//!         pi_tab/piLE) and DR/LMO dense/sparse leaf enumeration (p>√y ⇒ m prime).
+//!   A/Σ — query π only at points ≤ √x (proven); monotone cursor / binary search on
+//!         the prime list — no table, no sweep.
 //!   φ₀  — closed form φ(x/n,1) = ⌈(x/n)/2⌉ (k=1).
 //!   Σ   — seven closed forms (a=π(y), b=π(x^1/3), c=π(√(x/y)), d=π(x*)).
 //!
-//! Memory is O(√x) (primes) + O(y) (δ/μ/π_tab) + O(SEG) sweeps — no O(z) structure,
-//! so RSS is tens of MB into 10^14+. The two O(z)-TIME passes (B's sweep, ω's fold)
-//! are the remaining speed target vs lmo. x* = max(x^1/4, x/y²); primes 0-indexed; k=1.
+//! Memory O(√x)+O(y)+O(SEG), no O(z) structure — ~12 MB at 10^15. One O(z)-time pass.
+//! x* = max(x^1/4, x/y²); primes 0-indexed; k=1. (computeB is kept only as B's ref.)
 
 const std = @import("std");
 const common = @import("common.zig");
@@ -435,131 +435,120 @@ fn computeB(comptime INST: bool, gpa: std.mem.Allocator, s: *const Sieve, x: u64
     return B;
 }
 
-// ------------------------------------------------------------------------ ω
-/// ω on the O(1)-kill counter, now SEGMENTED (counter sized to the segment, not z —
-/// so O(SEG) memory, no z/8 ceiling). Mirrors lmo's runBlock: sweep [1,z] in segw
-/// blocks, carry φ(·,bi) across segments in phi_run[bi], and per prime keep a
-/// descending m-cursor and a wheel fold-cursor. Folds only primes ≤ x* (2,3,5 are
-/// pre-struck by the reset; p=3,5 leaves use phiSmall). φ(v,bi)=phi_run[bi]+prefix(v−lo).
-fn omegaCounter(comptime INST: bool, gpa: std.mem.Allocator, s: *const Sieve, x: u64, y: u64, z: u64, xstar: u64) !i128 {
+// ------------------------------------------------------------------------ ω+B
+/// FUSED ω and B on ONE segmented counter. The counter folds every prime ≤ √z (not
+/// just ≤ x*): ω leaves are queried at their stage bi < π(x*) DURING the fold, and
+/// after the full fold the counter holds φ(·,π(√z)), so B's π(x/p) = φ(x/p,π(√z)) +
+/// π(√z) − 1 is read straight off it (Legendre; valid since z < y² ⇒ no product of
+/// two primes > √z is ≤ z). Gourdon folds π(√z) primes vs lmo's π(y) — ~6× fewer at
+/// 10^12 — so one pass serves both, beating lmo's separate S2-fold + fused-P₂.
+fn omegaCounter(comptime INST: bool, gpa: std.mem.Allocator, s: *const Sieve, x: u64, y: u64, z: u64, xstar: u64) !struct { omega: i128, b: i128 } {
     const primes = s.primes;
     const sqx = isqrt(x);
     const sqrt_y = isqrt(y); // dense/sparse split point (DR/LMO): p≤√y dense, else sparse
+    const sqz = isqrt(z); // √z: the fold bound (Legendre a′ = π(√z))
     const nay: usize = piLE(primes, y); // π(y): index nay−1 is the largest prime ≤ y
-    const nax: usize = piLE(primes, xstar); // # primes ≤ x* (fold + leaf range)
-    if (nax == 0) return 0;
+    const nax: usize = piLE(primes, xstar); // π(x*): ω leaf/stage range
+    const naz: usize = piLE(primes, sqz); // π(√z): fold range
+    const nsx: usize = piLE(primes, sqx); // π(√x): upper B prime
+    if (naz == 0) return .{ .omega = 0, .b = 0 };
+    const naz_i: i64 = @intCast(naz);
     const segw: usize = 273 * 960; // ≈256 KiB counter, MASK30-aligned (lcm(30,64)=960)
     var n_seg: u64 = 0;
-    var n_mwalk: u64 = 0; // m-cursor iterations (incl. rejected)
-    var n_small: u64 = 0; // bi≤2 (phiSmall)
-    var n_easy: u64 = 0; // easy-leaf closed form
-    var n_hard: u64 = 0; // counter prefix() calls
-    var n_kill: u64 = 0; // fold kills
+    var n_mwalk: u64 = 0;
+    var n_small: u64 = 0;
+    var n_easy: u64 = 0;
+    var n_hard: u64 = 0; // ω counter prefix() calls
+    var n_kill: u64 = 0; // fold kills (to √z)
+    var n_bq: u64 = 0; // B counter prefix() calls
 
     var ctr = try Counter3P.init(gpa, segw);
     defer ctr.deinit(gpa);
-    const phi_run = try gpa.alloc(i64, nax);
+    const phi_run = try gpa.alloc(i64, nax); // ω stages only
     defer gpa.free(phi_run);
     const seg_cnt = try gpa.alloc(i64, nax);
     defer gpa.free(seg_cnt);
-    const cur = try gpa.alloc(u64, nax); // m-cursor (descending)
+    const cur = try gpa.alloc(u64, nax);
     defer gpa.free(cur);
-    const next = try gpa.alloc(u64, nax); // fold cursor: next multiple of p to kill
+    const next = try gpa.alloc(u64, naz); // fold cursors for ALL primes ≤ √z
     defer gpa.free(next);
-    const wpos = try gpa.alloc(u8, nax); // wheel index for the fold cursor
+    const wpos = try gpa.alloc(u8, naz);
     defer gpa.free(wpos);
 
     @memset(phi_run, 0);
     for (0..nax) |bi| {
-        // dense cursor is m (starts at y); sparse cursor is a prime INDEX (starts at
-        // the largest prime ≤ y). Both walk down as segments ascend.
         cur[bi] = if (primes[bi] <= sqrt_y) y else @as(u64, nay - 1);
-        if (bi >= 3) {
-            next[bi] = primes[bi]; // p·1 (p≥7 ⇒ coprime to 30), so wpos=W30IDX[1]=0
-            wpos[bi] = 0;
-        }
+    }
+    for (3..naz) |bi| {
+        next[bi] = primes[bi]; // p·1 (p≥7 ⇒ coprime to 30), wpos=W30IDX[1]=0
+        wpos[bi] = 0;
     }
 
+    const evalPhi = struct {
+        inline fn f(comptime IN: bool, vv: u64, b: usize, pp: u64, ss: *const Sieve, prs: []const u32, pr_bi: i64, ct: *const Counter3P, l: u64, sx: u64, yy: u64, cE: *u64, cH: *u64) i64 {
+            var piv: i64 = -1;
+            if (pp * pp > vv) {
+                if (vv <= yy) piv = @intCast(ss.pi_tab[@intCast(vv)]) else if (vv <= sx) piv = @intCast(piLE(prs, vv));
+            }
+            if (piv >= 0) {
+                if (IN) cE.* += 1;
+                return 1 + @max(0, piv - @as(i64, @intCast(b)));
+            }
+            if (IN) cH.* += 1;
+            return pr_bi + ct.prefix(@intCast(vv - l));
+        }
+    }.f;
+
     var omega: i128 = 0;
+    var b_sum: i128 = 0;
+    var phi_run_full: i64 = 0; // running φ(·,π(√z)) over prior segments (for B)
+    var pB: usize = nsx; // B cursor: primes[pB−1] is the current largest B-prime (>y)
     var lo: u64 = 0;
     while (lo <= z) : (lo += segw) {
         const hi = @min(lo + @as(u64, segw), z + 1);
         const len: usize = @intCast(hi - lo);
         ctr.reset(len);
         if (INST) n_seg += 1;
-        for (0..nax) |bi| {
+        for (0..naz) |bi| {
             const p: u64 = primes[bi];
-            if (bi >= 3) seg_cnt[bi] = ctr.total; // φ(·,bi) count for this segment
-            // ── C/D leaf evaluator (Gourdon): closed form when x/pm < p² (π(v) cheap
-            //    for v ≤ √x), else the counter. Shared by both walks below.
-            const evalPhi = struct {
-                inline fn f(
-                    comptime IN: bool,
-                    vv: u64,
-                    b: usize,
-                    pp: u64,
-                    ss: *const Sieve,
-                    prs: []const u32,
-                    pr_bi: i64,
-                    ct: *const Counter3P,
-                    l: u64,
-                    sx: u64,
-                    yy: u64,
-                    cE: *u64,
-                    cH: *u64,
-                ) i64 {
-                    var piv: i64 = -1;
-                    if (pp * pp > vv) {
-                        if (vv <= yy) piv = @intCast(ss.pi_tab[@intCast(vv)]) else if (vv <= sx) piv = @intCast(piLE(prs, vv));
-                    }
-                    if (piv >= 0) {
-                        if (IN) cE.* += 1;
-                        return 1 + @max(0, piv - @as(i64, @intCast(b)));
-                    }
-                    if (IN) cH.* += 1;
-                    return pr_bi + ct.prefix(@intCast(vv - l));
-                }
-            }.f;
-            if (p <= 2) {
-                // p=2 has no ω leaves; nothing to do (fold handled below, but bi=0<3)
-            } else if (p <= sqrt_y) {
-                // DENSE: walk every m ∈ (y/p, y], filter μ(m)≠0 ∧ δ(m)>p.
-                var m: u64 = cur[bi];
-                const mlo: u64 = y / p;
-                while (m > mlo) {
-                    if (INST) n_mwalk += 1;
-                    const v: u64 = x / (m * p);
-                    if (v >= hi) break;
-                    if (v >= lo) {
-                        const mm = s.mu[@intCast(m)];
-                        if (mm != 0 and s.delta[@intCast(m)] > p) {
-                            const phi_v: i64 = if (bi <= 2) blk: {
-                                if (INST) n_small += 1;
-                                break :blk phiSmall(v, bi);
-                            } else evalPhi(INST, v, bi, p, s, primes, phi_run[bi], &ctr, lo, sqx, y, &n_easy, &n_hard);
-                            omega += @as(i128, -mm) * @as(i128, phi_v);
+            if (bi < nax) {
+                if (bi >= 3) seg_cnt[bi] = ctr.total; // φ(·,bi) for this segment
+                if (p > 2 and p <= sqrt_y) {
+                    // DENSE m-walk
+                    var m: u64 = cur[bi];
+                    const mlo: u64 = y / p;
+                    while (m > mlo) {
+                        if (INST) n_mwalk += 1;
+                        const v: u64 = x / (m * p);
+                        if (v >= hi) break;
+                        if (v >= lo) {
+                            const mm = s.mu[@intCast(m)];
+                            if (mm != 0 and s.delta[@intCast(m)] > p) {
+                                const phi_v: i64 = if (bi <= 2) blk: {
+                                    if (INST) n_small += 1;
+                                    break :blk phiSmall(v, bi);
+                                } else evalPhi(INST, v, bi, p, s, primes, phi_run[bi], &ctr, lo, sqx, y, &n_easy, &n_hard);
+                                omega += @as(i128, -mm) * @as(i128, phi_v);
+                            }
                         }
+                        m -= 1;
                     }
-                    m -= 1;
-                }
-                cur[bi] = m;
-            } else {
-                // SPARSE (p>√y): δ(m)>p forces m to be a prime q∈(p,y] — so iterate the
-                // prime list directly (μ(q)=−1 ⇒ sign +1), ZERO rejection.
-                var qc: usize = @intCast(cur[bi]);
-                while (qc > bi) {
-                    if (INST) n_mwalk += 1;
-                    const q: u64 = primes[qc];
-                    const v: u64 = x / (p * q);
-                    if (v >= hi) break;
-                    if (v >= lo) {
-                        omega += @as(i128, evalPhi(INST, v, bi, p, s, primes, phi_run[bi], &ctr, lo, sqx, y, &n_easy, &n_hard));
+                    cur[bi] = m;
+                } else if (p > 2) {
+                    // SPARSE q-walk (p>√y): every prime q∈(p,y] is a valid leaf
+                    var qc: usize = @intCast(cur[bi]);
+                    while (qc > bi) {
+                        if (INST) n_mwalk += 1;
+                        const q: u64 = primes[qc];
+                        const v: u64 = x / (p * q);
+                        if (v >= hi) break;
+                        if (v >= lo) omega += @as(i128, evalPhi(INST, v, bi, p, s, primes, phi_run[bi], &ctr, lo, sqx, y, &n_easy, &n_hard));
+                        qc -= 1;
                     }
-                    qc -= 1;
+                    cur[bi] = qc;
                 }
-                cur[bi] = qc;
             }
-            if (bi >= 3) { // fold p: kill its coprime-to-30 multiples in [lo,hi)
+            if (bi >= 3) { // fold p (all primes ≤ √z): kill coprime-30 multiples in [lo,hi)
                 var j: u64 = next[bi];
                 var wp: u8 = wpos[bi];
                 while (j < hi) {
@@ -572,10 +561,20 @@ fn omegaCounter(comptime INST: bool, gpa: std.mem.Allocator, s: *const Sieve, x:
                 wpos[bi] = wp;
             }
         }
+        // Counter now holds φ(·,π(√z)) for this segment — read B's π(x/p) off it.
+        while (pB > nay and x / @as(u64, primes[pB - 1]) < hi) {
+            const v: u64 = x / @as(u64, primes[pB - 1]);
+            if (v >= lo) {
+                if (INST) n_bq += 1;
+                b_sum += @as(i128, phi_run_full + ctr.prefix(@intCast(v - lo)) + naz_i - 1);
+            }
+            pB -= 1;
+        }
+        phi_run_full += ctr.total;
         for (3..nax) |bi| phi_run[bi] += seg_cnt[bi];
     }
-    if (INST) std.debug.print("  ω-stats: nax={d} segs={d} mwalk={d} leaves(small/C/D)={d}/{d}/{d} kills={d}\n", .{ nax, n_seg, n_mwalk, n_small, n_easy, n_hard, n_kill });
-    return omega;
+    if (INST) std.debug.print("  ωB-stats: nax={d} naz={d} segs={d} mwalk={d} leaves(small/C/D)={d}/{d}/{d} kills={d} Bqueries={d}\n", .{ nax, naz, n_seg, n_mwalk, n_small, n_easy, n_hard, n_kill, n_bq });
+    return .{ .omega = omega, .b = b_sum };
 }
 
 // ---------------------------------------------- ω reference (for the diff-check)
@@ -677,12 +676,12 @@ pub fn piGourdonV(gpa: std.mem.Allocator, x: u64, y_in: ?u64, verbose: bool) !GR
     // A/Σ via binary-search π (all points ≤ √x).
     const t = computeTerms(&s, x, y, sqx, x13, sqz, xstar);
     lap(verbose, &tp, "A/Σ");
-    // B: the only term needing v > √x — its own running-π sweep.
-    const B = try computeB(false, gpa, &s, x, y, z, sqx);
-    lap(verbose, &tp, "B");
 
-    const omega = try omegaCounter(false, gpa, &s, x, y, z, xstar);
-    lap(verbose, &tp, "omega");
+    // ω and B fused: one counter folded to √z serves ω's leaves and B's π(x/p).
+    const wb = try omegaCounter(false, gpa, &s, x, y, z, xstar);
+    const omega = wb.omega;
+    const B = wb.b;
+    lap(verbose, &tp, "ω+B");
 
     // φ₀ = Σ_{n≤y, n odd, μ(n)≠0} μ(n)·φ(x/n,1), φ(u,1)=u−⌊u/2⌋   [k=1]
     var phi0: i128 = 0;
@@ -727,8 +726,9 @@ pub fn main() !void {
         const pi = try buildPi(gpa, z);
         defer gpa.free(pi);
         const on = omegaNaive(s.primes, s.mu, s.delta, pi, x, y, xstar);
-        const oc = try omegaCounter(false, gpa, &s, x, y, z, xstar);
-        std.debug.print("  {d:>12}  naive={d:>14} counter={d:>14}  {s}\n", .{ x, on, oc, if (on == oc) "match" else "MISMATCH" });
+        const wb = try omegaCounter(false, gpa, &s, x, y, z, xstar);
+        const b_ref = try computeB(false, gpa, &s, x, y, z, isqrt(x)); // standalone B reference
+        std.debug.print("  {d:>12}  ω naive={d:>14} counter={d:>14} {s}   B fused={d} ref={d} {s}\n", .{ x, on, wb.omega, if (on == wb.omega) "match" else "MISMATCH", wb.b, b_ref, if (wb.b == b_ref) "match" else "MISMATCH" });
     }
 
     // Correctness + timing: Gourdon (counter-ω, segmented-π) vs lmo, both serial.
@@ -758,13 +758,10 @@ pub fn main() !void {
         var s = try Sieve.init(gpa, isqrt(x), y);
         defer s.deinit(gpa);
         std.debug.print("x=10^{d} (y={d}, z={d}):\n", .{ std.math.log10_int(x), y, z });
-        std.debug.print("  gourdon ", .{});
-        _ = try omegaCounter(true, gpa, &s, x, y, z, xstar); // prints ω-stats (kills, C/D, mwalk)
-        g_bmarks = 0;
-        _ = try computeB(true, gpa, &s, x, y, z, isqrt(x));
-        std.debug.print("          B sieve marks={d}\n", .{g_bmarks});
+        std.debug.print("  gourdon(fused) ", .{});
+        _ = try omegaCounter(true, gpa, &s, x, y, z, xstar); // prints ωB-stats (√z fold + B queries)
         const lr = try lmo.s2AndP2FusedInstrumented(gpa, @intCast(x), y, y);
-        std.debug.print("  lmo:      S2 kills={d}  S2 prefix(hard)={d}  P₂ prefix(np)={d}\n", .{ lr.kills, lr.s2q, lr.np });
+        std.debug.print("  lmo:           S2 kills={d}  S2 prefix(hard)={d}  P₂ prefix(np)={d}\n", .{ lr.kills, lr.s2q, lr.np });
     }
 
     // Ceiling test: past the old O(z) π-table limit, gourdon-only vs known values.
