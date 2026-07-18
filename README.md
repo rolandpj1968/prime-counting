@@ -100,12 +100,21 @@ Sieve( Wheel,      // coordinate map: {} / {2} / {2,3} / {2,3,5} → all/odds/mo
 plus `BucketSieve` (two-tier for large N) and `rangesieve` (u128 range counting
 past 2⁶⁴). Fully characterized — the two headline empirical results are below.
 
+### Parallelism
+
+`piLMOPar` runs the sweep across pinned cores: [1,z] is block-decomposed, each block
+swept with a local running φ and stitched by a cross-block reduction, with a
+**cost-balanced partition** (blocks of equal width+leaves, since 99.7% of leaves sit
+in the bottom of [1,z] and a naïve equal-width split makes one block 36% of the run).
+On the 6-core Ryzen 5 6600H it reaches **~4.7× at 10¹⁴**, falling to ~3.8× at 10¹⁶ —
+the ceiling is DRAM bandwidth, not cores. Pinned experiments show HT gives a real
+~1.3× per-core gain but adds nothing once the cores saturate memory bandwidth.
+
 ### Next
 
-u128 for the ground beyond 2⁶⁴ (a narrow change — only x, z and the divisions need
-widening), and parallelisation — 12 cores untouched, with the hard part (leaf work
-is 99.7% concentrated in the first decile of [1, x/y], so blocks must be sized by
-leaf count, not width) already measured.
+Gourdon's algorithm (a better decomposition than DR, ~2.3×) and his per-block
+transfer-size reduction (to push past the bandwidth wall); the 3.8× implementation
+gap to primecount-DR (fast division).
 
 ## Empirical highlights
 

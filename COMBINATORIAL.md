@@ -506,22 +506,51 @@ and shrinks with α — measured α=1.5 as the argmin, beating classical α=1 on
 is the Meissel precursor to LMO's α knob; capping alone takes Meissel from Θ(x^(2/3)) toward
 Θ(√x), but reaching Θ(x^(1/3)) needs the full LMO leaf restructuring (lmo.zig).
 
-## Parallelism (measured, not yet built)
+## Parallelism: block-and-scan, cost-balanced, bandwidth-bound
 
-The leaves are **wildly non-uniform**: leaves are dominated by n = p·q with pq near y², so
-v = x/(pq) clusters near x/y² — the very bottom of [1,z].
+Single-process threads via `piLMOPar(x, nthreads, k_over, pins)`. The [1,z] sweep splits into
+nb = nthreads·k_over contiguous segw-aligned blocks; each is swept with a **local** running φ
+(phi_run init 0) by `BlkCtx.runBlock` (the single source of truth — serial and threaded both
+call it), and a cross-block reduction stitches them: φ(v,b−1) in block t is
+local + Σ_{t'<t} block_total[t'][b−1]. Cursors are **fast-forwarded** to each block's start
+(leaf cursor = min(y, ⌊x/(p·lo)⌋), fold cursor = first coprime-to-30 multiple ≥ lo), so no
+block re-walks from 0. Shared read-only tables are built once; each worker owns its scratch and
+pulls blocks from an atomic fetch-add counter (Zig 0.16's Io rework removed `std.Thread.Mutex`;
+the dispenser is O(0) contention anyway). P₂ folds in for free — π(v) = φ(v,a) − 1 + a makes its
+per-block correction a scalar.
 
-| decile of [1,z] | 1 | 2 | 5 | 10 |
-|---|---:|---:|---:|---:|
-| share of leaves | **99.72%** | 0.11% | 0.02% | 0.01% |
+**Why cost-balanced blocks are mandatory.** The leaves are wildly non-uniform — dominated by
+n = p·q with pq near y², so v = x/(pq) clusters at the very bottom of [1,z] (99.7% in the first
+decile). Per-block wall-time (single-thread, 48 equal-width blocks, 10¹⁴) shows the damage
+directly:
 
-Since leaf queries dominate the work, decile 1 holds ~90% of it: an equal-width block split
-would starve every thread but one. **Blocks must be sized by leaf count**, which is cheap to
-precompute. The prefix dependency (phi_run per b) is not an obstacle — φ enters every leaf
-linearly, so a block-and-scan works: each thread takes a contiguous block, computes relative
-to phi_run = 0 at its start, returns local S2 plus `block_total[bi]` and `mu_sum[bi]`, and a
-serial O(nthreads × a) scan corrects. P₂ is *easier* fused than standalone: π(v) = φ(v,a) − 1 + a
-makes its per-block correction a scalar.
+| block | 0 | 1 | 2 | … | 47 |
+|---|---:|---:|---:|---:|---:|
+| time | **435 ms (36%)** | 43 ms | 26 ms | ~15 ms | 15 ms |
+| est. leaves | 139.5 M | 130 K | 39 K | … | 2 |
+
+**Block 0 alone is 36% of runtime** — a hard floor capping speedup at 1203/435 = 2.8×, which is
+*exactly* the equal-width plateau measured. The fix: `costPartition` places boundaries at equal
+estimated cost = width/z + leaves/leaves_total (leaves from an O(a) sparse two-prime estimate, no
+enumeration), splitting the leaf-dense bottom fine and the leafless top coarse. That took 10¹⁴
+6-core scaling from **2.88× → 4.69×**.
+
+**Scaling is bandwidth-bound, and the pinned characterization proves it** (Ryzen 5 6600H, 6C/12T,
+pinned via `sched_setaffinity`):
+
+| | 2 cores | 3 | 4 | 6 | 8t (HT) | 12t (HT) |
+|---|---:|---:|---:|---:|---:|---:|
+| 10¹⁴ | 1.88× | 2.78× | 3.55× | **4.67×** | 4.68× | 4.73× |
+| 10¹⁶ | 1.91× | 2.88× | 3.61× | **3.81×** | 3.25× | 3.52× |
+
+Two effects, cleanly separated by the **2-core-vs-2-HT** test (same thread count, one physical
+core vs two): {0,2} = 1.87×, {0,1} = **1.31×**. So HT gives a *real* ~1.31× per-core gain (latency
+hiding on the counter-prefix misses and divides) — it is **not** "HT doesn't help." But total DRAM
+bandwidth is the ceiling: 6 busy cores saturate it, so the HT siblings have no headroom and add
+~0 (and >7 threads *hurt* at 10¹⁶). Physical scaling itself falls with x (4.67× → 3.81×) as the
+per-thread a-arrays grow and lean harder on bandwidth. Best config: **6 physical cores pinned,
+HT off** — a ~4–5× ceiling on this box. Pushing past it needs Gourdon's per-block transfer-size
+reduction (shrink the a-arrays below L2), still untried.
 
 ## Verification methodology
 
