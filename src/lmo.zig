@@ -852,6 +852,58 @@ pub fn s2AndP2FusedInstrumented(gpa: std.mem.Allocator, x: u64, y: u64, seg: usi
 /// u128 — the latter for x > 2⁶⁴, i.e. π(10²⁰)). Only x and the divisions with x in
 /// the numerator are X-wide; every quotient (z, v = x/(m·p), x/p) fits u64 and is cast
 /// down immediately, so y, a, primes, m, p, q and the whole counter stay u64.
+/// Cheap estimate of the sparse (two-prime) leaves with v = x/(p·q) ≤ V: for each
+/// prime p ∈ (√y, y], count primes q ∈ (max(p, ⌊x/(pV)⌋), y]. O(a); ignores the
+/// minority dense leaves — enough to shape the partition, which over-partition +
+/// dynamic dispatch then correct.
+fn leavesUpto(comptime X: type, x: X, y: u64, sqrt_y: u64, pi_tab: []const u32, primes: []const u32, V: u64) u64 {
+    if (V == 0) return 0;
+    const piy = pi_tab[@intCast(y)];
+    var tot: u64 = 0;
+    for (primes) |p32| {
+        const p: u64 = p32;
+        if (p <= sqrt_y) continue;
+        const thr: u64 = @intCast(@min(@as(X, y), x / (@as(X, p) * @as(X, V)))); // ⌊x/(pV)⌋, capped at y
+        const qlo = @max(thr, p);
+        tot += piy - pi_tab[@intCast(qlo)];
+    }
+    return tot;
+}
+
+/// Partition [0, z+1) into nb contiguous, segw-aligned blocks of ~equal ESTIMATED cost
+/// (width/z + leaves/leaves_total, both normalised). Fine blocks where leaves cluster
+/// (the bottom, which a single equal-width block made ~36% of runtime), coarse blocks
+/// in the leafless top. Returns nb+1 boundaries.
+fn costPartition(comptime X: type, gpa: std.mem.Allocator, x: X, y: u64, z: u64, segw: usize, sqrt_y: u64, pi_tab: []const u32, primes: []const u32, nb: usize) ![]u64 {
+    const bounds = try gpa.alloc(u64, nb + 1);
+    bounds[0] = 0;
+    bounds[nb] = z + 1;
+    if (nb <= 1) return bounds; // serial default: one block, skip the cost pass
+
+    const nsegs = z / segw + 1;
+    const nchunks = @min(nsegs, @max(@as(usize, 1024), 16 * nb));
+    const cost = try gpa.alloc(f64, nchunks + 1);
+    defer gpa.free(cost);
+    const leaves_total = @max(@as(u64, 1), leavesUpto(X, x, y, sqrt_y, pi_tab, primes, z + 1));
+    const zf: f64 = @floatFromInt(z);
+    const ltf: f64 = @floatFromInt(leaves_total);
+    for (0..nchunks + 1) |c| {
+        const V: u64 = @min(@as(u64, c * nsegs / nchunks) * segw, z + 1);
+        const lv = leavesUpto(X, x, y, sqrt_y, pi_tab, primes, V);
+        cost[c] = @as(f64, @floatFromInt(V)) / zf + @as(f64, @floatFromInt(lv)) / ltf;
+    }
+    const total = cost[nchunks];
+    var c: usize = 0;
+    for (1..nb) |k| {
+        const target = total * @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(nb));
+        while (c < nchunks and cost[c] < target) c += 1;
+        var b: u64 = @min(@as(u64, c * nsegs / nchunks) * segw, z + 1);
+        if (b < bounds[k - 1]) b = bounds[k - 1]; // monotone; empty blocks are fine
+        bounds[k] = b;
+    }
+    return bounds;
+}
+
 pub fn s2AndP2FusedGen(comptime C: type, comptime INST: bool, comptime X: type, gpa: std.mem.Allocator, x: X, y: u64, seg: usize) !FusedResult {
     return s2P2Blocks(C, INST, X, gpa, x, y, seg, 1);
 }
@@ -880,6 +932,7 @@ fn BlkCtx(comptime C: type, comptime X: type) type {
         a: usize,
         nb: usize,
         do_p2: bool,
+        bounds: []const u64, // block boundaries: bounds[blk]..bounds[blk+1], segw-aligned
         // per-thread scratch
         ctr: C,
         phi_run: []i64,
@@ -903,7 +956,6 @@ fn BlkCtx(comptime C: type, comptime X: type) type {
         fn runBlock(self: *Self, comptime INST: bool, blk: usize) void {
             const x = self.x;
             const y = self.y;
-            const z = self.z;
             const a = self.a;
             const segw = self.segw;
             const sqrt_y = self.sqrt_y;
@@ -920,9 +972,8 @@ fn BlkCtx(comptime C: type, comptime X: type) type {
             const mu_sum = self.mu_sum;
             const pbuf = self.pbuf;
 
-            const nsegs = z / segw + 1;
-            const block_lo: u64 = @min(@as(u64, blk * nsegs / self.nb) * segw, z + 1);
-            const block_hi: u64 = @min(@as(u64, (blk + 1) * nsegs / self.nb) * segw, z + 1);
+            const block_lo: u64 = self.bounds[blk];
+            const block_hi: u64 = self.bounds[blk + 1];
             if (block_lo >= block_hi) { // empty (nb > nsegs)
                 self.blk_s2[blk] = 0;
                 self.blk_pi[blk] = 0;
@@ -1179,6 +1230,8 @@ pub fn s2P2Blocks(comptime C: type, comptime INST: bool, comptime X: type, gpa: 
     const blk_mu = try gpa.alloc(i64, nb * (a + 1));
     defer gpa.free(blk_mu);
 
+    const bounds = try costPartition(X, gpa, x, y, z, segw, sqrt_y, pi_tab, t.primes, nb);
+    defer gpa.free(bounds);
     var ctx = BlkCtx(C, X){
         .primes = t.primes,
         .mu = t.mu,
@@ -1195,6 +1248,7 @@ pub fn s2P2Blocks(comptime C: type, comptime INST: bool, comptime X: type, gpa: 
         .a = a,
         .nb = nb,
         .do_p2 = do_p2,
+        .bounds = bounds,
         .ctr = ctr,
         .phi_run = phi_run,
         .seg_cnt = seg_cnt,
@@ -1271,6 +1325,9 @@ pub fn s2P2Parallel(comptime C: type, comptime X: type, gpa: std.mem.Allocator, 
     const blk_mu = try gpa.alloc(i64, nb * (a + 1));
     defer gpa.free(blk_mu);
 
+    const bounds = try costPartition(X, gpa, x, y, z, segw, sqrt_y, pi_tab, t.primes, nb);
+    defer gpa.free(bounds);
+
     const Ctx = BlkCtx(C, X);
     const ctxs = try gpa.alloc(Ctx, nthreads);
     defer gpa.free(ctxs);
@@ -1302,6 +1359,7 @@ pub fn s2P2Parallel(comptime C: type, comptime X: type, gpa: std.mem.Allocator, 
             .a = a,
             .nb = nb,
             .do_p2 = do_p2,
+            .bounds = bounds,
             .ctr = try C.init(gpa, segw),
             .phi_run = try gpa.alloc(i64, a + 1),
             .seg_cnt = try gpa.alloc(i64, a + 1),
