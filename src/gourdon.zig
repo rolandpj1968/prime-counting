@@ -491,139 +491,220 @@ fn computeB(comptime INST: bool, gpa: std.mem.Allocator, s: anytype, x: u64, y: 
 /// π(√z) − 1 is read straight off it (Legendre; valid since z < y² ⇒ no product of
 /// two primes > √z is ≤ z). Gourdon folds π(√z) primes vs lmo's π(y) — ~6× fewer at
 /// 10^12 — so one pass serves both, beating lmo's separate S2-fold + fused-P₂.
-fn omegaCounter(comptime INST: bool, comptime X: type, gpa: std.mem.Allocator, s: anytype, x: X, y: u64, z: u64, xstar: u64) !struct { omega: i128, b: i128 } {
+/// C/D leaf evaluator: closed form (C, is_d=false) when x/pm < p² and π(v) is cheap,
+/// else the counter (D, is_d=true — the leaf needs a cross-block φ correction).
+inline fn evalPhi(comptime IN: bool, vv: u64, b: usize, pp: u64, ss: anytype, prs: anytype, pr_bi: i64, ct: *const Counter3P, l: u64, sx: u64, yy: u64, cE: *u64, cH: *u64) struct { phi: i64, is_d: bool } {
+    var piv: i64 = -1;
+    if (pp * pp > vv) {
+        if (vv <= yy) piv = @intCast(ss.pi_tab[@intCast(vv)]) else if (vv <= sx) piv = @intCast(piLE(prs, vv));
+    }
+    if (piv >= 0) {
+        if (IN) cE.* += 1;
+        return .{ .phi = 1 + @max(0, piv - @as(i64, @intCast(b))), .is_d = false };
+    }
+    if (IN) cH.* += 1;
+    return .{ .phi = pr_bi + ct.prefix(@intCast(vv - l)), .is_d = true };
+}
+
+const OmegaB = struct { omega: i128, b: i128 };
+
+fn omegaCounter(comptime INST: bool, comptime X: type, gpa: std.mem.Allocator, s: anytype, x: X, y: u64, z: u64, xstar: u64) !OmegaB {
+    return omegaBlocked(INST, X, gpa, s, x, y, z, xstar, 1);
+}
+
+/// ω+B over [1,z] split into `nb` contiguous segw-aligned blocks. Each block folds its
+/// own counter (cursors fast-forwarded to block_lo) with LOCAL phi_run, and emits the
+/// data a serial prefix-sum reduction needs: block φ(·,bi) totals, the D-leaf sign
+/// sums (omega_mu, for the ω correction), and B's block φ(·,π√z) total + query count.
+/// nb=1 reproduces the monolithic sweep. Reduction is O(nb·π(x*)) — Gourdon's low-comm.
+fn omegaBlocked(comptime INST: bool, comptime X: type, gpa: std.mem.Allocator, s: anytype, x: X, y: u64, z: u64, xstar: u64, nb: usize) !OmegaB {
     const primes = s.primes;
     const sqx = isqrtG(X, x);
-    const sqrt_y = isqrt(y); // dense/sparse split point (DR/LMO): p≤√y dense, else sparse
-    const sqz = isqrt(z); // √z: the fold bound (Legendre a′ = π(√z))
-    const nay: usize = piLE(primes, y); // π(y): index nay−1 is the largest prime ≤ y
-    const nax: usize = piLE(primes, xstar); // π(x*): ω leaf/stage range
-    const naz: usize = piLE(primes, sqz); // π(√z): fold range
-    const nsx: usize = piLE(primes, sqx); // π(√x): upper B prime
+    const sqrt_y = isqrt(y);
+    const sqz = isqrt(z);
+    const nay: usize = piLE(primes, y);
+    const nax: usize = piLE(primes, xstar); // ω leaf/stage range
+    const naz: usize = piLE(primes, sqz); // fold range
+    const nsx: usize = piLE(primes, sqx); // upper B prime
     if (naz == 0) return .{ .omega = 0, .b = 0 };
     const naz_i: i64 = @intCast(naz);
-    const segw: usize = 273 * 960; // ≈256 KiB counter, MASK30-aligned (lcm(30,64)=960)
+    const segw: usize = 273 * 960; // MASK30-aligned block/segment granule
+    const total = z + 1;
+    const nseg = (total + segw - 1) / segw; // # of segw granules in [0,z]
+
     var n_seg: u64 = 0;
     var n_mwalk: u64 = 0;
     var n_small: u64 = 0;
     var n_easy: u64 = 0;
-    var n_hard: u64 = 0; // ω counter prefix() calls
-    var n_kill: u64 = 0; // fold kills (to √z)
-    var n_bq: u64 = 0; // B counter prefix() calls
+    var n_hard: u64 = 0;
+    var n_kill: u64 = 0;
+    var n_bq: u64 = 0;
 
     var ctr = try Counter3P.init(gpa, segw);
     defer ctr.deinit(gpa);
-    const phi_run = try gpa.alloc(i64, nax); // ω stages only
+    const phi_run = try gpa.alloc(i64, nax); // ω stages, LOCAL per block
     defer gpa.free(phi_run);
     const seg_cnt = try gpa.alloc(i64, nax);
     defer gpa.free(seg_cnt);
     const cur = try gpa.alloc(u64, nax);
     defer gpa.free(cur);
-    const next = try gpa.alloc(u64, naz); // fold cursors for ALL primes ≤ √z
+    const next = try gpa.alloc(u64, naz);
     defer gpa.free(next);
     const wpos = try gpa.alloc(u8, naz);
     defer gpa.free(wpos);
+    // per-block outputs
+    const blk_total = try gpa.alloc(i64, nb * nax);
+    defer gpa.free(blk_total);
+    const blk_mu = try gpa.alloc(i64, nb * nax); // D-leaf sign sums (omega_mu)
+    defer gpa.free(blk_mu);
+    const blk_total_full = try gpa.alloc(i64, nb);
+    defer gpa.free(blk_total_full);
+    const blk_bcount = try gpa.alloc(u64, nb);
+    defer gpa.free(blk_bcount);
+    const blk_omega = try gpa.alloc(i128, nb);
+    defer gpa.free(blk_omega);
+    const blk_b = try gpa.alloc(i128, nb);
+    defer gpa.free(blk_b);
 
-    @memset(phi_run, 0);
-    for (0..nax) |bi| {
-        cur[bi] = if (@as(u64, @intCast(primes[bi])) <= sqrt_y) y else @as(u64, nay - 1);
-    }
-    for (3..naz) |bi| {
-        next[bi] = @intCast(primes[bi]); // p·1 (p≥7 ⇒ coprime to 30), wpos=W30IDX[1]=0
-        wpos[bi] = 0;
-    }
+    for (0..nb) |t| {
+        const block_lo = @min((t * nseg / nb) * segw, total);
+        const block_hi = @min(((t + 1) * nseg / nb) * segw, total);
 
-    const evalPhi = struct {
-        inline fn f(comptime IN: bool, vv: u64, b: usize, pp: u64, ss: anytype, prs: anytype, pr_bi: i64, ct: *const Counter3P, l: u64, sx: u64, yy: u64, cE: *u64, cH: *u64) i64 {
-            var piv: i64 = -1;
-            if (pp * pp > vv) {
-                if (vv <= yy) piv = @intCast(ss.pi_tab[@intCast(vv)]) else if (vv <= sx) piv = @intCast(piLE(prs, vv));
-            }
-            if (piv >= 0) {
-                if (IN) cE.* += 1;
-                return 1 + @max(0, piv - @as(i64, @intCast(b)));
-            }
-            if (IN) cH.* += 1;
-            return pr_bi + ct.prefix(@intCast(vv - l));
-        }
-    }.f;
-
-    var omega: i128 = 0;
-    var b_sum: i128 = 0;
-    var phi_run_full: i64 = 0; // running φ(·,π(√z)) over prior segments (for B)
-    var pB: usize = nsx; // B cursor: primes[pB−1] is the current largest B-prime (>y)
-    var lo: u64 = 0;
-    while (lo <= z) : (lo += segw) {
-        const hi = @min(lo + @as(u64, segw), z + 1);
-        const len: usize = @intCast(hi - lo);
-        ctr.reset(len);
-        if (INST) n_seg += 1;
-        for (0..naz) |bi| {
+        // ── fast-forward all cursors to block_lo (the block starts fresh) ──
+        @memset(phi_run, 0);
+        for (0..nax) |bi| {
             const p: u64 = @intCast(primes[bi]);
-            if (bi < nax) {
-                if (bi >= 3) seg_cnt[bi] = ctr.total; // φ(·,bi) for this segment
-                if (p > 2 and p <= sqrt_y) {
-                    // DENSE m-walk
-                    var m: u64 = cur[bi];
-                    const mlo: u64 = y / p;
-                    while (m > mlo) {
-                        if (INST) n_mwalk += 1;
-                        const v: u64 = xdiv(X, x, m * p);
-                        if (v >= hi) break;
-                        if (v >= lo) {
-                            const mm = s.mu[@intCast(m)];
-                            if (mm != 0 and s.delta[@intCast(m)] > p) {
-                                const phi_v: i64 = if (bi <= 2) blk: {
-                                    if (INST) n_small += 1;
-                                    break :blk phiSmall(v, bi);
-                                } else evalPhi(INST, v, bi, p, s, primes, phi_run[bi], &ctr, lo, sqx, y, &n_easy, &n_hard);
-                                omega += @as(i128, -mm) * @as(i128, phi_v);
+            const bnd: u64 = if (block_lo == 0) y else @min(y, xdiv(X, x, p * block_lo));
+            if (p <= sqrt_y) {
+                cur[bi] = bnd; // dense: largest m with v=x/(mp) ≥ block_lo (capped at y)
+            } else {
+                const pl = piLE(primes, bnd); // sparse: largest q-index with v ≥ block_lo
+                cur[bi] = if (pl > 0) @as(u64, pl - 1) else 0;
+            }
+        }
+        for (3..naz) |bi| {
+            const p: u64 = @intCast(primes[bi]);
+            var m0: u64 = if (block_lo == 0) 1 else (block_lo + p - 1) / p; // ceil(lo/p)
+            if (m0 == 0) m0 = 1;
+            while (!COP30[@intCast(m0 % 30)]) m0 += 1; // first coprime-30 multiplier
+            next[bi] = p * m0;
+            wpos[bi] = W30IDX[@intCast(m0 % 30)];
+        }
+        var pB: usize = if (block_lo == 0) nsx else piLE(primes, @min(sqx, xdiv(X, x, block_lo)));
+        if (pB > nsx) pB = nsx;
+
+        const omega_mu = blk_mu[t * nax ..][0..nax];
+        @memset(omega_mu, 0);
+        var omega: i128 = 0;
+        var b_sum: i128 = 0;
+        var phi_run_full: i64 = 0;
+        var b_count: u64 = 0;
+
+        var lo: u64 = block_lo;
+        while (lo < block_hi) : (lo += segw) {
+            const hi = @min(lo + @as(u64, segw), block_hi);
+            const len: usize = @intCast(hi - lo);
+            ctr.reset(len);
+            if (INST) n_seg += 1;
+            for (0..naz) |bi| {
+                const p: u64 = @intCast(primes[bi]);
+                if (bi < nax) {
+                    if (bi >= 3) seg_cnt[bi] = ctr.total;
+                    if (p > 2 and p <= sqrt_y) {
+                        // DENSE m-walk
+                        var m: u64 = cur[bi];
+                        const mlo: u64 = y / p;
+                        while (m > mlo) {
+                            if (INST) n_mwalk += 1;
+                            const v: u64 = xdiv(X, x, m * p);
+                            if (v >= hi) break;
+                            if (v >= lo) {
+                                const mm = s.mu[@intCast(m)];
+                                if (mm != 0 and s.delta[@intCast(m)] > p) {
+                                    const sign: i64 = -mm;
+                                    if (bi <= 2) {
+                                        if (INST) n_small += 1;
+                                        omega += @as(i128, sign) * @as(i128, phiSmall(v, bi));
+                                    } else {
+                                        const r = evalPhi(INST, v, bi, p, s, primes, phi_run[bi], &ctr, lo, sqx, y, &n_easy, &n_hard);
+                                        omega += @as(i128, sign) * @as(i128, r.phi);
+                                        if (r.is_d) omega_mu[bi] += sign;
+                                    }
+                                }
                             }
+                            m -= 1;
                         }
-                        m -= 1;
+                        cur[bi] = m;
+                    } else if (p > 2) {
+                        // SPARSE q-walk (p>√y): every prime q∈(p,y] is a valid leaf (sign +1)
+                        var qc: usize = @intCast(cur[bi]);
+                        while (qc > bi) {
+                            if (INST) n_mwalk += 1;
+                            const q: u64 = @intCast(primes[qc]);
+                            const v: u64 = xdiv(X, x, p * q);
+                            if (v >= hi) break;
+                            if (v >= lo) {
+                                const r = evalPhi(INST, v, bi, p, s, primes, phi_run[bi], &ctr, lo, sqx, y, &n_easy, &n_hard);
+                                omega += @as(i128, r.phi);
+                                if (r.is_d) omega_mu[bi] += 1;
+                            }
+                            qc -= 1;
+                        }
+                        cur[bi] = qc;
                     }
-                    cur[bi] = m;
-                } else if (p > 2) {
-                    // SPARSE q-walk (p>√y): every prime q∈(p,y] is a valid leaf
-                    var qc: usize = @intCast(cur[bi]);
-                    while (qc > bi) {
-                        if (INST) n_mwalk += 1;
-                        const q: u64 = @intCast(primes[qc]);
-                        const v: u64 = xdiv(X, x, p * q);
-                        if (v >= hi) break;
-                        if (v >= lo) omega += @as(i128, evalPhi(INST, v, bi, p, s, primes, phi_run[bi], &ctr, lo, sqx, y, &n_easy, &n_hard));
-                        qc -= 1;
+                }
+                if (bi >= 3) { // fold p (all ≤ √z)
+                    var j: u64 = next[bi];
+                    var wp: u8 = wpos[bi];
+                    while (j < hi) {
+                        if (INST) n_kill += 1;
+                        ctr.kill(@intCast(j - lo));
+                        j += p * W30GAP[wp];
+                        wp = (wp + 1) & 7;
                     }
-                    cur[bi] = qc;
+                    next[bi] = j;
+                    wpos[bi] = wp;
                 }
             }
-            if (bi >= 3) { // fold p (all primes ≤ √z): kill coprime-30 multiples in [lo,hi)
-                var j: u64 = next[bi];
-                var wp: u8 = wpos[bi];
-                while (j < hi) {
-                    if (INST) n_kill += 1;
-                    ctr.kill(@intCast(j - lo));
-                    j += p * W30GAP[wp];
-                    wp = (wp + 1) & 7;
+            // B queries off the fully-folded counter (φ(·,π√z))
+            while (pB > nay and xdiv(X, x, @intCast(primes[pB - 1])) < hi) {
+                const v: u64 = xdiv(X, x, @intCast(primes[pB - 1]));
+                if (v >= lo) {
+                    if (INST) n_bq += 1;
+                    b_sum += @as(i128, phi_run_full + ctr.prefix(@intCast(v - lo)) + naz_i - 1);
+                    b_count += 1;
                 }
-                next[bi] = j;
-                wpos[bi] = wp;
+                pB -= 1;
             }
+            phi_run_full += ctr.total;
+            for (3..nax) |bi| phi_run[bi] += seg_cnt[bi];
         }
-        // Counter now holds φ(·,π(√z)) for this segment — read B's π(x/p) off it.
-        while (pB > nay and xdiv(X, x, @intCast(primes[pB - 1])) < hi) {
-            const v: u64 = xdiv(X, x, @intCast(primes[pB - 1]));
-            if (v >= lo) {
-                if (INST) n_bq += 1;
-                b_sum += @as(i128, phi_run_full + ctr.prefix(@intCast(v - lo)) + naz_i - 1);
-            }
-            pB -= 1;
-        }
-        phi_run_full += ctr.total;
-        for (3..nax) |bi| phi_run[bi] += seg_cnt[bi];
+        for (0..nax) |bi| blk_total[t * nax + bi] = phi_run[bi];
+        blk_total_full[t] = phi_run_full;
+        blk_bcount[t] = b_count;
+        blk_omega[t] = omega;
+        blk_b[t] = b_sum;
     }
-    if (INST) std.debug.print("  ωB-stats: nax={d} naz={d} segs={d} mwalk={d} leaves(small/C/D)={d}/{d}/{d} kills={d} Bqueries={d}\n", .{ nax, naz, n_seg, n_mwalk, n_small, n_easy, n_hard, n_kill, n_bq });
-    return .{ .omega = omega, .b = b_sum };
+
+    // ── reduce: prefix-sum block totals, correct each block's ω (D-leaves) and B ──
+    const prefix = try gpa.alloc(i64, nax);
+    defer gpa.free(prefix);
+    @memset(prefix, 0);
+    var omega_total: i128 = 0;
+    var b_total: i128 = 0;
+    var prefix_full: i64 = 0;
+    for (0..nb) |t| {
+        omega_total += blk_omega[t];
+        b_total += blk_b[t];
+        var corr: i128 = 0;
+        for (3..nax) |bi| corr += @as(i128, prefix[bi]) * @as(i128, blk_mu[t * nax + bi]);
+        omega_total += corr;
+        b_total += @as(i128, prefix_full) * @as(i128, @intCast(blk_bcount[t]));
+        for (3..nax) |bi| prefix[bi] += blk_total[t * nax + bi];
+        prefix_full += blk_total_full[t];
+    }
+    if (INST) std.debug.print("  ωB-stats: nax={d} naz={d} nb={d} segs={d} mwalk={d} leaves(small/C/D)={d}/{d}/{d} kills={d} Bqueries={d}\n", .{ nax, naz, nb, n_seg, n_mwalk, n_small, n_easy, n_hard, n_kill, n_bq });
+    return .{ .omega = omega_total, .b = b_total };
 }
 
 // ---------------------------------------------- ω reference (for the diff-check)
@@ -781,7 +862,11 @@ pub fn main() !void {
         const on = omegaNaive(s.primes, s.mu, s.delta, pi, x, y, xstar);
         const wb = try omegaCounter(false, u64, gpa, &s, x, y, z, xstar);
         const b_ref = try computeB(false, gpa, &s, x, y, z, isqrt(x)); // standalone B reference
-        std.debug.print("  {d:>12}  ω naive={d:>14} counter={d:>14} {s}   B fused={d} ref={d} {s}\n", .{ x, on, wb.omega, if (on == wb.omega) "match" else "MISMATCH", wb.b, b_ref, if (wb.b == b_ref) "match" else "MISMATCH" });
+        // block-consistency: nb blocks + reduction must equal the nb=1 sweep
+        const wb4 = try omegaBlocked(false, u64, gpa, &s, x, y, z, xstar, 4);
+        const wb7 = try omegaBlocked(false, u64, gpa, &s, x, y, z, xstar, 7);
+        const blk_ok = wb4.omega == wb.omega and wb4.b == wb.b and wb7.omega == wb.omega and wb7.b == wb.b;
+        std.debug.print("  {d:>12}  ω naive={d:>14} counter={d:>14} {s}   B fused={d} ref={d} {s}   blocks(4,7){s}\n", .{ x, on, wb.omega, if (on == wb.omega) "match" else "MISMATCH", wb.b, b_ref, if (wb.b == b_ref) "match" else "MISMATCH", if (blk_ok) "=✓" else "=MISMATCH" });
     }
 
     // Correctness + timing: Gourdon (counter-ω, segmented-π) vs lmo, both serial.
