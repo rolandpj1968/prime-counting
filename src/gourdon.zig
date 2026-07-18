@@ -40,40 +40,76 @@ fn isqrtsq(x: u64) u64 { // x^(1/4)
 }
 
 // --------------------------------------------------------------- small sieve
-/// Primes ≤ nmax via a bit-packed Eratosthenes (nmax/8 transient bytes, not nmax·4).
+/// Primes ≤ nmax by a SEGMENTED Eratosthenes: base primes ≤ √nmax mark each cache-
+/// sized segment in turn, so the transient sieve buffer is O(SEG), not O(nmax/8).
+/// (The returned prime list is still O(nmax/ln) — that's the persistent cost.)
 fn sievePrimes(gpa: std.mem.Allocator, nmax: u64) ![]u32 {
-    const N: usize = @intCast(nmax + 1);
-    const nw = (N + 63) / 64;
-    const bits = try gpa.alloc(u64, nw); // bit set ⇒ composite
-    defer gpa.free(bits);
-    @memset(bits, 0);
-    const isComp = struct {
-        fn f(b: []const u64, i: usize) bool {
-            return b[i >> 6] & (@as(u64, 1) << @as(u6, @intCast(i & 63))) != 0;
-        }
-    }.f;
+    if (nmax < 2) return gpa.alloc(u32, 0);
+    const rt: usize = @intCast(isqrt(nmax)); // base primes needed up to √nmax
+    // base primes ≤ rt (simple; rt = x^(1/4) here, tiny)
+    const bcomp = try gpa.alloc(bool, rt + 1);
+    defer gpa.free(bcomp);
+    @memset(bcomp, false);
     var i: usize = 2;
-    while (i * i < N) : (i += 1) {
-        if (!isComp(bits, i)) {
-            var j: usize = i * i;
-            while (j < N) : (j += i) bits[j >> 6] |= @as(u64, 1) << @as(u6, @intCast(j & 63));
+    while (i * i <= rt) : (i += 1) {
+        if (!bcomp[i]) {
+            var j = i * i;
+            while (j <= rt) : (j += i) bcomp[j] = true;
         }
     }
-    var np: usize = 0;
+    var nb: usize = 0;
     i = 2;
-    while (i < N) : (i += 1) {
-        if (!isComp(bits, i)) np += 1;
+    while (i <= rt) : (i += 1) {
+        if (!bcomp[i]) nb += 1;
     }
-    const primes = try gpa.alloc(u32, np);
-    var k: usize = 0;
-    i = 2;
-    while (i < N) : (i += 1) {
-        if (!isComp(bits, i)) {
-            primes[k] = @intCast(i);
-            k += 1;
+    const base = try gpa.alloc(u32, nb);
+    defer gpa.free(base);
+    {
+        var k: usize = 0;
+        i = 2;
+        while (i <= rt) : (i += 1) {
+            if (!bcomp[i]) {
+                base[k] = @intCast(i);
+                k += 1;
+            }
         }
     }
-    return primes;
+    // upper bound on π(nmax) — Dusart: π(n) ≤ (n/ln n)(1 + 1.2762/ln n). Using ⌊ln⌋
+    // (< ln, via log2·ln2) only loosens it, so this is a safe cap with ~3% slop.
+    const ln: u64 = @max(1, (@as(u64, log2Floor(@intCast(nmax))) * 693) / 1000);
+    const t1: u64 = nmax / ln;
+    const cap: usize = @max(@as(usize, 16), @as(usize, @intCast(t1 + (t1 * 1276) / (ln * 1000) + 64)));
+    var primes = try gpa.alloc(u32, cap);
+    errdefer gpa.free(primes);
+    var cnt: usize = 0;
+
+    const SEG: usize = 1 << 18;
+    const seg = try gpa.alloc(bool, SEG);
+    defer gpa.free(seg);
+    var lo: u64 = 0;
+    while (lo <= nmax) : (lo += SEG) {
+        const hi = @min(lo + SEG, nmax + 1);
+        const len: usize = @intCast(hi - lo);
+        @memset(seg[0..len], false);
+        for (base) |p32| {
+            const p: u64 = p32;
+            if (p * p >= hi) break;
+            var j: u64 = @max(p * p, ((lo + p - 1) / p) * p);
+            while (j < hi) : (j += p) seg[@intCast(j - lo)] = true;
+        }
+        if (lo == 0) {
+            seg[0] = true; // 0
+            if (len > 1) seg[1] = true; // 1
+        }
+        var k: usize = 0;
+        while (k < len) : (k += 1) {
+            if (!seg[k]) {
+                primes[cnt] = @intCast(lo + @as(u64, k));
+                cnt += 1;
+            }
+        }
+    }
+    return gpa.realloc(primes, cnt);
 }
 
 /// Persistent tables: primes ≤ √x (for piLE and the term loops), and δ/μ only to y
