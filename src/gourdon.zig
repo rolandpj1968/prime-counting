@@ -22,6 +22,8 @@ const std = @import("std");
 const common = @import("common.zig");
 const lmo = @import("lmo.zig");
 
+var g_bmarks: u64 = 0; // INST-only: B sieve marks (composite bit-clears in answerPi)
+
 // ---------------------------------------------------------------- integer roots
 fn isqrt(n: u64) u64 {
     return common.isqrt(n);
@@ -246,7 +248,7 @@ const Counter3P = struct {
 /// div); primes are counted 64-at-a-time by popcount. Survivors in [0,v] = {1} ∪
 /// {coprime-30 primes ≤ v}, so π(v) = 2 + popcount([0,v]) for v ≥ 7 (the +2 = 3 for
 /// {2,3,5} − 1 for the spurious "1"). All B query points are ≥ √x ≥ 7.
-fn answerPi(gpa: std.mem.Allocator, base: []const u32, pts: []const u64, out: []u64, z: u64) !void {
+fn answerPi(comptime INST: bool, gpa: std.mem.Allocator, base: []const u32, pts: []const u64, out: []u64, z: u64) !void {
     const n = pts.len;
     const ord = try gpa.alloc(usize, n);
     defer gpa.free(ord);
@@ -288,6 +290,7 @@ fn answerPi(gpa: std.mem.Allocator, base: []const u32, pts: []const u64, out: []
             var w = p * k;
             var widx: u8 = W30IDX[@intCast(k % 30)];
             while (w < hi) {
+                if (INST) g_bmarks += 1;
                 const i: usize = @intCast(w - lo);
                 bits[i >> 6] &= ~(@as(u64, 1) << @as(u6, @intCast(i & 63)));
                 w += p * W30GAP[widx];
@@ -405,7 +408,7 @@ fn computeTerms(s: *const Sieve, x: u64, y: u64, sqx: u64, x13: u64, sqz: u64, x
 
 /// B = Σ_{y<p≤√x} π(x/p). The only term needing π(v) for v > √x (v ∈ [√x, z]).
 /// Answered by a running-π segmented sweep over just [√x, z], starting at π(√x).
-fn computeB(gpa: std.mem.Allocator, s: *const Sieve, x: u64, y: u64, z: u64, sqx: u64) !i128 {
+fn computeB(comptime INST: bool, gpa: std.mem.Allocator, s: *const Sieve, x: u64, y: u64, z: u64, sqx: u64) !i128 {
     const pr = s.primes;
     var nb: usize = 0;
     for (pr) |p32| {
@@ -426,7 +429,7 @@ fn computeB(gpa: std.mem.Allocator, s: *const Sieve, x: u64, y: u64, z: u64, sqx
         bpts[k] = x / p;
         k += 1;
     }
-    try answerPi(gpa, pr, bpts, bans, z);
+    try answerPi(INST, gpa, pr, bpts, bans, z);
     var B: i128 = 0;
     for (bans) |pv| B += @intCast(pv);
     return B;
@@ -675,7 +678,7 @@ pub fn piGourdonV(gpa: std.mem.Allocator, x: u64, y_in: ?u64, verbose: bool) !GR
     const t = computeTerms(&s, x, y, sqx, x13, sqz, xstar);
     lap(verbose, &tp, "A/Σ");
     // B: the only term needing v > √x — its own running-π sweep.
-    const B = try computeB(gpa, &s, x, y, z, sqx);
+    const B = try computeB(false, gpa, &s, x, y, z, sqx);
     lap(verbose, &tp, "B");
 
     const omega = try omegaCounter(false, gpa, &s, x, y, z, xstar);
@@ -747,15 +750,21 @@ pub fn main() !void {
     std.debug.print("\nper-term profile @ 10^12:\n", .{});
     _ = try piGourdonV(gpa, 1_000_000_000_000, null, true);
 
-    std.debug.print("\nω instrumentation:\n", .{});
+    std.debug.print("\nop-count comparison (gourdon ω/B vs lmo S2/P₂), matched x,y:\n", .{});
     for ([_]u64{ 1_000_000_000_000, 100_000_000_000_000 }) |x| {
         const y = chooseY(x);
         const z = x / y;
         const xstar = @max(isqrtsq(x), x / (y * y));
         var s = try Sieve.init(gpa, isqrt(x), y);
         defer s.deinit(gpa);
-        std.debug.print("  x=10^{d}: ", .{std.math.log10_int(x)});
-        _ = try omegaCounter(true, gpa, &s, x, y, z, xstar);
+        std.debug.print("x=10^{d} (y={d}, z={d}):\n", .{ std.math.log10_int(x), y, z });
+        std.debug.print("  gourdon ", .{});
+        _ = try omegaCounter(true, gpa, &s, x, y, z, xstar); // prints ω-stats (kills, C/D, mwalk)
+        g_bmarks = 0;
+        _ = try computeB(true, gpa, &s, x, y, z, isqrt(x));
+        std.debug.print("          B sieve marks={d}\n", .{g_bmarks});
+        const lr = try lmo.s2AndP2FusedInstrumented(gpa, @intCast(x), y, y);
+        std.debug.print("  lmo:      S2 kills={d}  S2 prefix(hard)={d}  P₂ prefix(np)={d}\n", .{ lr.kills, lr.s2q, lr.np });
     }
 
     // Ceiling test: past the old O(z) π-table limit, gourdon-only vs known values.

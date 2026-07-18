@@ -831,6 +831,9 @@ pub const FusedResult = struct {
     walk: u64,
     z: u64,
     a: usize,
+    kills: u64 = 0, // fold kills (INST)
+    np: u64 = 0, // P₂ primes = P₂ prefix queries (INST)
+    s2q: u64 = 0, // S2 counter prefix queries = hard leaves (INST)
 };
 
 /// Production path: diagnostics OFF. The `walk`/`leaves`/`easy` counters cost 3.3% at
@@ -952,6 +955,7 @@ fn BlkCtx(comptime C: type, comptime X: type) type {
         leaves: u64 = 0,
         easy: u64 = 0,
         walk: u64 = 0,
+        kills: u64 = 0, // fold ctr.kill() calls (S2 prefix queries = leaves−easy; P₂ = np)
 
         fn runBlock(self: *Self, comptime INST: bool, blk: usize) void {
             const x = self.x;
@@ -1062,6 +1066,7 @@ fn BlkCtx(comptime C: type, comptime X: type) type {
                         var j = next[bi];
                         var wp = wpos[bi];
                         while (j < hi) {
+                            if (INST) self.kills += 1;
                             self.ctr.kill(@intCast(j - lo));
                             j += p * W30GAP[wp];
                             wp = (wp + 1) & 7;
@@ -1268,6 +1273,10 @@ pub fn s2P2Blocks(comptime C: type, comptime INST: bool, comptime X: type, gpa: 
     for (0..nb) |blk| ctx.runBlock(INST, blk);
 
     const r = try reduceBlocks(a, nb, do_p2, blk_s2, blk_pi, blk_np, blk_total, blk_mu, s1_closed, gpa);
+    var np_total: u64 = 0;
+    if (INST) for (blk_np) |v| {
+        np_total += v;
+    };
     return .{
         .s2 = r.s2,
         .p2 = r.p2,
@@ -1276,6 +1285,9 @@ pub fn s2P2Blocks(comptime C: type, comptime INST: bool, comptime X: type, gpa: 
         .walk = ctx.walk,
         .z = z,
         .a = a,
+        .kills = ctx.kills,
+        .np = np_total,
+        .s2q = if (INST) ctx.leaves - ctx.easy else 0,
     };
 }
 
