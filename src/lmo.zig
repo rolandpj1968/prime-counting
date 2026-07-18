@@ -1283,7 +1283,15 @@ pub fn s2P2Blocks(comptime C: type, comptime INST: bool, comptime X: type, gpa: 
 /// and each run BlkCtx.runBlock with their OWN scratch, sharing the read-only tables
 /// (built once) and the per-block output arrays (disjoint writes). INST is always false
 /// — diagnostics are a serial analysis path. Result is identical to s2P2Blocks(nb).
-pub fn s2P2Parallel(comptime C: type, comptime X: type, gpa: std.mem.Allocator, x: X, y: u64, seg: usize, nb: usize, nthreads: usize, blk_ns: ?[]u64) !FusedResult {
+/// Pin the calling thread to one logical CPU (best-effort). Used for the core-vs-HT
+/// scaling characterisation; sibling map from /proc/cpuinfo (evens = distinct cores).
+fn pinToCpu(cpu: u32) void {
+    var set: std.os.linux.cpu_set_t = @splat(0);
+    set[cpu / @bitSizeOf(usize)] |= @as(usize, 1) << @intCast(cpu % @bitSizeOf(usize));
+    std.os.linux.sched_setaffinity(0, &set) catch {};
+}
+
+pub fn s2P2Parallel(comptime C: type, comptime X: type, gpa: std.mem.Allocator, x: X, y: u64, seg: usize, nb: usize, nthreads: usize, blk_ns: ?[]u64, pins: ?[]const u32) !FusedResult {
     const segw = @max(@as(usize, 960), ((seg + 959) / 960) * 960);
     var t = try SmallTables.init(gpa, y);
     defer t.deinit(gpa);
@@ -1383,7 +1391,8 @@ pub fn s2P2Parallel(comptime C: type, comptime X: type, gpa: std.mem.Allocator, 
     const Disp = struct { next: std.atomic.Value(usize), nb: usize, blk_ns: ?[]u64 };
     var disp = Disp{ .next = std.atomic.Value(usize).init(0), .nb = nb, .blk_ns = blk_ns };
     const Worker = struct {
-        fn run(ctxp: *Ctx, dp: *Disp) void {
+        fn run(ctxp: *Ctx, dp: *Disp, cpu: ?u32) void {
+            if (cpu) |c| pinToCpu(c);
             while (true) {
                 const blk = dp.next.fetchAdd(1, .monotonic);
                 if (blk >= dp.nb) break;
@@ -1404,10 +1413,11 @@ pub fn s2P2Parallel(comptime C: type, comptime X: type, gpa: std.mem.Allocator, 
     defer gpa.free(threads);
     var spawned: usize = 0;
     for (1..nthreads) |i| {
-        threads[i] = std.Thread.spawn(.{}, Worker.run, .{ &ctxs[i], &disp }) catch break;
+        const cpu: ?u32 = if (pins) |pp| pp[i] else null;
+        threads[i] = std.Thread.spawn(.{}, Worker.run, .{ &ctxs[i], &disp, cpu }) catch break;
         spawned = i;
     }
-    Worker.run(&ctxs[0], &disp);
+    Worker.run(&ctxs[0], &disp, if (pins) |pp| pp[0] else null);
     var j: usize = 1;
     while (j <= spawned) : (j += 1) threads[j].join();
 
@@ -1437,21 +1447,21 @@ pub fn piLMO(gpa: std.mem.Allocator, x: u128, y_in: ?u64, seg_in: ?usize) !PiRes
 /// Parallel π(x): nb = nthreads·k_over blocks over the same decomposition, dispensed
 /// dynamically to nthreads workers. k_over is the over-partition factor for load
 /// balance (blocks are equal-segment-width for now — cost-balanced partition is next).
-pub fn piLMOPar(gpa: std.mem.Allocator, x: u128, nthreads: usize, k_over: usize) !PiResult {
+pub fn piLMOPar(gpa: std.mem.Allocator, x: u128, nthreads: usize, k_over: usize, pins: ?[]const u32) !PiResult {
     if (x < 2) return .{ .pi = 0, .phi = 0, .p2 = 0, .y = 0, .a = 0, .z = 0, .leaves = 0 };
     const y = defaultY(x);
     const seg: usize = @max(y, 1024);
     const nb = @max(@as(usize, 1), nthreads * k_over);
     if (x <= std.math.maxInt(u64)) {
-        return piImplPar(u64, gpa, @intCast(x), y, seg, nb, nthreads);
+        return piImplPar(u64, gpa, @intCast(x), y, seg, nb, nthreads, pins);
     } else {
-        return piImplPar(u128, gpa, x, y, seg, nb, nthreads);
+        return piImplPar(u128, gpa, x, y, seg, nb, nthreads, pins);
     }
 }
 
-fn piImplPar(comptime X: type, gpa: std.mem.Allocator, x: X, y: u64, seg: usize, nb: usize, nthreads: usize) !PiResult {
+fn piImplPar(comptime X: type, gpa: std.mem.Allocator, x: X, y: u64, seg: usize, nb: usize, nthreads: usize, pins: ?[]const u32) !PiResult {
     const s1 = try ordinaryS1Gen(X, gpa, x, y);
-    const f = try s2P2Parallel(Counter3P, X, gpa, x, y, seg, nb, nthreads, null);
+    const f = try s2P2Parallel(Counter3P, X, gpa, x, y, seg, nb, nthreads, null, pins);
     const phi = s1.s1 + f.s2;
     const r = phi + @as(i128, @intCast(f.a)) - 1 - f.p2;
     return .{ .pi = @intCast(r), .phi = phi, .p2 = f.p2, .y = y, .a = f.a, .z = f.z, .leaves = 0 };
