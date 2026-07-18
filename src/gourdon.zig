@@ -4,7 +4,10 @@
 //!
 //! Term status (top-down build; lmo.zig referees the total):
 //!   ω   — SEGMENTED O(1)-kill counter (= lmo's S2 leaf truncated at x*), O(SEG)
-//!         memory; easy leaves (v≤y ∧ p²>v) use the closed form 1+max(0,π(v)−bi).
+//!         memory. Gourdon's C/D split: leaves with x/pm<p² use the closed form
+//!         1+max(0,π(v)−bi) (π via pi_tab/piLE), only true D leaves hit the counter.
+//!         Leaf enumeration is dense/sparse (DR/LMO): p≤√y walks all m; p>√y walks
+//!         only the primes q∈(p,y] (δ(m)>p forces m prime — zero rejection).
 //!   π   — A, Σ₄/₅/₆ and the scalars query π only at points ≤ √x (proven); a monotone
 //!         cursor / binary search on the prime list answers them — no table, no sweep.
 //!         Only B has v = x/p up to z > √x, so B alone takes a running-π sweep.
@@ -438,6 +441,8 @@ fn computeB(gpa: std.mem.Allocator, s: *const Sieve, x: u64, y: u64, z: u64, sqx
 fn omegaCounter(comptime INST: bool, gpa: std.mem.Allocator, s: *const Sieve, x: u64, y: u64, z: u64, xstar: u64) !i128 {
     const primes = s.primes;
     const sqx = isqrt(x);
+    const sqrt_y = isqrt(y); // dense/sparse split point (DR/LMO): p≤√y dense, else sparse
+    const nay: usize = piLE(primes, y); // π(y): index nay−1 is the largest prime ≤ y
     const nax: usize = piLE(primes, xstar); // # primes ≤ x* (fold + leaf range)
     if (nax == 0) return 0;
     const segw: usize = 273 * 960; // ≈256 KiB counter, MASK30-aligned (lcm(30,64)=960)
@@ -463,7 +468,9 @@ fn omegaCounter(comptime INST: bool, gpa: std.mem.Allocator, s: *const Sieve, x:
 
     @memset(phi_run, 0);
     for (0..nax) |bi| {
-        cur[bi] = y; // m starts at y, walks down
+        // dense cursor is m (starts at y); sparse cursor is a prime INDEX (starts at
+        // the largest prime ≤ y). Both walk down as segments ascend.
+        cur[bi] = if (primes[bi] <= sqrt_y) y else @as(u64, nay - 1);
         if (bi >= 3) {
             next[bi] = primes[bi]; // p·1 (p≥7 ⇒ coprime to 30), so wpos=W30IDX[1]=0
             wpos[bi] = 0;
@@ -480,46 +487,74 @@ fn omegaCounter(comptime INST: bool, gpa: std.mem.Allocator, s: *const Sieve, x:
         for (0..nax) |bi| {
             const p: u64 = primes[bi];
             if (bi >= 3) seg_cnt[bi] = ctr.total; // φ(·,bi) count for this segment
-            if (p > 2) {
+            // ── C/D leaf evaluator (Gourdon): closed form when x/pm < p² (π(v) cheap
+            //    for v ≤ √x), else the counter. Shared by both walks below.
+            const evalPhi = struct {
+                inline fn f(
+                    comptime IN: bool,
+                    vv: u64,
+                    b: usize,
+                    pp: u64,
+                    ss: *const Sieve,
+                    prs: []const u32,
+                    pr_bi: i64,
+                    ct: *const Counter3P,
+                    l: u64,
+                    sx: u64,
+                    yy: u64,
+                    cE: *u64,
+                    cH: *u64,
+                ) i64 {
+                    var piv: i64 = -1;
+                    if (pp * pp > vv) {
+                        if (vv <= yy) piv = @intCast(ss.pi_tab[@intCast(vv)]) else if (vv <= sx) piv = @intCast(piLE(prs, vv));
+                    }
+                    if (piv >= 0) {
+                        if (IN) cE.* += 1;
+                        return 1 + @max(0, piv - @as(i64, @intCast(b)));
+                    }
+                    if (IN) cH.* += 1;
+                    return pr_bi + ct.prefix(@intCast(vv - l));
+                }
+            }.f;
+            if (p <= 2) {
+                // p=2 has no ω leaves; nothing to do (fold handled below, but bi=0<3)
+            } else if (p <= sqrt_y) {
+                // DENSE: walk every m ∈ (y/p, y], filter μ(m)≠0 ∧ δ(m)>p.
                 var m: u64 = cur[bi];
-                const mlo: u64 = y / p; // m ∈ (y/p, y]
+                const mlo: u64 = y / p;
                 while (m > mlo) {
                     if (INST) n_mwalk += 1;
                     const v: u64 = x / (m * p);
-                    if (v >= hi) break; // v rises as m falls — done with this segment
+                    if (v >= hi) break;
                     if (v >= lo) {
                         const mm = s.mu[@intCast(m)];
-                        if (mm != 0 and s.delta[@intCast(m)] > p) { // δ(m) > p
-                            var phi_v: i64 = undefined;
-                            if (bi <= 2) {
+                        if (mm != 0 and s.delta[@intCast(m)] > p) {
+                            const phi_v: i64 = if (bi <= 2) blk: {
                                 if (INST) n_small += 1;
-                                phi_v = phiSmall(v, bi);
-                            } else {
-                                // Gourdon's C term: x/pm < p² ⇒ φ = 1 + π(v) − bi (closed
-                                // form). π(v) is cheap for v ≤ √x (pi_tab / piLE); only the
-                                // rare v > √x C-leaf (large x, x*=x/y²) falls to the counter.
-                                var piv: i64 = -1;
-                                if (p * p > v) {
-                                    if (v <= y) {
-                                        piv = @intCast(s.pi_tab[@intCast(v)]);
-                                    } else if (v <= sqx) {
-                                        piv = @intCast(piLE(primes, v));
-                                    }
-                                }
-                                if (piv >= 0) {
-                                    if (INST) n_easy += 1;
-                                    phi_v = 1 + @max(0, piv - @as(i64, @intCast(bi)));
-                                } else { // D term: counter
-                                    if (INST) n_hard += 1;
-                                    phi_v = phi_run[bi] + ctr.prefix(@intCast(v - lo));
-                                }
-                            }
+                                break :blk phiSmall(v, bi);
+                            } else evalPhi(INST, v, bi, p, s, primes, phi_run[bi], &ctr, lo, sqx, y, &n_easy, &n_hard);
                             omega += @as(i128, -mm) * @as(i128, phi_v);
                         }
                     }
                     m -= 1;
                 }
                 cur[bi] = m;
+            } else {
+                // SPARSE (p>√y): δ(m)>p forces m to be a prime q∈(p,y] — so iterate the
+                // prime list directly (μ(q)=−1 ⇒ sign +1), ZERO rejection.
+                var qc: usize = @intCast(cur[bi]);
+                while (qc > bi) {
+                    if (INST) n_mwalk += 1;
+                    const q: u64 = primes[qc];
+                    const v: u64 = x / (p * q);
+                    if (v >= hi) break;
+                    if (v >= lo) {
+                        omega += @as(i128, evalPhi(INST, v, bi, p, s, primes, phi_run[bi], &ctr, lo, sqx, y, &n_easy, &n_hard));
+                    }
+                    qc -= 1;
+                }
+                cur[bi] = qc;
             }
             if (bi >= 3) { // fold p: kill its coprime-to-30 multiples in [lo,hi)
                 var j: u64 = next[bi];
