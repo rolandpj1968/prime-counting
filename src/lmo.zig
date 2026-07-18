@@ -1427,7 +1427,7 @@ pub fn s2P2Parallel(comptime C: type, comptime X: type, gpa: std.mem.Allocator, 
 
 // ---------------------------------------------------------------------- π(x)
 
-pub const PiResult = struct { pi: u64, phi: i128, p2: i128, y: u64, a: usize, z: u64, leaves: u64 };
+pub const PiResult = struct { pi: u128, phi: i128, p2: i128, y: u64, a: usize, z: u64, leaves: u64 };
 
 /// π(x) = φ(x, a) + a − 1 − P₂(x, a), a = π(y) — LMO end to end.
 /// π(x) end to end. Takes u128 so x can exceed 2⁶⁴ (π(10²⁰)); dispatches to the u64
