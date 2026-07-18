@@ -278,6 +278,16 @@ const Counter3P = struct {
         self.cnt2[blk >> self.s2] -= alive;
         self.total -= @as(i64, alive);
     }
+    /// Word-parallel strike: clear all bits of `t` from word `w` in one op (delta via popcount).
+    inline fn killWord(self: *Counter3P, w: usize, t: u64) void {
+        const old = self.bits[w];
+        self.bits[w] = old & ~t;
+        const d: u32 = @popCount(old & t);
+        const blk = w >> self.s1;
+        self.cnt1[blk] -= d;
+        self.cnt2[blk >> self.s2] -= d;
+        self.total -= @as(i64, d);
+    }
     fn prefix(self: *const Counter3P, i: usize) i64 {
         const w = i >> 6;
         const blk = w >> self.s1;
@@ -335,6 +345,14 @@ const Counter2P = struct {
         self.bits[w] &= ~b;
         self.cnt[w >> self.s1] -= alive;
         self.total -= @as(i64, alive);
+    }
+    /// Word-parallel strike: clear all bits of `t` from word `w` in one op (delta via popcount).
+    inline fn killWord(self: *Counter2P, w: usize, t: u64) void {
+        const old = self.bits[w];
+        self.bits[w] = old & ~t;
+        const d: u32 = @popCount(old & t);
+        self.cnt[w >> self.s1] -= d;
+        self.total -= @as(i64, d);
     }
     fn prefix(self: *const Counter2P, i: usize) i64 {
         const w = i >> 6;
@@ -773,8 +791,41 @@ fn BlkCtx(comptime X: type, comptime P: type) type {
         blk_bcount: []u64,
         blk_omega: []i128,
         blk_b: []i128,
+        nsmall: usize, // # of small primes (bi = 3 .. 3+nsmall) folded word-parallel
+        small_tmpl: []const u64, // flat p-word templates per small prime
+        small_off: []const usize, // small_off[k] = start of prime k's templates
         disp: std.atomic.Value(usize),
     };
+}
+
+/// Small primes p (excluding 2,3,5) get a word-parallel strike when their coprime-30
+/// multiples are ≥ ~1 per 64-bit word, i.e. p ≲ 64·8/30 ≈ 17. A couple above break-even
+/// are harmless. Template p, phase r has bit j set iff j ≡ r (mod p), j∈[0,63].
+const SMALL_STRIKE_MAX: u64 = 30;
+
+/// Build flat coprime-agnostic multiple-of-p templates for primes[3 .. 3+nsmall].
+fn buildSmallTemplates(gpa: std.mem.Allocator, primes: anytype) !struct { tmpl: []u64, off: []usize, n: usize } {
+    var n: usize = 0;
+    var total: usize = 0;
+    while (3 + n < primes.len and @as(u64, primes[3 + n]) <= SMALL_STRIKE_MAX) : (n += 1) {
+        total += @intCast(primes[3 + n]);
+    }
+    const off = try gpa.alloc(usize, n + 1);
+    const tmpl = try gpa.alloc(u64, total);
+    var cur: usize = 0;
+    for (0..n) |k| {
+        off[k] = cur;
+        const p: usize = @intCast(primes[3 + k]);
+        for (0..p) |r| { // phase r: bits at j ≡ r (mod p)
+            var word: u64 = 0;
+            var j: usize = r;
+            while (j < 64) : (j += p) word |= @as(u64, 1) << @as(u6, @intCast(j));
+            tmpl[cur + r] = word;
+        }
+        cur += p;
+    }
+    off[n] = cur;
+    return .{ .tmpl = tmpl, .off = off, .n = n };
 }
 
 /// Sweep block t (segw-aligned) with fast-forwarded cursors + LOCAL phi_run; write the
@@ -887,16 +938,34 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, ctx: *Bl
                 }
             }
             if (bi >= 3) { // fold p (all ≤ √z)
-                var j: u64 = next[bi];
-                var wp: u8 = wpos[bi];
-                while (j < hi) {
-                    if (INST) st.n_kill += 1;
-                    sc.ctr.kill(@intCast(j - lo));
-                    j += p * W30GAP[wp];
-                    wp = (wp + 1) & 7;
+                const k = bi - 3;
+                if (k < ctx.nsmall) {
+                    // word-parallel strike: AND out all multiples of p across the segment's
+                    // words (2,3,5-multiples already 0 ⇒ popcount delta counts only live kills)
+                    const tp = ctx.small_tmpl[ctx.small_off[k]..ctx.small_off[k + 1]];
+                    const pp: u64 = @intCast(tp.len); // = p
+                    const nwlen = (len + 63) >> 6;
+                    var r: usize = @intCast((pp - (lo % pp)) % pp); // phase of word 0 (pos 0 = int lo)
+                    const dr: usize = @intCast(pp - (64 % pp)); // r -= 64 mod p per word
+                    const ppz: usize = @intCast(pp);
+                    for (0..nwlen) |w| {
+                        sc.ctr.killWord(w, tp[r]);
+                        r += dr;
+                        if (r >= ppz) r -= ppz;
+                    }
+                    if (INST) st.n_kill += nwlen;
+                } else {
+                    var j: u64 = next[bi];
+                    var wp: u8 = wpos[bi];
+                    while (j < hi) {
+                        if (INST) st.n_kill += 1;
+                        sc.ctr.kill(@intCast(j - lo));
+                        j += p * W30GAP[wp];
+                        wp = (wp + 1) & 7;
+                    }
+                    next[bi] = j;
+                    wpos[bi] = wp;
                 }
-                next[bi] = j;
-                wpos[bi] = wp;
             }
         }
         // B queries off the fully-folded counter (φ(·,π√z))
@@ -952,6 +1021,7 @@ fn initBlkCtx(comptime X: type, comptime P: type, gpa: std.mem.Allocator, s: any
     const nax: usize = piLE(primes, xstar);
     const segw: usize = 273 * 960;
     const total = z + 1;
+    const tm = try buildSmallTemplates(gpa, primes);
     return .{
         .mu = s.mu,
         .delta = s.delta,
@@ -977,6 +1047,9 @@ fn initBlkCtx(comptime X: type, comptime P: type, gpa: std.mem.Allocator, s: any
         .blk_bcount = try gpa.alloc(u64, nb),
         .blk_omega = try gpa.alloc(i128, nb),
         .blk_b = try gpa.alloc(i128, nb),
+        .nsmall = tm.n,
+        .small_tmpl = tm.tmpl,
+        .small_off = tm.off,
         .disp = std.atomic.Value(usize).init(0),
     };
 }
@@ -987,6 +1060,8 @@ fn freeBlkCtx(comptime X: type, comptime P: type, gpa: std.mem.Allocator, ctx: *
     gpa.free(ctx.blk_bcount);
     gpa.free(ctx.blk_omega);
     gpa.free(ctx.blk_b);
+    gpa.free(ctx.small_tmpl);
+    gpa.free(ctx.small_off);
 }
 
 fn omegaCounter(comptime INST: bool, comptime X: type, gpa: std.mem.Allocator, s: anytype, x: X, y: u64, z: u64, xstar: u64) !OmegaB {
