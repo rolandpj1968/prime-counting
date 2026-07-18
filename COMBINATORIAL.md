@@ -552,6 +552,21 @@ per-thread a-arrays grow and lean harder on bandwidth. Best config: **6 physical
 HT off** — a ~4–5× ceiling on this box. Pushing past it needs Gourdon's per-block transfer-size
 reduction (shrink the a-arrays below L2), still untried.
 
+**Full parallel sweep** (6 pinned physical cores, k_over=16, vs single-thread):
+
+| x | π(x) | serial | parallel | speedup |
+|---|------|-------:|---------:|--------:|
+| 10¹⁴ | 3,204,941,750,802 | 1.16 s | 0.27 s | **4.35×** |
+| 10¹⁵ | 29,844,570,422,669 | 5.23 s | 1.33 s | 3.94× |
+| 10¹⁶ | 279,238,341,033,925 | 23.1 s | 6.49 s | 3.56× |
+| 10¹⁷ | 2,623,557,157,654,233 | 103 s | 29.7 s | 3.47× |
+| 10¹⁸ | 24,739,954,287,740,860 | 8.3 min | **2.49 min** | 3.32× |
+| 10¹⁹ | 234,057,667,276,344,607 | 42.4 min | **12.2 min** | 3.48× |
+
+Speedup peaks ~4.4× at 10¹⁴ and settles to ~3.3–3.5× at scale (bandwidth-bound). All exact.
+So π(10¹⁹) — the last power of ten under 2⁶⁴, and M. Deléglise's 1996 record — now falls in
+**12 minutes** on a 6-core laptop.
+
 ## Verification methodology
 
 Correctness held through ~40 commits of aggressive optimisation via three independent oracles:
