@@ -45,6 +45,14 @@ fn isqrtG(comptime T: type, n: T) u64 {
     return x;
 }
 /// ⌊x/d⌋ with x wide (X) and d a u64 that fits — result fits u64 (it's ≤ z or √x).
+/// ⌊x / (a·b)⌋ with the product formed in X, so it is safe when a·b overflows u64
+/// (reachable past ~10²³). b = 0 ⇒ no bound; a·b > x ⇒ 0.
+inline fn mBound(comptime X: type, x: X, a: u64, b: u64) u64 {
+    if (b == 0) return std.math.maxInt(u64);
+    const d: X = @as(X, a) * @as(X, b);
+    return if (d > x) 0 else @intCast(x / d);
+}
+
 inline fn xdiv(comptime X: type, x: X, d: u64) u64 {
     return @intCast(x / @as(X, d));
 }
@@ -1000,25 +1008,28 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, ctx: *Bl
             if (bi < nax) {
                 if (bi >= 3) seg_cnt[bi] = sc.ctr.total;
                 if (p > 2 and p <= sqrt_y) {
-                    // DENSE m-walk
-                    var m: u64 = cur[bi];
-                    const mlo: u64 = y / p;
+                    // DENSE m-walk. Both segment bounds are algebraic, not arithmetic:
+                    //   v = x/(mp) < hi  ⟺  m > x/(p·hi),   v ≥ lo  ⟺  m ≤ x/(p·lo)
+                    // so the descent range costs two divisions per (p, segment) rather
+                    // than one per m. That matters because ~63% of the m are rejected
+                    // (μ=0 or spf ≤ p) and used to pay a full x/(mp) before being
+                    // thrown away — a libcall on the u128 path. A rejected m is now a
+                    // load and a compare, and only a surviving leaf divides.
+                    var m: u64 = @min(cur[bi], mBound(X, x, p, lo));
+                    const mlo: u64 = @max(y / p, mBound(X, x, p, hi));
                     while (m > mlo) {
                         if (INST) st.n_mwalk += 1;
-                        const v: u64 = xdiv(X, x, m * p);
-                        if (v >= hi) break;
-                        if (v >= lo) {
-                            const mm = ctx.mu[@intCast(m)];
-                            if (mm != 0 and ctx.delta[@intCast(m)] > p) {
-                                const sign: i64 = -mm;
-                                if (bi <= 2) {
-                                    if (INST) st.n_small += 1;
-                                    omega += @as(i128, sign) * @as(i128, phiSmall(v, bi));
-                                } else {
-                                    const r = evalPhi(INST, st, v, bi, p, ctx.pi_tab, ctx.pio, phi_run[bi], &sc.ctr, lo, sqx, y);
-                                    omega += @as(i128, sign) * @as(i128, r.phi);
-                                    if (r.is_d) omega_mu[bi] += sign;
-                                }
+                        const mm = ctx.mu[@intCast(m)];
+                        if (mm != 0 and ctx.delta[@intCast(m)] > p) {
+                            const v: u64 = xdiv(X, x, m * p);
+                            const sign: i64 = -mm;
+                            if (bi <= 2) {
+                                if (INST) st.n_small += 1;
+                                omega += @as(i128, sign) * @as(i128, phiSmall(v, bi));
+                            } else {
+                                const r = evalPhi(INST, st, v, bi, p, ctx.pi_tab, ctx.pio, phi_run[bi], &sc.ctr, lo, sqx, y);
+                                omega += @as(i128, sign) * @as(i128, r.phi);
+                                if (r.is_d) omega_mu[bi] += sign;
                             }
                         }
                         m -= 1;
