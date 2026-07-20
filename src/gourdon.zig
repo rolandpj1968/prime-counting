@@ -368,6 +368,27 @@ const Counter2P = struct {
         self.cnt[w >> self.s1] -= d;
         self.total -= @as(i64, d);
     }
+    /// Counted kills maintain cnt/total on every strike so the counter can be
+    /// queried at any point mid-fold. The fold stages ABOVE π(x*) are never queried
+    /// mid-fold (leaves only exist for bi < nax), so they can clear bits and skip
+    /// the bookkeeping entirely, with one rebuild() before the counter is next read.
+    inline fn strike(self: *Counter2P, i: usize) void {
+        self.bits[i >> 6] &= ~(@as(u64, 1) << @as(u6, @intCast(i & 63)));
+    }
+    inline fn strikeWord(self: *Counter2P, w: usize, t: u64) void {
+        self.bits[w] &= ~t;
+    }
+    /// Recompute cnt/total from bits — one popcount pass, same shape as reset()'s.
+    fn rebuild(self: *Counter2P) void {
+        @memset(self.cnt, 0);
+        var tot: i64 = 0;
+        for (self.bits, 0..) |word, w| {
+            const c: u32 = @popCount(word);
+            self.cnt[w >> self.s1] += c;
+            tot += c;
+        }
+        self.total = tot;
+    }
     fn prefix(self: *const Counter2P, i: usize) i64 {
         const w = i >> 6;
         const blk = w >> self.s1;
@@ -941,6 +962,41 @@ fn buildSmallTemplates(gpa: std.mem.Allocator, primes: anytype) !struct { tmpl: 
     return .{ .tmpl = tmpl, .off = off, .n = n };
 }
 
+/// Fold prime index bi out of the current segment. `counted` selects whether cnt/
+/// total are maintained on every strike. That bookkeeping exists so the counter can
+/// be READ mid-fold, which only the stages below π(x*) ever do — above it, clearing
+/// the bit is the whole job and one rebuild() at the end restores the counts.
+inline fn foldPrime(comptime INST: bool, comptime counted: bool, ctx: anytype, ctr: *Ctr, st: *Stats, bi: usize, p: u64, lo: u64, hi: u64, len: usize, next: []u64, wpos: []u8) void {
+    const k = bi - 3;
+    if (k < ctx.nsmall) {
+        // word-parallel strike: AND out all multiples of p across the segment's
+        // words (2,3,5-multiples already 0 ⇒ popcount delta counts only live kills)
+        const tp = ctx.small_tmpl[ctx.small_off[k]..ctx.small_off[k + 1]];
+        const pp: u64 = @intCast(tp.len); // = p
+        const nwlen = (len + 63) >> 6;
+        var r: usize = @intCast((pp - (lo % pp)) % pp); // phase of word 0 (pos 0 = int lo)
+        const dr: usize = @intCast(pp - (64 % pp)); // r -= 64 mod p per word
+        const ppz: usize = @intCast(pp);
+        for (0..nwlen) |w| {
+            if (counted) ctr.killWord(w, tp[r]) else ctr.strikeWord(w, tp[r]);
+            r += dr;
+            if (r >= ppz) r -= ppz;
+        }
+        if (INST) st.n_kill += nwlen;
+    } else {
+        var j: u64 = next[bi];
+        var wp: u8 = wpos[bi];
+        while (j < hi) {
+            if (INST) st.n_kill += 1;
+            if (counted) ctr.kill(@intCast(j - lo)) else ctr.strike(@intCast(j - lo));
+            j += p * W30GAP[wp];
+            wp = (wp + 1) & 7;
+        }
+        next[bi] = j;
+        wpos[bi] = wp;
+    }
+}
+
 /// Sweep block t (segw-aligned) with fast-forwarded cursors + LOCAL phi_run; write the
 /// reduction data into ctx.blk_*[t] (disjoint per t ⇒ concurrency-safe across threads).
 fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, ctx: *BlkCtx(X, P), sc: *Scratch, st: *Stats, t: usize) void {
@@ -997,15 +1053,19 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, ctx: *Bl
     var phi_run_full: i64 = 0;
     var b_count: u64 = 0;
 
+    // x* ≤ √z always (y ≤ √x and x ≤ y³), so the counted stages are a prefix of the
+    // folded ones; the @min is defensive.
+    const nfold_c = @min(nax, naz);
+
     var lo: u64 = block_lo;
     while (lo < block_hi) : (lo += segw) {
         const hi = @min(lo + @as(u64, segw), block_hi);
         const len: usize = @intCast(hi - lo);
         sc.ctr.reset(len);
         if (INST) st.n_seg += 1;
-        for (0..naz) |bi| {
+        for (0..nfold_c) |bi| {
             const p: u64 = @intCast(primes[bi]);
-            if (bi < nax) {
+            {
                 if (bi >= 3) seg_cnt[bi] = sc.ctr.total;
                 if (p > 2 and p <= sqrt_y) {
                     // DENSE m-walk. Both segment bounds are algebraic, not arithmetic:
@@ -1053,37 +1113,15 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, ctx: *Bl
                     cur[bi] = qc;
                 }
             }
-            if (bi >= 3) { // fold p (all ≤ √z)
-                const k = bi - 3;
-                if (k < ctx.nsmall) {
-                    // word-parallel strike: AND out all multiples of p across the segment's
-                    // words (2,3,5-multiples already 0 ⇒ popcount delta counts only live kills)
-                    const tp = ctx.small_tmpl[ctx.small_off[k]..ctx.small_off[k + 1]];
-                    const pp: u64 = @intCast(tp.len); // = p
-                    const nwlen = (len + 63) >> 6;
-                    var r: usize = @intCast((pp - (lo % pp)) % pp); // phase of word 0 (pos 0 = int lo)
-                    const dr: usize = @intCast(pp - (64 % pp)); // r -= 64 mod p per word
-                    const ppz: usize = @intCast(pp);
-                    for (0..nwlen) |w| {
-                        sc.ctr.killWord(w, tp[r]);
-                        r += dr;
-                        if (r >= ppz) r -= ppz;
-                    }
-                    if (INST) st.n_kill += nwlen;
-                } else {
-                    var j: u64 = next[bi];
-                    var wp: u8 = wpos[bi];
-                    while (j < hi) {
-                        if (INST) st.n_kill += 1;
-                        sc.ctr.kill(@intCast(j - lo));
-                        j += p * W30GAP[wp];
-                        wp = (wp + 1) & 7;
-                    }
-                    next[bi] = j;
-                    wpos[bi] = wp;
-                }
-            }
+            if (bi >= 3) foldPrime(INST, true, ctx, &sc.ctr, st, bi, p, lo, hi, len, next, wpos);
         }
+        // Stages above π(x*) carry no leaves, so nothing reads the counter until the
+        // B queries below: strike bits only, then restore cnt/total in one pass.
+        for (nfold_c..naz) |bi| {
+            const p: u64 = @intCast(primes[bi]);
+            if (bi >= 3) foldPrime(INST, false, ctx, &sc.ctr, st, bi, p, lo, hi, len, next, wpos);
+        }
+        if (naz > nfold_c) sc.ctr.rebuild();
         // B queries off the fully-folded counter (φ(·,π√z))
         while (pB > y and xdiv(X, x, pB) < hi) {
             const v: u64 = xdiv(X, x, pB);
