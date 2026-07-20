@@ -9,7 +9,7 @@
 //!         (Legendre; z<y² ⇒ P₂ term vanishes). Gourdon folds π(√z) primes vs lmo's
 //!         π(y) — fewer kills AND fewer prefix queries → beats lmo (op-counts confirm).
 //!         ω uses Gourdon's C/D split (x/pm<p² ⇒ closed form 1+max(0,π(v)−bi), π via
-//!         pi_tab/oracle) and DR/LMO dense/sparse leaf enumeration (p>√y ⇒ m prime).
+//!         the π oracle) and DR/LMO dense/sparse leaf enumeration (p>√y ⇒ m prime).
 //!   A/Σ — query π only at points ≤ √x (proven); monotone cursor / binary search on
 //!         the prime list — no table, no sweep.
 //!   φ₀  — closed form φ(x/n,1) = ⌈(x/n)/2⌉ (k=1).
@@ -140,12 +140,18 @@ fn sievePrimes(comptime P: type, gpa: std.mem.Allocator, nmax: u64) ![]P {
 /// prime list only to plist_max (the largest prime any loop enumerates by value), and
 /// the O(1) π oracle over [0, √x] as a coprime-30 bitset. Storing the √x primes as a
 /// u64 list instead costs 8·π(√x) — 3.5 GB at x=10²⁰, ~10× the oracle.
+/// δ saturation point. √y is the largest p the leaf test δ[m] > p ever compares
+/// against, so saturating is exact iff √y < DELTA_MAX, i.e. y < 4.295e9. With
+/// y = α·x^(1/3) and α from chooseAlpha that holds to x ≈ 10^25 and fails at 10^26
+/// (y = 8.7e9, √y = 93529). Sieve.init enforces it rather than trusting the bound.
+const DELTA_MAX: u16 = 65535;
+const DeltaTooNarrow = error.YExceedsU16DeltaRange;
+
 fn Sieve(comptime P: type) type {
     return struct {
         const Self = @This();
         mu: []i8, // [0..y]
-        delta: []u32, // smallest prime factor, [0..y]
-        pi_tab: []u32, // π(v) for v ≤ y (O(1), for ω's easy-leaf shortcut)
+        delta: []u16, // smallest prime factor saturated at DELTA_MAX, [0..y]
         primes: []P, // ascending, ≤ plist_max (enumeration only)
         pio: PiOracle, // π(v) and descending prime walk over [0, √x]
 
@@ -153,39 +159,48 @@ fn Sieve(comptime P: type) type {
         const primes = try sievePrimes(P, gpa, plist_max);
         const pio = try buildPiOracle(gpa, @max(sqx, plist_max));
         const Ny: usize = @intCast(y + 1);
-        const delta = try gpa.alloc(u32, Ny);
-        @memset(delta, 0);
-        var i: usize = 2;
-        while (i < Ny) : (i += 1) {
-            if (delta[i] == 0) {
-                var j: usize = i;
-                while (j < Ny) : (j += i) {
-                    if (delta[j] == 0) delta[j] = @intCast(i);
-                }
+
+        // μ by sign-flipping over the primes (not by descending the spf chain), so
+        // that δ never has to hold an exact smallest prime factor and can be narrowed.
+        const mu = try gpa.alloc(i8, Ny);
+        errdefer gpa.free(mu);
+        @memset(mu, 1);
+        if (Ny > 0) mu[0] = 0;
+        for (primes) |q32| {
+            const q: usize = @intCast(q32);
+            if (q >= Ny) break;
+            var j: usize = q;
+            while (j < Ny) : (j += q) mu[j] = -mu[j];
+            const qq = q * q;
+            if (qq < Ny) {
+                j = qq;
+                while (j < Ny) : (j += qq) mu[j] = 0;
             }
         }
-        const mu = try gpa.alloc(i8, Ny);
-        mu[0] = 0;
-        if (Ny > 1) mu[1] = 1;
-        i = 2;
-        while (i < Ny) : (i += 1) {
-            const p = delta[i];
-            const m = i / p;
-            mu[i] = if (m % p == 0) 0 else -mu[@intCast(m)];
+
+        // δ = smallest prime factor, SATURATED at DELTA_MAX. Its only runtime use is
+        // the leaf test δ[m] > p with p ≤ √y, so while √y < DELTA_MAX saturation is
+        // indistinguishable from the exact value — and it halves the table
+        // (196 → 98 MB at 10^20). Guarded, not assumed.
+        if (isqrt(y) >= DELTA_MAX) return DeltaTooNarrow;
+        const delta = try gpa.alloc(u16, Ny);
+        errdefer gpa.free(delta);
+        @memset(delta, DELTA_MAX);
+        for (primes) |q32| {
+            const q: usize = @intCast(q32);
+            if (q >= Ny or q >= DELTA_MAX) break;
+            var j: usize = q;
+            while (j < Ny) : (j += q) {
+                if (delta[j] == DELTA_MAX) delta[j] = @intCast(q);
+            }
         }
-        const pi_tab = try gpa.alloc(u32, Ny);
-        var c: u32 = 0;
-        i = 0;
-        while (i < Ny) : (i += 1) {
-            if (i >= 2 and delta[i] == i) c += 1; // δ[i]==i ⇔ prime
-            pi_tab[i] = c;
-        }
-        return .{ .mu = mu, .delta = delta, .pi_tab = pi_tab, .primes = primes, .pio = pio };
+        if (Ny > 0) delta[0] = 0;
+        if (Ny > 1) delta[1] = 0; // m=1 is never a leaf; keep it rejected as before
+        return .{ .mu = mu, .delta = delta, .primes = primes, .pio = pio };
     }
     fn deinit(self: *Self, gpa: std.mem.Allocator) void {
         gpa.free(self.mu);
         gpa.free(self.delta);
-        gpa.free(self.pi_tab);
         gpa.free(self.primes);
         gpa.free(self.pio.bits);
         gpa.free(self.pio.pref);
@@ -832,12 +847,14 @@ fn computeB(comptime INST: bool, gpa: std.mem.Allocator, s: anytype, x: u64, y: 
 /// π(√z) − 1 is read straight off it (Legendre; valid since z < y² ⇒ no product of
 /// two primes > √z is ≤ z). Gourdon folds π(√z) primes vs lmo's π(y) — ~6× fewer at
 /// 10^12 — so one pass serves both, beating lmo's separate S2-fold + fused-P₂.
-/// C/D leaf evaluator: closed form (C, is_d=false) when x/pm < p² and π(v) is cheap,
-/// else the counter (D, is_d=true — the leaf needs a cross-block φ correction).
-inline fn evalPhi(comptime INST: bool, st: *Stats, vv: u64, b: usize, pp: u64, pi_tab: []const u32, pio: *const PiOracle, pr_bi: i64, ct: *const Ctr, l: u64, sx: u64, yy: u64) struct { phi: i64, is_d: bool } {
+/// C/D leaf evaluator: closed form (C, is_d=false) when x/pm < p², else the counter
+/// (D, is_d=true — the leaf needs a cross-block φ correction). π(v) comes from the
+/// oracle; the old y-sized pi_tab direct-index table was measured at 0.7% (inside
+/// noise) against 196 MB at 10^20, so it is gone.
+inline fn evalPhi(comptime INST: bool, st: *Stats, vv: u64, b: usize, pp: u64, pio: *const PiOracle, pr_bi: i64, ct: *const Ctr, l: u64, sx: u64) struct { phi: i64, is_d: bool } {
     var piv: i64 = -1;
     if (pp * pp > vv) {
-        if (vv <= yy) piv = @intCast(pi_tab[@intCast(vv)]) else if (vv <= sx) piv = @intCast(pio.count(vv));
+        if (vv <= sx) piv = @intCast(pio.count(vv));
     }
     if (piv >= 0) {
         if (INST) st.n_easy += 1;
@@ -901,8 +918,7 @@ const Scratch = struct {
 fn BlkCtx(comptime X: type, comptime P: type) type {
     return struct {
         mu: []const i8,
-        delta: []const u32,
-        pi_tab: []const u32,
+        delta: []const u16,
         primes: []const P,
         pio: *const PiOracle,
         x: X,
@@ -1087,7 +1103,7 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, ctx: *Bl
                                 if (INST) st.n_small += 1;
                                 omega += @as(i128, sign) * @as(i128, phiSmall(v, bi));
                             } else {
-                                const r = evalPhi(INST, st, v, bi, p, ctx.pi_tab, ctx.pio, phi_run[bi], &sc.ctr, lo, sqx, y);
+                                const r = evalPhi(INST, st, v, bi, p, ctx.pio, phi_run[bi], &sc.ctr, lo, sqx);
                                 omega += @as(i128, sign) * @as(i128, r.phi);
                                 if (r.is_d) omega_mu[bi] += sign;
                             }
@@ -1104,7 +1120,7 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, ctx: *Bl
                         const v: u64 = xdiv(X, x, p * q);
                         if (v >= hi) break;
                         if (v >= lo) {
-                            const r = evalPhi(INST, st, v, bi, p, ctx.pi_tab, ctx.pio, phi_run[bi], &sc.ctr, lo, sqx, y);
+                            const r = evalPhi(INST, st, v, bi, p, ctx.pio, phi_run[bi], &sc.ctr, lo, sqx);
                             omega += @as(i128, r.phi);
                             if (r.is_d) omega_mu[bi] += 1;
                         }
@@ -1179,7 +1195,6 @@ fn initBlkCtx(comptime X: type, comptime P: type, gpa: std.mem.Allocator, s: any
     return .{
         .mu = s.mu,
         .delta = s.delta,
-        .pi_tab = s.pi_tab,
         .primes = primes,
         .pio = &s.pio,
         .x = x,
@@ -1296,7 +1311,7 @@ fn phiRec(primes: []const u32, pi: []const u32, u: u64, b: usize) i64 {
     if (pb * pb > u) return @as(i64, @intCast(pi[@intCast(u)])) - @as(i64, @intCast(b)) + 1;
     return phiRec(primes, pi, u, b - 1) - phiRec(primes, pi, u / pb, b - 1);
 }
-fn omegaNaive(primes: []const u32, mu: []const i8, delta: []const u32, pi: []const u32, x: u64, y: u64, xstar: u64) i128 {
+fn omegaNaive(primes: []const u32, mu: []const i8, delta: []const u16, pi: []const u32, x: u64, y: u64, xstar: u64) i128 {
     var omega: i128 = 0;
     for (primes, 0..) |p32, pidx| {
         const p: u64 = p32;
