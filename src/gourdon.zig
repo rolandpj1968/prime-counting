@@ -1522,18 +1522,58 @@ fn chooseY(comptime X: type, x: X) u64 {
 }
 
 /// Dispatch: u64 path for x ≤ 2⁶⁴ (u32 primes), u128 path beyond (u64 primes).
+/// Everything tunable about a run, in one place, so callers (drivers, the CLI, the
+/// test suite) name what they mean instead of threading positional parameters.
+/// Defaults reproduce piGourdon(x): serial, fitted α, no tracing.
+pub const Config = struct {
+    /// y = α·x^(1/3). null ⇒ chooseY's fitted α(x). Setting it overrides the fit.
+    y: ?u64 = null,
+    /// Worker threads. 1 ⇒ the serial path (not a 1-thread parallel path).
+    nthreads: usize = 1,
+    /// CPU to pin each worker to. null ⇒ unpinned. Length should be ≥ nthreads.
+    pins: ?[]const u32 = null,
+    /// Per-phase timing to stderr.
+    verbose: bool = false,
+};
+
+/// Below this the decomposition is not well defined: chooseY's clamps collapse (y is
+/// pinned to ≤ √x − 1, which is 0 at x = 1, and z = x/y then divides by zero), and
+/// x* / √z stop separating. Answer directly from the oracle instead — exact, already
+/// differentially tested, and trivially cheap at this size.
+const DIRECT_MAX: u128 = 10_000;
+
+fn directResult(pi: i128) GResult {
+    return .{ .pi = pi, .A = 0, .B = 0, .omega = 0, .phi0 = 0, .sigma = 0, .y = 0 };
+}
+
+/// Dispatch on x: direct for tiny x, then the u64 path below 2⁶⁴ (u32 primes) and
+/// the u128 path above (u64 primes).
+pub fn piGourdonCfg(gpa: std.mem.Allocator, x: u128, cfg: Config) !GResult {
+    if (x < 2) return directResult(0);
+    if (x <= DIRECT_MAX) {
+        var o = try buildPiOracle(gpa, @intCast(x));
+        defer gpa.free(o.bits);
+        defer gpa.free(o.pref);
+        return directResult(@intCast(o.count(@intCast(x))));
+    }
+    if (x <= std.math.maxInt(u64)) return piGourdonV(u64, gpa, @intCast(x), cfg);
+    return piGourdonV(u128, gpa, x, cfg);
+}
+
 pub fn piGourdon(gpa: std.mem.Allocator, x: u128, y_in: ?u64) !GResult {
-    if (x <= std.math.maxInt(u64)) return piGourdonV(u64, gpa, @intCast(x), y_in, false, 1, null);
-    return piGourdonV(u128, gpa, x, y_in, false, 1, null);
+    return piGourdonCfg(gpa, x, .{ .y = y_in });
 }
 
 /// Parallel entry: nthreads workers (pinned per `pins` if given).
 pub fn piGourdonPar(gpa: std.mem.Allocator, x: u128, nthreads: usize, pins: ?[]const u32) !GResult {
-    if (x <= std.math.maxInt(u64)) return piGourdonV(u64, gpa, @intCast(x), null, false, nthreads, pins);
-    return piGourdonV(u128, gpa, x, null, false, nthreads, pins);
+    return piGourdonCfg(gpa, x, .{ .nthreads = nthreads, .pins = pins });
 }
 
-pub fn piGourdonV(comptime X: type, gpa: std.mem.Allocator, x: X, y_in: ?u64, verbose: bool, nthreads: usize, pins: ?[]const u32) !GResult {
+pub fn piGourdonV(comptime X: type, gpa: std.mem.Allocator, x: X, cfg: Config) !GResult {
+    const y_in = cfg.y;
+    const verbose = cfg.verbose;
+    const nthreads = cfg.nthreads;
+    const pins = cfg.pins;
     const P = if (X == u64) u32 else u64; // prime element type: √x < 2³² ⇔ X = u64
     var tp = common.nowNs();
     const y = y_in orelse chooseY(X, x);
@@ -1631,6 +1671,32 @@ pub fn main() !void {
         });
     }
 
+    // Exhaustive small-x check. gourdon was only ever tested from 10^5 up, which let
+    // a SIGFPE at x < 4 survive: chooseY clamps y to <= sqrt(x)-1, that is 0 at x = 1,
+    // and z = x/y then divides by zero. Covers the direct path, the DIRECT_MAX
+    // boundary, and the bottom of the real decomposition.
+    {
+        const N: u64 = 30_000;
+        const ref = try buildPiOracle(gpa, N);
+        defer gpa.free(ref.bits);
+        defer gpa.free(ref.pref);
+        var bad: usize = 0;
+        var first_bad: u64 = 0;
+        for (0..N + 1) |xv| {
+            const got = (try piGourdonCfg(gpa, @as(u128, xv), .{})).pi;
+            if (got != @as(i128, @intCast(ref.count(xv)))) {
+                if (bad == 0) first_bad = @intCast(xv);
+                bad += 1;
+            }
+        }
+        std.debug.print("exhaustive x in [0,{d}]: {s}{s}\n\n", .{
+            N,
+            if (bad == 0) "match" else "MISMATCH",
+            if (bad == 0) "" else " (see first_bad)",
+        });
+        if (bad != 0) std.debug.print("  {d} mismatches, first at x={d}\n", .{ bad, first_bad });
+    }
+
     // ω differential check: naive recurrence vs O(1)-kill counter, must match exactly.
     std.debug.print("ω check (naive vs counter):\n", .{});
     for ([_]u64{ 100_000, 1_000_000, 10_000_000, 100_000_000, 1_000_000_000 }) |x| {
@@ -1707,7 +1773,7 @@ pub fn main() !void {
         std.debug.print("{d:>14} {d:>16} {s:>4} {d:>11.3} {d:>11.3} {d:>8.2}\n", .{ x, g.pi, if (ok) "y" else "NO", gs, ls, gs / ls });
     }
     std.debug.print("\nper-term profile @ 10^12:\n", .{});
-    _ = try piGourdonV(u64, gpa, 1_000_000_000_000, null, true, 1, null);
+    _ = try piGourdonV(u64, gpa, 1_000_000_000_000, .{ .verbose = true });
 
     std.debug.print("\nop-count comparison (gourdon ω/B vs lmo S2/P₂), matched x,y:\n", .{});
     for ([_]u64{ 1_000_000_000_000, 100_000_000_000_000 }) |x| {
@@ -1726,8 +1792,8 @@ pub fn main() !void {
     // u128-path validation: force X=u128 on x<2⁶⁴; must equal the u64 path bit-for-bit.
     std.debug.print("\nu128-path check (X=u128 on x<2^64 must match u64):\n", .{});
     for ([_]u64{ 1_000_000_000_000, 100_000_000_000_000, 10_000_000_000_000_000 }) |x| {
-        const g64 = try piGourdonV(u64, gpa, x, null, false, 1, null);
-        const g128 = try piGourdonV(u128, gpa, @as(u128, x), null, false, 1, null);
+        const g64 = try piGourdonV(u64, gpa, x, .{});
+        const g128 = try piGourdonV(u128, gpa, @as(u128, x), .{});
         std.debug.print("  x=10^{d}: u64={d} u128={d} {s}\n", .{ std.math.log10_int(x), g64.pi, g128.pi, if (g64.pi == g128.pi) "match" else "MISMATCH" });
     }
 

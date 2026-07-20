@@ -21,9 +21,9 @@ fn icbrt(x: u128) u64 {
 /// on x that the real entry point would have run on the u64 path.
 fn run(gpa: std.mem.Allocator, x: u128, y: u64, nthreads: usize, pins: []const u32) !i128 {
     const r = if (x <= std.math.maxInt(u64))
-        try g.piGourdonV(u64, gpa, @intCast(x), y, false, nthreads, pins)
+        try g.piGourdonV(u64, gpa, @intCast(x), .{ .y = y, .nthreads = nthreads, .pins = pins })
     else
-        try g.piGourdonV(u128, gpa, x, y, false, nthreads, pins);
+        try g.piGourdonV(u128, gpa, x, .{ .y = y, .nthreads = nthreads, .pins = pins });
     return r.pi;
 }
 

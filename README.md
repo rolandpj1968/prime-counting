@@ -252,6 +252,27 @@ zig build-exe -O ReleaseFast -mcpu=native src/main.zig -femit-bin=./sieve && ./s
 zig build-exe -O ReleaseSafe ...        # correctness pass: asserts + bounds live
 ```
 
+### The `pi` CLI
+
+One binary for every implementation, with the tuning knobs exposed rather than
+recompiled — in the spirit of primecount's CLI:
+
+```
+zig build-exe -O ReleaseFast -mcpu=native src/pi.zig -femit-bin=./pi
+
+./pi 1e20                     # fastest algorithm, defaults
+./pi 1e20 -t 0 --pin          # one thread per physical core, pinned
+./pi 1e18 -a lmo -t 6         # pick algorithm and thread count
+./pi 1e17 --alpha 6.5 -v      # override the fitted α, per-phase timing
+./pi 1e16 --check             # verify against the known π(10ⁿ) table
+```
+
+x accepts `1e20`, `10^20`, `1_000_000` or plain digits (`e` is scientific, `^` is
+exponentiation, and both are built by repeated multiplication so they stay exact at
+the top of the u128 range). `--check` exits non-zero on mismatch.
+
+### Experiment drivers
+
 `src/main.zig` is the current experiment driver, swapped per investigation. Standing
 drivers alongside it:
 
@@ -261,6 +282,7 @@ drivers alongside it:
 | `gsweep.zig` | π(10ⁿ) ladder, n = 13…20, parallel, checked against known values |
 | `gasweep.zig` | α sweep — times y = α·x^(1/3) over a grid of α and x |
 | `g2122.zig` | the 10²¹ / 10²² runs |
+| `pi.zig` | the CLI above |
 
 **The project is still in flux**, so the tooling (a proper `build.zig` + bench step,
 a single CLI entry point with tuning parameters exposed) is itself on the list.
