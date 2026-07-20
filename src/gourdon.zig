@@ -1311,11 +1311,44 @@ pub const GResult = struct {
     y: u64,
 };
 
+/// y = α·x^(1/3). α sets the fold/leaf balance — fold work ∝ z = x/y (kills, and
+/// the per-segment walk over π(√z) primes), leaf work ∝ y — so the optimum drifts
+/// upward with x rather than sitting at a constant. Measured optima (parabolic
+/// interpolation on a 6-thread α sweep, times in s):
+///
+///   x      α*     α=4     at α*    gain
+///   10^15  4.03   0.72    0.72       -
+///   10^16  4.55   2.89    2.87      ~1%
+///   10^17  6.00  14.54   11.88     18%
+///   10^18  8.16  76.21   50.42     34%
+///
+/// Least-squares line through those four points, residuals ±0.44. Deliberately
+/// first-order: the mild convexity at the top of the range is substantially the
+/// fold's O(nseg·π(√z)) prime-list traversal, which is a fixable inefficiency, not
+/// a property of the optimum — fitting it would bake the bug into the model.
+///
+/// The floor matters. α* is flat at ≈4 up to 10^16 and only then climbs, which a
+/// line cannot express; unclamped this fit reads α = 0.83 at 10^13, violating the
+/// z < y² Legendre condition (α > 1) that B's read-off depends on. Clamped, the
+/// failure mode off the bottom of the fitted range is "degrade to the old constant".
+/// Untested above 10^18 — the ceiling is a guard rail, not a tuned value.
+const ALPHA_A: f64 = -17.1758;
+const ALPHA_B: f64 = 0.6017;
+const ALPHA_LO: f64 = 4.0;
+const ALPHA_HI: f64 = 24.0;
+
+fn chooseAlpha(comptime X: type, x: X) f64 {
+    if (x < 1000) return ALPHA_LO;
+    const a = ALPHA_A + ALPHA_B * @log(@as(f64, @floatFromInt(x)));
+    return @min(ALPHA_HI, @max(ALPHA_LO, a));
+}
+
 fn chooseY(comptime X: type, x: X) u64 {
     const cr = icbrtG(X, x);
     const lo = cr + 1;
     const hi = isqrtG(X, x) -| 1;
-    var y = 4 * cr;
+    const yf = chooseAlpha(X, x) * @as(f64, @floatFromInt(cr));
+    var y: u64 = if (yf >= 1.8e19) std.math.maxInt(u64) else @intFromFloat(yf);
     if (y < lo) y = lo;
     if (y > hi) y = hi;
     return y;

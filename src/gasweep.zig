@@ -30,9 +30,9 @@ fn run(gpa: std.mem.Allocator, x: u128, y: u64, nthreads: usize, pins: []const u
 pub fn main() !void {
     const gpa = std.heap.page_allocator;
     const pins = [_]u32{ 0, 2, 4, 6, 8, 10 };
-    const NLO: usize = 15;
+    const NLO: usize = 13;
     const NHI: usize = 18;
-    const alphas = [_]f64{ 1.5, 2, 3, 4, 6, 8, 12, 16, 24 };
+    const alphas = [_]f64{ 2.5, 3, 3.5, 4, 4.5, 5, 6, 7, 8, 10, 12 };
 
     const nlo: usize = NLO;
     const nhi: usize = NHI;
