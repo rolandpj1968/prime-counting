@@ -6,8 +6,10 @@ This file has been split by topic:
   segmentation, the cache hierarchy, the bucket sieve, u128 range counting, and
   the sieve as a lens on the number theory (PNT / Li / RH).
 - **[COMBINATORIAL.md](COMBINATORIAL.md)** — combinatorial π(x): the Meissel–Lehmer
-  baseline and the LMO / Deléglise–Rivat implementation that reaches π(10¹⁹) at the
-  2/3 exponent in Θ(x^(1/3)) memory. Optimisation ladder, dead ends (including both
-  DR headline optimisations), and detailed per-optimisation analysis.
+  baseline, the LMO / Deléglise–Rivat implementation at the 2/3 exponent in
+  Θ(x^(1/3)) memory, and **Gourdon's decomposition** on the same O(1)-kill counter,
+  which reaches π(10²²) in 4.74 h on six cores. Optimisation ladders, dead ends
+  (both DR headline optimisations; batching the counter bookkeeping), and why the
+  parallel path is leaf-side bandwidth-bound.
 
 See [README.md](README.md) for framing and references.

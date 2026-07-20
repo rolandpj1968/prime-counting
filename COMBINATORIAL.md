@@ -603,3 +603,241 @@ The diagnostics (`walk`/`leaves`/`easy` counters) that power the analysis above 
 10¹⁴ and are gated behind a comptime `INST` flag — kept because `leaves` confirmed Lemma 5.1,
 `walk` guards the √y split, and `easy` sized the π-table class, but not paid for on production
 runs.
+
+
+---
+
+# Gourdon (`gourdon.zig`)
+
+Gourdon's 2001 decomposition, built on the same O(1)-kill counter as the LMO/DR
+implementation above — a configuration that exists in neither the literature nor
+primecount, both of which keep the O(log x) Fenwick tree.
+
+    π(x) = A − B + ω + φ₀ + Σ
+
+with y = α·x^(1/3), z = x/y, and x* = max(x^(1/4), x/y²). y is a free parameter and
+z a free truncation point; x* is where ω stops and A/Σ begin.
+
+## Results (6 threads, one per physical core)
+
+| x | π(x) | time | RSS | ×prev |
+|---|------|-----:|----:|----:|
+| 10¹⁶ | 279,238,341,033,925 | 2.73 s | 11 MB | 3.92 |
+| 10¹⁷ | 2,623,557,157,654,233 | 11.25 s | 28 MB | 4.12 |
+| 10¹⁸ | 24,739,954,287,740,860 | 47.11 s | 78 MB | 4.19 |
+| 10¹⁹ | 234,057,667,276,344,607 | 195.21 s | 219 MB | 4.14 |
+| 10²⁰ | 2,220,819,602,560,918,840 | 829.05 s | 614 MB | 4.25 |
+| 10²¹ | 21,127,269,486,018,731,928 | 3782.2 s | 1707 MB | 4.56 |
+| 10²² | 201,467,286,689,315,906,290 | 17072.2 s | 4872 MB | 4.51 |
+
+Theory says 4.64 per power of ten. The measured ratio sits *below* that through
+10²⁰ and converges up beyond it — see "The plateau was not permanent" below.
+
+## Structure
+
+**ω and B fused onto one counter.** One segmented counter over [1, z] is folded to
+π(√z). ω's special leaves query it *during* the fold, at their own stage bi; once
+the fold completes the counter holds φ(·, π(√z)), so B's π(x/p) = φ(x/p, π(√z)) +
+π(√z) − 1 is read straight off it. The Legendre read-off is valid because z < y²,
+so no product of two primes > √z is ≤ z. Gourdon folds π(√z) primes where LMO folds
+π(y) — ~6× fewer at 10¹² — and one pass serves both terms.
+
+**Gourdon's C/D split.** Leaves with x/pm < p² take a closed form (C); the rest hit
+the counter (D). This makes the counter workload *kill-dominated* — 189M kills
+against 3.5M D-queries at 10¹⁴, a ratio of 54:1.
+
+**Dense/sparse leaf enumeration.** p ≤ √y walks m; p > √y walks primes q, where
+every q ∈ (p, y] is a valid leaf.
+
+## Optimisation log
+
+Ordered by when they landed. Percentages are measured, not estimated.
+
+### The counter: 2 levels beat 3 (~8.5%)
+
+`lmo.zig` uses a 3-level counter (bits + cnt1 + cnt2): O(1) kill with two
+decrements, O(nwords^⅓) prefix. Gourdon's C/D split makes the workload
+kill-dominated at 54:1, which inverts the trade — a 2-level counter costs one
+decrement per kill and O(√nwords) per prefix. Measured 0.906 vs 0.967 for the
+kill-heavy ω. Re-tested after the word-parallel strike (which reduces kill cost and
+should have favoured 3 levels): 2 levels still won.
+
+### Word-parallel strike for small primes (~8–11%)
+
+The multiples-of-p bit pattern has period p bits, so over 64-bit words it realigns
+after lcm(p, 64) = 64p bits — **p template words per prime**, with the phase stepped
+by 64 mod p. Applies where a prime yields ≥1 coprime-30 multiple per word, i.e.
+(64/p)·(8/30) ≥ 1 ⟹ p ≲ 17; a threshold sweep confirmed the predicted crossover.
+
+### The φ₀ overflow — a correctness bug, not an optimisation
+
+π(10²⁰) returned a *negative* number after 4.5 h. `u = xdiv(X, x, n)` truncates x/n
+to u64, and for x = 10²⁰ the odd squarefree n ∈ {1, 3, 5} give x/n > 2⁶⁴. Diagnosed
+by arithmetic rather than by re-running: the three wrapped terms contribute exactly
+−3·2⁶³ = −27670116110564327424, which is bit-for-bit `want − computed`. Fixed by
+computing u in the wide type.
+
+The lesson generalises: the earlier "u128 check" only ever exercised X = u128 on
+x < 2⁶⁴, so the x > 2⁶⁴ regime — u128's entire reason for existing — was never
+tested. A type-parameterised path needs a test in the regime that motivated it.
+
+### The π oracle: a bitset, not a prime list (6.6× RSS, ~20–25%)
+
+`Sieve.init` materialised every prime ≤ √x into a []u64 — 455M entries and 3472 MB
+at 10²⁰, **95% of the footprint**. But only two loops ever needed prime *values*
+that high (A's inner q, B's descending p walk), and both are bounded by y or are
+sequential-descending. Everything else was π(v) queries paying a ~29-miss binary
+search across 3.5 GB.
+
+Replaced by a coprime-30 primality bitset over [0, √x] with per-cache-line prefix
+counts. A 64-bit word covers exactly 240 integers (64 bits ÷ 8-bits-per-30), so
+word ↔ value is a shift, no table. π(v) is one prefix load plus ≤8 popcounts;
+prevPrime(v) is a backward word scan, which is what B's cursor now walks.
+
+| over [0, 10¹⁰] | prime list | bitset oracle | |
+|---|---:|---:|---:|
+| memory | 3472 MB | 358 MB | 9.7× |
+| build time | 27.1 s | 10.0 s | 2.7× |
+
+Faster *and* smaller: the wheel does 3.75× fewer stores and writes no list. The
+explicit list now stops at plist_max = max(y, √z, x^(1/3), √(x/x*)), which is y in
+the normal regime — A's inner q ≤ √(x/p) < √(x/x*) ≤ y because x* ≥ x/y².
+
+### α(x): the tuning parameter that had never been swept (18–34%)
+
+`chooseY` hardcoded y = 4·x^(1/3). But α sets the entire fold/leaf balance — fold
+work scales with z = x/y, leaf work with y — and the optimum *drifts with x*:
+
+| x | α* | at α=4 | at α* | gain |
+|---|---:|---:|---:|---:|
+| 10¹⁵ | 4.03 | 0.72 s | 0.72 s | — |
+| 10¹⁶ | 4.55 | 2.89 s | 2.87 s | ~1% |
+| 10¹⁷ | 6.00 | 14.54 s | 11.88 s | 18% |
+| 10¹⁸ | 8.16 | 76.21 s | 50.42 s | 34% |
+
+Fitted first-order in ln x and clamped. **The floor clamp is load-bearing:** α* is
+flat at ≈4 through 10¹⁶ and only then climbs, which a line cannot express, so
+unclamped the fit reads α < 1 at 10¹³ — violating the α > 1 that z < y² requires for
+B's Legendre read-off. That would be *wrong*, not merely slow.
+
+Deliberately kept first-order despite genuine convexity in the residuals, because
+the curvature at the top of the range was substantially the traversal term the
+bucket ring later removed — fitting it would have baked the bug into the model.
+Refit after the ring landed: the slope survived unchanged (0.6017 → 0.5980) and
+only the intercept moved, confirming the diagnosis.
+
+### The bucket ring (19% at 10²⁰, nothing below 10¹⁹)
+
+Every segment walked all π(√z) fold primes, but once √z > segw most hit a given
+segment at most once. That traversal is O(nseg·π(√z)) and outgrows the O(kills)
+term beside it:
+
+| x | traversal ÷ kills |
+|---|---:|
+| 10¹⁴ | 0.02 |
+| 10¹⁶ | 0.07 |
+| 10¹⁸ | 0.29 |
+| 10²⁰ | **1.12** |
+
+At 10²⁰ we were spending more time walking the prime list than killing bits — and
+it is invisible at 10¹⁴, which is why profiling there never found it. Its signature
+was the growth ratio: 3.95, 5.00, 5.69, 5.85, 6.44 against a theoretical 4.64.
+
+Now each sparse prime (p > segw·8/30, i.e. under one strike per segment) is filed
+under the segment its next multiple lands in. **Entries are copied by value**, which
+is the whole design: a bucket of prime *indices* visits 11× fewer primes but chases
+next[]/wpos[]/primes[] at scattered offsets and moves *more* memory than the
+sequential scan it replaces (~2.2 MB vs 1.7 MB per segment at 10²⁰); contiguous
+16-byte entries bring it to ~140 KB. Plain grow-only vectors suffice — chunked
+free-lists are unnecessary because each bucket reaches its high-water mark within a
+few segments, and total occupancy is bounded by the prime count since every prime
+sits in exactly one bucket.
+
+Growth ratio afterwards: flat at ~4.15 across 10¹⁶–10²⁰.
+
+### Smaller wins
+
+- **Uncounted strikes above π(x*)** (~4% single-threaded). Fold stages carrying no
+  leaves clear bits without maintaining cnt/total, restored by one popcount pass
+  before the B queries. x* ≤ √z always, so the counted stages are a prefix.
+- **Algebraic m-walk bounds** (~1.3%). v = x/(mp) < hi ⟺ m > x/(p·hi), so the
+  descent range costs two divisions per (p, segment) instead of one per m.
+- **Dropped `pi_tab`, narrowed `delta` to u16** (~1.8× memory, speed neutral). The
+  oracle subsumes π(v) for v ≤ y; δ is only ever compared against p ≤ √y, so
+  saturating at 65535 is exact — *while √y < 65535*, which holds to x ≈ 10²⁵ and
+  fails at 10²⁶. Guarded with an error rather than a comment.
+
+## Dead ends
+
+**Batching the counter's per-kill bookkeeping: −4.7%.** ~92% of kills are below x*
+and must stay counted, each doing load/AND/store on bits then load/dec/store on
+cnt. Batching the cnt update behind a counter-block compare *should* have removed a
+dependent load-store pair per kill. It is 4.7% slower, and the branch-free variant
+(batching only `total`) is +0.4%, i.e. noise. The reason is one number: **cnt is 256
+bytes** — 64 u32 entries for a 4095-word segment, four cache lines, permanently
+L1-resident. The update was never a bottleneck; adding a compare per kill to avoid
+it is a straight loss.
+
+That also relocates the ~5.4 cycles/kill: it is the bit-clear itself
+(read-modify-write over a 32 KB working set plus wheel-stepped addressing), not
+bookkeeping. Only changing the *access pattern* helps — which is what the
+word-parallel strike does for p ≲ 30.
+
+**The m-walk rejection rate is not headroom.** 63% of its iterations are rejected
+(μ = 0 or spf ≤ p), which looks damning. But ablation at 10¹⁴ puts the whole dense
+m-walk leaf evaluation at 8% of runtime:
+
+| component | share |
+|---|---:|
+| fold (kills) | 45% |
+| sparse q-walk leaf eval | 12% |
+| dense m-walk leaf eval | 8% |
+| rest (reset, B, A/Σ, sieve) | 35% |
+
+Perfect rejection removal caps near 3%.
+
+## Parallelism is leaf-side bandwidth-bound
+
+The two halves have opposite memory profiles. The **fold** works on a per-thread
+32 KB counter bitset — L1-resident, private per core, scaling with z. The **leaves**
+stream the *shared* μ/δ tables, and since threads work on different blocks they
+touch different regions: no line sharing, just nthreads× the traffic, scaling with y.
+
+So parallelism multiplies leaf-side bandwidth while fold cost stays private, and the
+optimum shifts toward more fold and less leaf — **smaller α in parallel**. Measured:
+α* = 4.58 on six threads vs ~5.0 on one at 10¹⁶, and the parallel-tuned fit is +5%
+parallel but −7.5% serial there. The same account explains why the uncounted-strike
+change measured 4% single-threaded and ~0.7% in the six-thread ladder: it optimises
+the fold, which is not the parallel bottleneck.
+
+`chooseAlpha` is currently x-only and tuned for the parallel path, since every large
+run uses it. The right shape is chooseAlpha(x, nthreads), which needs a 2-D sweep.
+
+## The plateau was not permanent
+
+The growth ratio was flat at 4.12–4.25 across 10¹⁶–10²⁰ — comfortably *under* the
+theoretical 4.64 — and extrapolating that made the 10²² projection **21% optimistic**
+(3.93 h predicted, 4.74 h actual). Measured beyond: 4.56 (10²⁰→10²¹) and 4.51
+(10²¹→10²²), converging up toward theory.
+
+Two unmeasured candidates. The π oracle stops fitting any cache — 3.5 GB at 10²²,
+and count() is a random probe, so below 10²⁰ many probes hit L3 and at 10²² none do.
+Or plain Amdahl: the oracle build, prime sieve, μ/δ construction and the cross-block
+reduction are all serial and all grow with x. `piGourdonV` laps each phase behind a
+`verbose` flag, so one instrumented 10²¹ run would settle it — worth doing before
+anyone projects 10²³ (~21 h and ~14 GB on the *measured* ratio, versus ~15 h on the
+old one).
+
+## Verification
+
+- **Differential**: ω against a naive φ recursion, and B against an independent
+  reference sweep, at 10⁵…10⁹; blocked partitions (nb = 4, 7) against monolithic.
+- **π oracle**: count() *and* prevPrime() against an explicit prime list at every
+  v ≤ 3×10⁶. The oracle answers every π query in the terms, so a wheel-indexing
+  off-by-one would silently skew π(x) rather than crash.
+- **Known values**: exact at every π(10ⁿ), 10¹³ → 10²².
+- **u128 path**: X = u128 must agree with X = u64 on x < 2⁶⁴ — *and* see the φ₀ bug
+  above for why that check alone was not sufficient.
+- **Parallel**: piGourdonPar must equal piGourdon exactly; the bucket ring's
+  parallel path is covered only from 10¹⁷ up, since bucketing does not engage below
+  √z > 69888.

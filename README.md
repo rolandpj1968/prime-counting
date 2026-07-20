@@ -11,10 +11,10 @@ compute it, in increasing sophistication and decreasing intuition:
 - **Sieving / enumeration** — the Sieve of Eratosthenes and its refinements.
   O(N log log N): you find every prime. Feasible to ~10¹⁸–10²⁰.
 - **Combinatorial** — Legendre → Meissel → Lehmer → Lagarias–Miller–Odlyzko →
-  Deléglise–Rivat. Sub-linear (≈ O(N^(2/3))): counts π(N) *without listing the
-  primes*, via a partial-sieve identity π(N) = φ(N,a) + a − 1 − P₂(N,a). This is
-  how records reach 10³⁰. **Built here through the LMO/DR line** (π(10¹⁹) in ~42
-  min, single-threaded).
+  Deléglise–Rivat → Gourdon. Sub-linear (≈ O(N^(2/3))): counts π(N) *without
+  listing the primes*, via a partial-sieve identity π(N) = φ(N,a) + a − 1 − P₂(N,a).
+  This is how records reach 10³⁰. **Built here through the LMO/DR line and then
+  Gourdon's decomposition** — π(10²²) in 4.74 h on six cores.
 - **Analytic** — Lagarias–Odlyzko. O(N^(1/2+ε)) by contour-integrating ζ(s).
   Asymptotically best, but high-precision-arithmetic constants leave it
   practically dominated; its real use is independent verification.
@@ -24,19 +24,69 @@ combinatorial method is the intellectual object; the machine is a multiplier.
 
 ## Status
 
-Complete, single-threaded, through the LMO/Deléglise–Rivat combinatorial line and
-the full straight-sieving characterization beneath it. Everything below is exact
-and verified against every known value 10 → 10¹⁹ (plus exhaustively over [0, 5000]).
-Presented most-advanced first.
+Complete through **Gourdon's decomposition**, parallel, with the LMO/Deléglise–Rivat
+line beneath it as reference and correctness oracle, and the full straight-sieving
+characterization beneath that. Everything below is exact and verified against every
+known value 10 → 10²² (plus exhaustively over [0, 5000]). Presented most-advanced first.
 
-All timings on one quiet mini-PC: **AVX2 (no AVX-512), L1d 32 KiB / L2 512 KiB /
-L3 16 MiB per core, 28 GiB RAM** (6-core Ryzen 5 6600H), `zig 0.16 build-exe -O
-ReleaseFast -mcpu=native`. Both single-core and 4-core (pinned) times shown.
+All timings on one quiet laptop: **AVX2 (no AVX-512), L1d 32 KiB / L2 512 KiB /
+L3 16 MiB, 28 GiB RAM** (6-core Ryzen 5 6600H), `zig 0.16 build-exe -O ReleaseFast
+-mcpu=native`, six threads pinned one per physical core (SMT siblings left idle).
+
+### Combinatorial π(x): Gourdon (`gourdon.zig`) — the frontier
+
+π(x) = A − B + ω + φ₀ + Σ, with y = α·x^(1/3), z = x/y, and x* = max(x^(1/4), x/y²).
+
+| x | π(x) | 6-core | RSS | ×prev |
+|---|------|-----:|----:|----:|
+| 10¹³ | 346,065,536,839 | 0.05 s | 2 MB | — |
+| 10¹⁴ | 3,204,941,750,802 | 0.18 s | 3 MB | 3.69 |
+| 10¹⁵ | 29,844,570,422,669 | 0.70 s | 5 MB | 3.91 |
+| 10¹⁶ | 279,238,341,033,925 | 2.73 s | 11 MB | 3.92 |
+| 10¹⁷ | 2,623,557,157,654,233 | 11.25 s | 28 MB | 4.12 |
+| 10¹⁸ | 24,739,954,287,740,860 | 47.11 s | 78 MB | 4.19 |
+| 10¹⁹ | 234,057,667,276,344,607 | 3.25 min | 219 MB | 4.14 |
+| 10²⁰ | 2,220,819,602,560,918,840 | 13.8 min | 614 MB | 4.25 |
+| 10²¹ | 21,127,269,486,018,731,928 | **1.05 h** | 1.71 GB | 4.56 |
+| 10²² | 201,467,286,689,315,906,290 | **4.74 h** | 4.87 GB | 4.51 |
+
+The ×prev column is the empirical growth per power of ten; theory (x^(2/3)) says
+**4.64**. It sits at 4.12–4.25 through 10²⁰ and converges *up* to ~4.5 beyond — a
+reminder that the plateau was a property of the measured range, not a permanent
+state (extrapolating it made the 10²² estimate 21% optimistic). Two unmeasured
+candidates for the drift: the π oracle stops fitting any cache (3.5 GB at 10²², and
+its probes are random), and Amdahl — oracle build, prime sieve, μ/δ construction and
+the cross-block reduction are all serial and all grow with x.
+
+What earns it, beyond the decomposition itself:
+
+- **ω and B fused on one counter.** A single segmented counter is folded to π(√z);
+  ω's special leaves query it *during* the fold at their stage, and once fully
+  folded it holds φ(·, π(√z)), so B's π(x/p) is read straight off it by Legendre
+  (valid since z < y²). Gourdon folds π(√z) primes against LMO's π(y) — one pass
+  serves both terms.
+- **A coprime-30 bitset π oracle over [0, √x]**, not a prime list. π(v) is a prefix
+  load plus ≤8 popcounts; a 64-bit word covers exactly 240 integers (64 bits ÷
+  8-per-30), so indexing is a shift. Against storing the √x primes as u64 this is
+  **9.7× less memory and 2.7× faster to build** (3472 → 358 MB, 27.1 → 10.0 s at
+  √x = 10¹⁰) — it moves less memory *and* does less work.
+- **A fitted α(x)**, not a constant. α = clamp(−17.727 + 0.5980·ln x, 4, 24), from
+  measured optima. Worth 18% at 10¹⁷ and 34% at 10¹⁸ over the hardcoded α = 4.
+- **A bucket ring for sparse fold primes.** Once √z > segw, most fold primes hit a
+  given segment at most once, and walking all π(√z) of them per segment becomes the
+  dominant term — at 10²⁰ it had overtaken the kills themselves. Filing each under
+  the segment its next multiple lands in is worth 19% there, and nothing at all
+  below 10¹⁹.
+- **Two-level counter, uncounted strikes, word-parallel strike.** The kill-heavy
+  workload prefers a 2-level counter to a 3-level one; fold stages above π(x*) carry
+  no leaves so they skip the bookkeeping entirely; and primes p ≲ 30 are struck a
+  whole 64-bit word at a time.
 
 ### Combinatorial π(x): LMO / Deléglise–Rivat (`lmo.zig`)
 
-The current frontier. π(x) = φ(x,a) + a − 1 − P₂(x,a) with y = 4·x^(1/3), a = π(y),
-run at the **2/3 exponent in Θ(x^(1/3)) memory**:
+The previous frontier, now the reference implementation and Gourdon's correctness
+oracle. π(x) = φ(x,a) + a − 1 − P₂(x,a) with y = 4·x^(1/3), a = π(y), run at the
+**2/3 exponent in Θ(x^(1/3)) memory** (times below are 1- and 4-core):
 
 | x | π(x) | 1-core | 4-core | 4-core RSS |
 |---|------|-----:|-----:|---------:|
@@ -122,16 +172,42 @@ per block). Reading Gourdon (`literature/gourdon.ps`) pinned the natural fix: th
 arrays only ever carry non-zero corrections for prime index ≤ π(√(x/y)) (his *M*),
 which is ~6.5× below a = π(y) — a ~2× total-memory cut, deferred until it gates.
 
+### What the optimisation log actually taught
+
+The full record is in [COMBINATORIAL.md](COMBINATORIAL.md); the negatives are the
+useful part, and they share a cause.
+
+**Every win came from moving less memory. Every miss was an instruction count
+already hidden behind memory latency.** The π oracle, α(x) and the bucket ring all
+reduce bytes touched, and all paid. Two changes that looked good on an instruction
+count did not: hoisting the division out of the ω m-walk (63% of its iterations are
+rejected, so removing their divisions *should* have been large — the whole dense
+m-walk turned out to be 8% of runtime, and it delivered 1.3%), and batching the
+counter's per-kill bookkeeping (the count array is **256 bytes** — permanently
+L1-resident — so the update was never expensive, and adding a compare per kill to
+avoid it measured **4.7% slower** and was reverted).
+
+The same lens explains a third observation: **the parallel path is leaf-side
+bandwidth-bound.** The fold works on a per-thread 32 KB L1-resident bitset, while
+the leaf walk streams the *shared* μ/δ tables, and threads on different blocks touch
+different regions — so parallelism multiplies leaf traffic while fold cost stays
+private. Hence α* is thread-count dependent (4.58 on six threads vs ~5.0 on one at
+10¹⁶), and fold-side wins scale poorly: the uncounted-strike change measured 4%
+single-threaded and ~0.7% in the six-thread ladder.
+
 ### Next
 
-Gourdon's algorithm (a better decomposition than DR, ~2.3×) is now scaffolded
-top-down in `gourdon.zig` — π(x) = A − B + ω + φ₀ + Σ, every term transcribed and
-validated against `lmo.zig` from 10⁴ to 10¹⁰ with naive helpers (correct but ~8–48×
-slower, the point being to swap each term onto the O(1)-kill counter next). The
-prize is Gourdon's decomposition on our O(1)-kill counter — a configuration that
-exists in neither the literature nor primecount, which both keep the O(log x) tree.
-Also open: his per-block transfer-size reduction (past the bandwidth wall) and the
-3.8× implementation gap to primecount-DR (fast division).
+- **Pack μ and δ into one u16 array.** They are loaded from two separate arrays at
+  identical indices; `leaf[m] = (μ_code << 14) | min(spf, 16383)` halves the leaf
+  streams. On the bandwidth story this is a *parallel-specific* win, which is where
+  the remaining headroom is.
+- **`chooseAlpha(x, nthreads)`** — α* demonstrably depends on both; the current fit
+  samples one slice. Needs a 2-D sweep.
+- **Phase timing at scale** to settle whether the growth-ratio drift past 10²⁰ is
+  the oracle leaving cache or the serial phases (Amdahl). `piGourdonV` already laps
+  each phase behind a `verbose` flag.
+- **A real CLI** — one binary exposing every algorithm and tuning parameter as
+  options, in the style of primecount — plus a `build.zig`.
 
 ## Empirical highlights
 
@@ -176,9 +252,18 @@ zig build-exe -O ReleaseFast -mcpu=native src/main.zig -femit-bin=./sieve && ./s
 zig build-exe -O ReleaseSafe ...        # correctness pass: asserts + bounds live
 ```
 
-`src/main.zig` is the current experiment driver, swapped per investigation — **the
-project is still in flux**, so the tooling (a proper `build.zig` + bench step, a
-stable entry point) is itself on the list. More coming.
+`src/main.zig` is the current experiment driver, swapped per investigation. Standing
+drivers alongside it:
+
+| file | what it does |
+|---|---|
+| `gourdon.zig` | is itself runnable — the full correctness + benchmark suite |
+| `gsweep.zig` | π(10ⁿ) ladder, n = 13…20, parallel, checked against known values |
+| `gasweep.zig` | α sweep — times y = α·x^(1/3) over a grid of α and x |
+| `g2122.zig` | the 10²¹ / 10²² runs |
+
+**The project is still in flux**, so the tooling (a proper `build.zig` + bench step,
+a single CLI entry point with tuning parameters exposed) is itself on the list.
 
 ## References
 
