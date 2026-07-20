@@ -887,6 +887,30 @@ const Stats = struct {
 };
 
 /// Per-thread scratch: the counter + all cursors.
+/// One pending strike for a bucketed prime. Copied into the bucket by VALUE rather
+/// than referenced by prime index: a bucket of indices would touch next[]/wpos[]/
+/// primes[] at scattered offsets and move MORE bytes than the sequential scan it
+/// replaces (~2.2 MB vs 1.7 MB per segment at 10^20). Contiguous 16-byte entries
+/// bring that to ~140 KB. p ≤ √z < 2^32 for any x this code can address.
+const Ent = struct { next: u64, p: u32, wp: u8 };
+
+/// Grow-only vector. Each bucket reaches its high-water mark within the first few
+/// segments and never reallocates again, so the growth path is cold. Total across
+/// the ring is bounded by the number of bucketed primes (each sits in exactly one
+/// bucket at any instant), which is why per-bucket vectors cost ~2-3 MB per thread
+/// rather than the ring-size-times-worst-case that fixed capacities would need.
+const Bucket = struct {
+    items: []Ent = &.{},
+    len: usize = 0,
+    inline fn push(self: *Bucket, gpa: std.mem.Allocator, e: Ent) !void {
+        if (self.len == self.items.len) {
+            self.items = try gpa.realloc(self.items, if (self.items.len == 0) 64 else self.items.len * 2);
+        }
+        self.items[self.len] = e;
+        self.len += 1;
+    }
+};
+
 const Scratch = struct {
     ctr: Ctr,
     cur: []u64,
@@ -894,7 +918,10 @@ const Scratch = struct {
     wpos: []u8,
     seg_cnt: []i64,
     phi_run: []i64,
-    fn init(gpa: std.mem.Allocator, nax: usize, naz: usize, segw: usize) !Scratch {
+    buck: []Bucket, // ring, indexed by (segment index & ring_mask)
+    fn init(gpa: std.mem.Allocator, nax: usize, naz: usize, segw: usize, nring: usize) !Scratch {
+        const buck = try gpa.alloc(Bucket, nring);
+        @memset(buck, Bucket{});
         return .{
             .ctr = try Ctr.init(gpa, segw),
             .cur = try gpa.alloc(u64, nax),
@@ -902,6 +929,7 @@ const Scratch = struct {
             .wpos = try gpa.alloc(u8, naz),
             .seg_cnt = try gpa.alloc(i64, nax),
             .phi_run = try gpa.alloc(i64, nax),
+            .buck = buck,
         };
     }
     fn deinit(self: *Scratch, gpa: std.mem.Allocator) void {
@@ -911,6 +939,8 @@ const Scratch = struct {
         gpa.free(self.wpos);
         gpa.free(self.seg_cnt);
         gpa.free(self.phi_run);
+        for (self.buck) |*b| if (b.items.len > 0) gpa.free(b.items);
+        gpa.free(self.buck);
     }
 };
 
@@ -941,6 +971,9 @@ fn BlkCtx(comptime X: type, comptime P: type) type {
         blk_bcount: []u64,
         blk_omega: []i128,
         blk_b: []i128,
+        nbuck: usize, // first prime index handled by the bucket ring (naz ⇒ disabled)
+        nring: usize, // ring slots, power of two ≥ max segments a prime can skip
+        ring_mask: usize,
         nsmall: usize, // # of small primes (bi = 3 .. 3+nsmall) folded word-parallel
         small_tmpl: []const u64, // flat p-word templates per small prime
         small_off: []const usize, // small_off[k] = start of prime k's templates
@@ -976,6 +1009,10 @@ fn buildSmallTemplates(gpa: std.mem.Allocator, primes: anytype) !struct { tmpl: 
     }
     off[n] = cur;
     return .{ .tmpl = tmpl, .off = off, .n = n };
+}
+
+inline fn nfold_c_init(nax: usize, naz: usize) usize {
+    return @min(nax, naz);
 }
 
 /// Fold prime index bi out of the current segment. `counted` selects whether cnt/
@@ -1015,7 +1052,7 @@ inline fn foldPrime(comptime INST: bool, comptime counted: bool, ctx: anytype, c
 
 /// Sweep block t (segw-aligned) with fast-forwarded cursors + LOCAL phi_run; write the
 /// reduction data into ctx.blk_*[t] (disjoint per t ⇒ concurrency-safe across threads).
-fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, ctx: *BlkCtx(X, P), sc: *Scratch, st: *Stats, t: usize) void {
+fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, gpa: std.mem.Allocator, ctx: *BlkCtx(X, P), sc: *Scratch, st: *Stats, t: usize) !void {
     const primes = ctx.primes;
     const x = ctx.x;
     const y = ctx.y;
@@ -1057,6 +1094,21 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, ctx: *Bl
         next[bi] = p * m0;
         wpos[bi] = W30IDX[@intCast(m0 % 30)];
     }
+    // Seed the bucket ring: each sparse prime is filed under the segment its first
+    // multiple lands in, so a segment later touches only the primes that hit it.
+    const nbuck = ctx.nbuck;
+    const rmask = ctx.ring_mask;
+    for (sc.buck) |*b| b.len = 0;
+    for (nbuck..naz) |bi| {
+        if (next[bi] >= block_hi) continue;
+        const si = (next[bi] - block_lo) / segw;
+        try sc.buck[@as(usize, @intCast(si)) & rmask].push(gpa, .{
+            .next = next[bi],
+            .p = @intCast(primes[bi]),
+            .wp = wpos[bi],
+        });
+    }
+
     // B's descending cursor over the primes of (y, √x] — the only loop that needs
     // prime VALUES above the explicit list, so it walks the oracle bitset instead.
     var pB: u64 = if (block_lo == 0) sqx else @min(sqx, xdiv(X, x, block_lo));
@@ -1133,9 +1185,32 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, ctx: *Bl
         }
         // Stages above π(x*) carry no leaves, so nothing reads the counter until the
         // B queries below: strike bits only, then restore cnt/total in one pass.
-        for (nfold_c..naz) |bi| {
+        for (nfold_c..nbuck) |bi| {
             const p: u64 = @intCast(primes[bi]);
             if (bi >= 3) foldPrime(INST, false, ctx, &sc.ctr, st, bi, p, lo, hi, len, next, wpos);
+        }
+        if (nbuck < naz) {
+            // Drain the primes filed under this segment, refiling each under the
+            // segment of its next multiple. Entries are contiguous, so this streams.
+            const si: usize = @intCast((lo - block_lo) / segw);
+            const b = &sc.buck[si & rmask];
+            const n = b.len;
+            b.len = 0; // refiling targets a strictly later slot, never this one
+            for (b.items[0..n]) |e| {
+                var j: u64 = e.next;
+                var wp: u8 = e.wp;
+                const pe: u64 = e.p;
+                while (j < hi) {
+                    if (INST) st.n_kill += 1;
+                    sc.ctr.strike(@intCast(j - lo));
+                    j += pe * W30GAP[wp];
+                    wp = (wp + 1) & 7;
+                }
+                if (j < block_hi) {
+                    const sj: usize = @intCast((j - block_lo) / segw);
+                    try sc.buck[sj & rmask].push(gpa, .{ .next = j, .p = e.p, .wp = wp });
+                }
+            }
         }
         if (naz > nfold_c) sc.ctr.rebuild();
         // B queries off the fully-folded counter (φ(·,π√z))
@@ -1190,6 +1265,24 @@ fn initBlkCtx(comptime X: type, comptime P: type, gpa: std.mem.Allocator, s: any
     if (naz == 0) return null;
     const nax: usize = @intCast(s.pio.count(xstar));
     const segw: usize = 273 * 960;
+
+    // Bucket ring: primes sparse enough to miss most segments. A prime contributes
+    // segw·(8/30)/p strikes per segment, so bucketing pays once p > segw·8/30. Only
+    // primes above x* qualify (the counted prefix keeps its cursor scan), and the
+    // ring must span the furthest a prime can jump: coprime-30 gaps reach 6, so
+    // ⌈6p/segw⌉ + 2 slots, rounded up to a power of two for masking.
+    const bucket_min: u64 = @max(segw * 8 / 30, 1);
+    var nbuck: usize = naz;
+    {
+        var i = nfold_c_init(nax, naz);
+        while (i < naz and @as(u64, primes[i]) <= bucket_min) i += 1;
+        if (i < naz) nbuck = i;
+    }
+    var nring: usize = 8;
+    if (nbuck < naz) {
+        const span = (6 * @as(u64, primes[naz - 1])) / segw + 4;
+        while (@as(u64, nring) < span) nring *= 2;
+    }
     const total = z + 1;
     const tm = try buildSmallTemplates(gpa, primes);
     return .{
@@ -1217,6 +1310,9 @@ fn initBlkCtx(comptime X: type, comptime P: type, gpa: std.mem.Allocator, s: any
         .blk_bcount = try gpa.alloc(u64, nb),
         .blk_omega = try gpa.alloc(i128, nb),
         .blk_b = try gpa.alloc(i128, nb),
+        .nbuck = nbuck,
+        .nring = nring,
+        .ring_mask = nring - 1,
         .nsmall = tm.n,
         .small_tmpl = tm.tmpl,
         .small_off = tm.off,
@@ -1243,10 +1339,10 @@ fn omegaBlocked(comptime INST: bool, comptime X: type, gpa: std.mem.Allocator, s
     const P = std.meta.Child(@TypeOf(s.primes));
     var ctx = (try initBlkCtx(X, P, gpa, s, x, y, z, xstar, nb)) orelse return .{ .omega = 0, .b = 0 };
     defer freeBlkCtx(X, P, gpa, &ctx);
-    var sc = try Scratch.init(gpa, ctx.nax, ctx.naz, ctx.segw);
+    var sc = try Scratch.init(gpa, ctx.nax, ctx.naz, ctx.segw, ctx.nring);
     defer sc.deinit(gpa);
     var st = Stats{};
-    for (0..nb) |t| runOneBlock(INST, X, P, &ctx, &sc, &st, t);
+    for (0..nb) |t| try runOneBlock(INST, X, P, gpa, &ctx, &sc, &st, t);
     const r = try reduceOmB(X, P, gpa, &ctx);
     if (INST) std.debug.print("  ωB-stats: nax={d} naz={d} nb={d} segs={d} mwalk={d} leaves(small/C/D)={d}/{d}/{d} kills={d} Bqueries={d}\n", .{ ctx.nax, ctx.naz, nb, st.n_seg, st.n_mwalk, st.n_small, st.n_easy, st.n_hard, st.n_kill, st.n_bq });
     return r;
@@ -1265,7 +1361,7 @@ fn omegaBlockedPar(comptime INST: bool, comptime X: type, gpa: std.mem.Allocator
     var ninit: usize = 0;
     defer for (0..ninit) |k| scratches[k].deinit(gpa);
     for (0..nthreads) |i| {
-        scratches[i] = try Scratch.init(gpa, ctx.nax, ctx.naz, ctx.segw);
+        scratches[i] = try Scratch.init(gpa, ctx.nax, ctx.naz, ctx.segw, ctx.nring);
         ninit = i + 1;
     }
     const stats = try gpa.alloc(Stats, nthreads);
@@ -1273,26 +1369,33 @@ fn omegaBlockedPar(comptime INST: bool, comptime X: type, gpa: std.mem.Allocator
     @memset(stats, Stats{});
 
     const Worker = struct {
-        fn run(cx: *BlkCtx(X, P), sc: *Scratch, stt: *Stats, cpu: ?u32) void {
+        fn run(g: std.mem.Allocator, cx: *BlkCtx(X, P), sc: *Scratch, stt: *Stats, cpu: ?u32, errp: *?anyerror) void {
             if (cpu) |c| pinToCpu(c);
             while (true) {
                 const t = cx.disp.fetchAdd(1, .monotonic);
                 if (t >= cx.nb) break;
-                runOneBlock(INST, X, P, cx, sc, stt, t);
+                runOneBlock(INST, X, P, g, cx, sc, stt, t) catch |e| {
+                    errp.* = e; // bucket growth OOM: record and stop this worker
+                    return;
+                };
             }
         }
     };
     const threads = try gpa.alloc(std.Thread, nthreads);
     defer gpa.free(threads);
+    const werr = try gpa.alloc(?anyerror, nthreads);
+    defer gpa.free(werr);
+    @memset(werr, null);
     var spawned: usize = 0;
     for (1..nthreads) |i| {
         const cpu: ?u32 = if (pins) |pp| pp[i] else null;
-        threads[i] = std.Thread.spawn(.{}, Worker.run, .{ &ctx, &scratches[i], &stats[i], cpu }) catch break;
+        threads[i] = std.Thread.spawn(.{}, Worker.run, .{ gpa, &ctx, &scratches[i], &stats[i], cpu, &werr[i] }) catch break;
         spawned = i;
     }
-    Worker.run(&ctx, &scratches[0], &stats[0], if (pins) |pp| pp[0] else null);
+    Worker.run(gpa, &ctx, &scratches[0], &stats[0], if (pins) |pp| pp[0] else null, &werr[0]);
     var j: usize = 1;
     while (j <= spawned) : (j += 1) threads[j].join();
+    for (werr) |e| if (e) |ee| return ee;
 
     if (INST) {
         var st = Stats{};
