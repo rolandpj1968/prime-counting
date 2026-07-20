@@ -1478,18 +1478,29 @@ pub const GResult = struct {
 ///   10^17  6.00  14.54   11.88     18%
 ///   10^18  8.16  76.21   50.42     34%
 ///
-/// Least-squares line through those four points, residuals ±0.44. Deliberately
-/// first-order: the mild convexity at the top of the range is substantially the
-/// fold's O(nseg·π(√z)) prime-list traversal, which is a fixable inefficiency, not
-/// a property of the optimum — fitting it would bake the bug into the model.
+/// Refitted after the bucket ring (2c6e540) removed the fold's O(nseg·π(√z))
+/// traversal term. That term had been inflating α* at the top of the range — α was
+/// the only lever that shrank z — and removing it pulled the optima down by an
+/// amount that grows with x, confirming the diagnosis:
+///
+///   x      α* before  α* after
+///   10^16    4.55       4.58     (traversal negligible here — unmoved)
+///   10^17    5.72       5.34
+///   10^18    7.23       6.90
+///   10^19   10.34       8.65
+///
+/// The SLOPE survived the refit unchanged (0.6017 → 0.5980); only the intercept
+/// moved. A 3-point fit over 10^16..10^18 alone had suggested 0.5023, but that
+/// extrapolated to 7.92 at 10^19 against a measured 8.65 — clustered points, not a
+/// real flattening. Residuals tightened from ±0.9 to ±0.34. Still first-order.
 ///
 /// The floor matters. α* is flat at ≈4 up to 10^16 and only then climbs, which a
-/// line cannot express; unclamped this fit reads α = 0.83 at 10^13, violating the
+/// line cannot express; unclamped it reads well under 1 at 10^13, violating the
 /// z < y² Legendre condition (α > 1) that B's read-off depends on. Clamped, the
 /// failure mode off the bottom of the fitted range is "degrade to the old constant".
 /// Untested above 10^18 — the ceiling is a guard rail, not a tuned value.
-const ALPHA_A: f64 = -17.1758;
-const ALPHA_B: f64 = 0.6017;
+const ALPHA_A: f64 = -17.7273;
+const ALPHA_B: f64 = 0.5980;
 const ALPHA_LO: f64 = 4.0;
 const ALPHA_HI: f64 = 24.0;
 
