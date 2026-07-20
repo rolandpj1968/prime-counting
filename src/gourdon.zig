@@ -9,7 +9,7 @@
 //!         (Legendre; z<y² ⇒ P₂ term vanishes). Gourdon folds π(√z) primes vs lmo's
 //!         π(y) — fewer kills AND fewer prefix queries → beats lmo (op-counts confirm).
 //!         ω uses Gourdon's C/D split (x/pm<p² ⇒ closed form 1+max(0,π(v)−bi), π via
-//!         pi_tab/piLE) and DR/LMO dense/sparse leaf enumeration (p>√y ⇒ m prime).
+//!         pi_tab/oracle) and DR/LMO dense/sparse leaf enumeration (p>√y ⇒ m prime).
 //!   A/Σ — query π only at points ≤ √x (proven); monotone cursor / binary search on
 //!         the prime list — no table, no sweep.
 //!   φ₀  — closed form φ(x/n,1) = ⌈(x/n)/2⌉ (k=1).
@@ -128,18 +128,22 @@ fn sievePrimes(comptime P: type, gpa: std.mem.Allocator, nmax: u64) ![]P {
     return gpa.realloc(primes, cnt);
 }
 
-/// Persistent tables: primes ≤ √x (for piLE and the term loops), and δ/μ only to y
-/// (ω leaves, φ₀ — never read past y). No O(√x) factor tables.
+/// Persistent tables: δ/μ/π only to y (ω leaves, φ₀ — never read past y), an explicit
+/// prime list only to plist_max (the largest prime any loop enumerates by value), and
+/// the O(1) π oracle over [0, √x] as a coprime-30 bitset. Storing the √x primes as a
+/// u64 list instead costs 8·π(√x) — 3.5 GB at x=10²⁰, ~10× the oracle.
 fn Sieve(comptime P: type) type {
     return struct {
         const Self = @This();
         mu: []i8, // [0..y]
         delta: []u32, // smallest prime factor, [0..y]
         pi_tab: []u32, // π(v) for v ≤ y (O(1), for ω's easy-leaf shortcut)
-        primes: []P, // ascending, ≤ √x (P = u32 for u64-x, u64 for u128-x)
+        primes: []P, // ascending, ≤ plist_max (enumeration only)
+        pio: PiOracle, // π(v) and descending prime walk over [0, √x]
 
-    fn init(gpa: std.mem.Allocator, sqx: u64, y: u64) !Self {
-        const primes = try sievePrimes(P, gpa, sqx);
+    fn init(gpa: std.mem.Allocator, sqx: u64, y: u64, plist_max: u64) !Self {
+        const primes = try sievePrimes(P, gpa, plist_max);
+        const pio = try buildPiOracle(gpa, @max(sqx, plist_max));
         const Ny: usize = @intCast(y + 1);
         const delta = try gpa.alloc(u32, Ny);
         @memset(delta, 0);
@@ -168,13 +172,15 @@ fn Sieve(comptime P: type) type {
             if (i >= 2 and delta[i] == i) c += 1; // δ[i]==i ⇔ prime
             pi_tab[i] = c;
         }
-        return .{ .mu = mu, .delta = delta, .pi_tab = pi_tab, .primes = primes };
+        return .{ .mu = mu, .delta = delta, .pi_tab = pi_tab, .primes = primes, .pio = pio };
     }
     fn deinit(self: *Self, gpa: std.mem.Allocator) void {
         gpa.free(self.mu);
         gpa.free(self.delta);
         gpa.free(self.pi_tab);
         gpa.free(self.primes);
+        gpa.free(self.pio.bits);
+        gpa.free(self.pio.pref);
     }
     };
 }
@@ -449,18 +455,131 @@ fn answerPi(comptime INST: bool, gpa: std.mem.Allocator, base: []const u32, pts:
     while (qi < n) : (qi += 1) out[ord[qi]] = 2 + gc; // defensive
 }
 
-/// π(v) for v ≤ √x by binary search on the prime list (which holds every prime ≤ √x).
-/// Correct ONLY for v ≤ √x — the terms that use it are all bounded there; B is not,
-/// and takes the sweep instead.
-fn piLE(primes: anytype, v: u64) u64 { // primes: []const (u32|u64)
-    if (v < 2) return 0;
-    var lo: usize = 0;
-    var hi: usize = primes.len;
-    while (lo < hi) {
-        const mid = (lo + hi) / 2;
-        if (@as(u64, primes[mid]) <= v) lo = mid + 1 else hi = mid;
+// ------------------------------------------------------------------- π oracle
+const W30CNT: [30]u8 = blk: { // r → #{s ∈ [1,r] : gcd(s,30)=1}
+    var t: [30]u8 = @splat(0);
+    var c: u8 = 0;
+    for (0..30) |r| {
+        if (r > 0 and COP30[r]) c += 1;
+        t[r] = c;
     }
-    return lo; // # primes ≤ v
+    break :blk t;
+};
+
+/// π(v) and descending prime enumeration over [0, n], as a coprime-30 primality
+/// bitset plus block prefix counts. One bit per coprime-30 residue ⇒ n/30 bytes,
+/// against 8·π(n) for an explicit u64 prime list — 10.4× less at n=10¹⁰ — and π(v)
+/// costs a prefix load plus ≤8 popcounts on one cache line of bits, against ~29
+/// dependent misses for a binary search striding a 3.5 GB array.
+///
+/// Word w covers exactly the integers [240w, 240w+240): 64 bits ÷ 8 bits-per-30.
+/// Bit j ↔ value 30·(j/8) + W30[j%8], so bit 0 ↔ 1 (cleared: 1 is not prime) and
+/// 2, 3, 5 have no bit at all — count() adds them back by inspection.
+const PiOracle = struct {
+    bits: []u64, // 1 = prime (coprime-30 candidates only)
+    pref: []u64, // pref[b] = # set bits strictly below word b·BLKW
+    n: u64,
+    nbits: usize,
+
+    const BLKW: usize = 8; // words per prefix block = one 64 B cache line
+
+    inline fn kidx(v: u64) usize { // bit index of coprime-30 v
+        return @intCast((v / 30) * 8 + W30IDX[@intCast(v % 30)]);
+    }
+    inline fn kpos(v: u64) usize { // # coprime-30 integers in [1, v] = one past v's bit
+        return @intCast((v / 30) * 8 + W30CNT[@intCast(v % 30)]);
+    }
+    inline fn val(j: usize) u64 { // inverse of kidx
+        return @as(u64, j / 8) * 30 + W30[j % 8];
+    }
+
+    fn countBelow(self: *const PiOracle, k0: usize) u64 {
+        const k = @min(k0, self.nbits);
+        if (k == 0) return 0;
+        const w = k >> 6;
+        var c: u64 = self.pref[w / BLKW];
+        for (self.bits[(w / BLKW) * BLKW .. w]) |word| c += @popCount(word);
+        const r: u32 = @intCast(k & 63);
+        if (r != 0) c += @popCount(self.bits[w] & ((@as(u64, 1) << @intCast(r)) - 1));
+        return c;
+    }
+
+    /// π(v), exact for every v ≤ n.
+    fn count(self: *const PiOracle, v: u64) u64 {
+        if (v < 2) return 0;
+        var c: u64 = 1; // 2
+        if (v >= 3) c += 1;
+        if (v >= 5) c += 1;
+        return c + self.countBelow(kpos(v));
+    }
+
+    /// Largest prime ≤ v (v ≤ n). Returns 0 when v < 2.
+    fn prevPrime(self: *const PiOracle, v: u64) u64 {
+        if (v < 7) return if (v >= 5) 5 else if (v >= 3) 3 else if (v >= 2) 2 else 0;
+        const k = @min(kpos(v), self.nbits);
+        if (k == 0) return 5;
+        var w = (k - 1) >> 6;
+        const r: u32 = @intCast(k & 63);
+        var m = self.bits[w];
+        if (r != 0) m &= (@as(u64, 1) << @intCast(r)) - 1;
+        while (true) {
+            if (m != 0) return val((w << 6) + 63 - @clz(m));
+            if (w == 0) return 5;
+            w -= 1;
+            m = self.bits[w];
+        }
+    }
+};
+
+/// Segmented wheel sieve into the oracle bitset. Marks only coprime-30 multiples
+/// (3.75× fewer stores than a byte sieve) and writes no prime list, so this both
+/// costs less time than sievePrimes(n) and leaves n/30 bytes behind instead of 8·π(n).
+fn buildPiOracle(gpa: std.mem.Allocator, n: u64) !PiOracle {
+    const nbits: usize = if (n < 1) 0 else PiOracle.kpos(n);
+    const nw = (nbits + 63) / 64;
+    const nwp = ((nw + PiOracle.BLKW - 1) / PiOracle.BLKW) * PiOracle.BLKW;
+    const bits = try gpa.alloc(u64, @max(nwp, PiOracle.BLKW));
+    errdefer gpa.free(bits);
+    @memset(bits, ~@as(u64, 0));
+    @memset(bits[nw..], 0);
+    if (nw > 0 and nbits % 64 != 0) bits[nw - 1] &= (@as(u64, 1) << @intCast(nbits % 64)) - 1;
+    if (nbits > 0) bits[0] &= ~@as(u64, 1); // 1 is not prime
+
+    const base = try sievePrimes(u32, gpa, isqrt(n));
+    defer gpa.free(base);
+
+    const SEGW: usize = 1 << 15; // 32768 words = 256 KB of bits = 7.86M integers
+    var w0: usize = 0;
+    while (w0 < nw) : (w0 += SEGW) {
+        const w1 = @min(w0 + SEGW, nw);
+        const lo: u64 = @as(u64, w0) * 240;
+        const hi: u64 = @min(@as(u64, w1) * 240, n + 1);
+        for (base) |p32| {
+            const p: u64 = p32;
+            if (p < 7) continue;
+            if (p * p >= hi) break;
+            var m: u64 = @max(p, (lo + p - 1) / p);
+            while (!COP30[@intCast(m % 30)]) m += 1;
+            var wp: u8 = W30IDX[@intCast(m % 30)];
+            var v: u64 = p * m;
+            while (v < hi) {
+                const k = PiOracle.kidx(v);
+                bits[k >> 6] &= ~(@as(u64, 1) << @intCast(k & 63));
+                v += p * W30GAP[wp];
+                wp = (wp + 1) & 7;
+            }
+        }
+    }
+
+    const npref = bits.len / PiOracle.BLKW + 1;
+    const pref = try gpa.alloc(u64, npref);
+    var acc: u64 = 0;
+    for (0..npref) |b| {
+        pref[b] = acc;
+        if (b * PiOracle.BLKW >= bits.len) break;
+        for (bits[b * PiOracle.BLKW ..][0..PiOracle.BLKW]) |word| acc += @popCount(word);
+    }
+    return .{ .bits = bits, .pref = pref, .n = n, .nbits = nbits };
 }
 
 const Terms = struct {
@@ -475,20 +594,20 @@ const Terms = struct {
     P: i128,
 };
 
-/// A, Σ₄/₅/₆ and the scalars use piLE (all query points ≤ √x — proven). Only B has
-/// v = x/p up to z > √x, so B alone takes a segmented sweep over its ~π(√x) points.
-/// π-free terms (ω, φ₀, Σ₀–₃) are handled in piGourdonV.
+/// A, Σ₄/₅/₆ and the scalars query the π oracle (all query points ≤ √x — proven).
+/// Only B has v = x/p up to z > √x, so B alone takes a segmented sweep over its
+/// ~π(√x) points. π-free terms (ω, φ₀, Σ₀–₃) are handled in piGourdonV.
 fn computeTerms(comptime X: type, s: anytype, x: X, y: u64, sqx: u64, x13: u64, sqz: u64, xstar: u64) Terms {
     const pr = s.primes;
-    const a: i128 = @intCast(piLE(pr, y));
-    const b: i128 = @intCast(piLE(pr, x13));
-    const c: i128 = @intCast(piLE(pr, sqz));
-    const d: i128 = @intCast(piLE(pr, xstar));
-    const Pi: i128 = @intCast(piLE(pr, sqx));
+    const pio = &s.pio;
+    const a: i128 = @intCast(pio.count(y));
+    const b: i128 = @intCast(pio.count(x13));
+    const c: i128 = @intCast(pio.count(sqz));
+    const d: i128 = @intCast(pio.count(xstar));
+    const Pi: i128 = @intCast(pio.count(sqx));
 
     // A = Σ_{x*<p≤x^1/3} Σ_{p<q≤√(x/p)} χ(x/pq) π(x/pq),  χ = 2 if x/pq<y else 1.
-    // For fixed p, q ascends ⇒ v=x/pq descends ⇒ π(v) only decreases: a monotone
-    // cursor pc = π(v) replaces the per-pair binary search (O(1) amortized, no table).
+    // (q ≤ √(x/x*) = y, so the explicit list suffices for the inner enumeration.)
     var A: i128 = 0;
     for (pr, 0..) |p32, pidx| {
         const p: u64 = @intCast(p32);
@@ -496,20 +615,12 @@ fn computeTerms(comptime X: type, s: anytype, x: X, y: u64, sqx: u64, x13: u64, 
         if (p > x13) break;
         const qhi = isqrtG(X, x / @as(X, p));
         var qi = pidx + 1;
-        var pc: usize = 0; // π(v) cursor, seeded on the first q
-        var seeded = false;
         while (qi < pr.len) : (qi += 1) {
             const qq: u64 = @intCast(pr[qi]);
             if (qq > qhi) break;
             const v = xdiv(X, x, p * qq); // < √x
-            if (!seeded) {
-                pc = piLE(pr, v);
-                seeded = true;
-            } else {
-                while (pc > 0 and @as(u64, @intCast(pr[pc - 1])) > v) pc -= 1;
-            }
             const chi: i128 = if (v < y) 2 else 1;
-            A += chi * @as(i128, @intCast(pc));
+            A += chi * @as(i128, @intCast(pio.count(v)));
         }
     }
     // Σ₄ = a·Σ_{x*<p≤√(x/y)} π(x/py)   (v ≤ x^{5/12} < √x)
@@ -518,7 +629,7 @@ fn computeTerms(comptime X: type, s: anytype, x: X, y: u64, sqx: u64, x13: u64, 
         const p: u64 = @intCast(p32);
         if (p <= xstar) continue;
         if (p > sqz) break;
-        sig4 += @intCast(piLE(pr, xdiv(X, x, p * y)));
+        sig4 += @intCast(pio.count(xdiv(X, x, p * y)));
     }
     sig4 *= a;
     // Σ₅ = Σ_{√(x/y)<p≤x^1/3} π(x/p²)   (v < y ≤ √x)
@@ -527,7 +638,7 @@ fn computeTerms(comptime X: type, s: anytype, x: X, y: u64, sqx: u64, x13: u64, 
         const p: u64 = @intCast(p32);
         if (p <= sqz) continue;
         if (p > x13) break;
-        sig5 += @intCast(piLE(pr, xdiv(X, x, p * p)));
+        sig5 += @intCast(pio.count(xdiv(X, x, p * p)));
     }
     // Σ₆ = −Σ_{x*<p≤x^1/3} π(√(x/p))²   (v ≤ x^{3/8} < √x)
     var sig6: i128 = 0;
@@ -535,7 +646,7 @@ fn computeTerms(comptime X: type, s: anytype, x: X, y: u64, sqx: u64, x13: u64, 
         const p: u64 = @intCast(p32);
         if (p <= xstar) continue;
         if (p > x13) break;
-        const t: i128 = @intCast(piLE(pr, isqrt(xdiv(X, x, p))));
+        const t: i128 = @intCast(pio.count(isqrt(xdiv(X, x, p))));
         sig6 += t * t;
     }
     return .{ .A = A, .sig4 = sig4, .sig5 = sig5, .sig6 = -sig6, .a = a, .b = b, .c = c, .d = d, .P = Pi };
@@ -548,15 +659,15 @@ const Partial = struct { A: i128 = 0, sig4: i128 = 0, sig5: i128 = 0, sig6: i128
 /// thread-local Partial (shared read-only prime list, no cross-thread state), and the
 /// partials are summed. Scalars a,b,c,d,P are serial (5 binary searches).
 fn computeTermsPar(comptime X: type, gpa: std.mem.Allocator, s: anytype, x: X, y: u64, sqx: u64, x13: u64, sqz: u64, xstar: u64, nthreads: usize, pins: ?[]const u32) !Terms {
-    const pr = s.primes;
-    const a: i128 = @intCast(piLE(pr, y));
-    const b: i128 = @intCast(piLE(pr, x13));
-    const c: i128 = @intCast(piLE(pr, sqz));
-    const d: i128 = @intCast(piLE(pr, xstar));
-    const Pi: i128 = @intCast(piLE(pr, sqx));
+    const pio = &s.pio;
+    const a: i128 = @intCast(pio.count(y));
+    const b: i128 = @intCast(pio.count(x13));
+    const c: i128 = @intCast(pio.count(sqz));
+    const d: i128 = @intCast(pio.count(xstar));
+    const Pi: i128 = @intCast(pio.count(sqx));
 
-    const i_lo = piLE(pr, xstar); // first prime index with p > x*
-    const i_hi = piLE(pr, x13); // one past last prime ≤ x^1/3
+    const i_lo: usize = @intCast(pio.count(xstar)); // first prime index with p > x*
+    const i_hi: usize = @intCast(pio.count(x13)); // one past last prime ≤ x^1/3
     const n_primes = if (i_hi > i_lo) i_hi - i_lo else 0;
     const nchunks = @max(@as(usize, 1), @min(n_primes, nthreads * 16)); // over-partition: small p ⇒ more work
     const csize = (n_primes + nchunks - 1) / nchunks;
@@ -595,6 +706,7 @@ fn computeTermsPar(comptime X: type, gpa: std.mem.Allocator, s: anytype, x: X, y
         fn run(cx: *Ctx, out: *Partial, cpu: ?u32) void {
             if (cpu) |cp| pinToCpu(cp);
             const prr = cx.s.primes;
+            const po = &cx.s.pio;
             var A: i128 = 0;
             var s4: i128 = 0;
             var s5: i128 = 0;
@@ -611,26 +723,18 @@ fn computeTermsPar(comptime X: type, gpa: std.mem.Allocator, s: anytype, x: X, y
                         // A: monotone π-cursor over q ∈ (p, √(x/p)]
                         const qhi = isqrtG(X, cx.x / @as(X, p));
                         var qi = idx + 1;
-                        var pc: usize = 0;
-                        var seeded = false;
                         while (qi < prr.len) : (qi += 1) {
                             const qq: u64 = @intCast(prr[qi]);
                             if (qq > qhi) break;
                             const v = xdiv(X, cx.x, p * qq);
-                            if (!seeded) {
-                                pc = piLE(prr, v);
-                                seeded = true;
-                            } else {
-                                while (pc > 0 and @as(u64, @intCast(prr[pc - 1])) > v) pc -= 1;
-                            }
                             const chi: i128 = if (v < cx.y) 2 else 1;
-                            A += chi * @as(i128, @intCast(pc));
+                            A += chi * @as(i128, @intCast(po.count(v)));
                         }
-                        const t: i128 = @intCast(piLE(prr, isqrt(xdiv(X, cx.x, p)))); // Σ₆
+                        const t: i128 = @intCast(po.count(isqrt(xdiv(X, cx.x, p)))); // Σ₆
                         s6 += t * t;
                     }
-                    if (p > cx.xstar and p <= cx.sqz) s4 += @intCast(piLE(prr, xdiv(X, cx.x, p * cx.y))); // Σ₄
-                    if (p > cx.sqz and p <= cx.x13) s5 += @intCast(piLE(prr, xdiv(X, cx.x, p * p))); // Σ₅
+                    if (p > cx.xstar and p <= cx.sqz) s4 += @intCast(po.count(xdiv(X, cx.x, p * cx.y))); // Σ₄
+                    if (p > cx.sqz and p <= cx.x13) s5 += @intCast(po.count(xdiv(X, cx.x, p * p))); // Σ₅
                 }
             }
             out.* = .{ .A = A, .sig4 = s4, .sig5 = s5, .sig6 = s6 };
@@ -701,10 +805,10 @@ fn computeB(comptime INST: bool, gpa: std.mem.Allocator, s: anytype, x: u64, y: 
 /// 10^12 — so one pass serves both, beating lmo's separate S2-fold + fused-P₂.
 /// C/D leaf evaluator: closed form (C, is_d=false) when x/pm < p² and π(v) is cheap,
 /// else the counter (D, is_d=true — the leaf needs a cross-block φ correction).
-inline fn evalPhi(comptime INST: bool, st: *Stats, vv: u64, b: usize, pp: u64, pi_tab: []const u32, prs: anytype, pr_bi: i64, ct: *const Ctr, l: u64, sx: u64, yy: u64) struct { phi: i64, is_d: bool } {
+inline fn evalPhi(comptime INST: bool, st: *Stats, vv: u64, b: usize, pp: u64, pi_tab: []const u32, pio: *const PiOracle, pr_bi: i64, ct: *const Ctr, l: u64, sx: u64, yy: u64) struct { phi: i64, is_d: bool } {
     var piv: i64 = -1;
     if (pp * pp > vv) {
-        if (vv <= yy) piv = @intCast(pi_tab[@intCast(vv)]) else if (vv <= sx) piv = @intCast(piLE(prs, vv));
+        if (vv <= yy) piv = @intCast(pi_tab[@intCast(vv)]) else if (vv <= sx) piv = @intCast(pio.count(vv));
     }
     if (piv >= 0) {
         if (INST) st.n_easy += 1;
@@ -771,6 +875,7 @@ fn BlkCtx(comptime X: type, comptime P: type) type {
         delta: []const u32,
         pi_tab: []const u32,
         primes: []const P,
+        pio: *const PiOracle,
         x: X,
         y: u64,
         sqx: u64,
@@ -838,8 +943,6 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, ctx: *Bl
     const sqrt_y = ctx.sqrt_y;
     const nax = ctx.nax;
     const naz = ctx.naz;
-    const nay = ctx.nay;
-    const nsx = ctx.nsx;
     const segw = ctx.segw;
     const nseg = ctx.nseg;
     const nb = ctx.nb;
@@ -862,7 +965,7 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, ctx: *Bl
         if (p <= sqrt_y) {
             cur[bi] = bnd;
         } else {
-            const pl = piLE(primes, bnd);
+            const pl: usize = @intCast(ctx.pio.count(bnd));
             cur[bi] = if (pl > 0) @as(u64, pl - 1) else 0;
         }
     }
@@ -874,8 +977,10 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, ctx: *Bl
         next[bi] = p * m0;
         wpos[bi] = W30IDX[@intCast(m0 % 30)];
     }
-    var pB: usize = if (block_lo == 0) nsx else piLE(primes, @min(sqx, xdiv(X, x, block_lo)));
-    if (pB > nsx) pB = nsx;
+    // B's descending cursor over the primes of (y, √x] — the only loop that needs
+    // prime VALUES above the explicit list, so it walks the oracle bitset instead.
+    var pB: u64 = if (block_lo == 0) sqx else @min(sqx, xdiv(X, x, block_lo));
+    pB = ctx.pio.prevPrime(pB);
 
     const omega_mu = ctx.blk_mu[t * nax ..][0..nax];
     @memset(omega_mu, 0);
@@ -910,7 +1015,7 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, ctx: *Bl
                                     if (INST) st.n_small += 1;
                                     omega += @as(i128, sign) * @as(i128, phiSmall(v, bi));
                                 } else {
-                                    const r = evalPhi(INST, st, v, bi, p, ctx.pi_tab, primes, phi_run[bi], &sc.ctr, lo, sqx, y);
+                                    const r = evalPhi(INST, st, v, bi, p, ctx.pi_tab, ctx.pio, phi_run[bi], &sc.ctr, lo, sqx, y);
                                     omega += @as(i128, sign) * @as(i128, r.phi);
                                     if (r.is_d) omega_mu[bi] += sign;
                                 }
@@ -928,7 +1033,7 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, ctx: *Bl
                         const v: u64 = xdiv(X, x, p * q);
                         if (v >= hi) break;
                         if (v >= lo) {
-                            const r = evalPhi(INST, st, v, bi, p, ctx.pi_tab, primes, phi_run[bi], &sc.ctr, lo, sqx, y);
+                            const r = evalPhi(INST, st, v, bi, p, ctx.pi_tab, ctx.pio, phi_run[bi], &sc.ctr, lo, sqx, y);
                             omega += @as(i128, r.phi);
                             if (r.is_d) omega_mu[bi] += 1;
                         }
@@ -969,14 +1074,14 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, ctx: *Bl
             }
         }
         // B queries off the fully-folded counter (φ(·,π√z))
-        while (pB > nay and xdiv(X, x, @intCast(primes[pB - 1])) < hi) {
-            const v: u64 = xdiv(X, x, @intCast(primes[pB - 1]));
+        while (pB > y and xdiv(X, x, pB) < hi) {
+            const v: u64 = xdiv(X, x, pB);
             if (v >= lo) {
                 if (INST) st.n_bq += 1;
                 b_sum += @as(i128, phi_run_full + sc.ctr.prefix(@intCast(v - lo)) + naz_i - 1);
                 b_count += 1;
             }
-            pB -= 1;
+            pB = ctx.pio.prevPrime(pB - 1);
         }
         phi_run_full += sc.ctr.total;
         for (3..nax) |bi| phi_run[bi] += seg_cnt[bi];
@@ -1016,9 +1121,9 @@ fn initBlkCtx(comptime X: type, comptime P: type, gpa: std.mem.Allocator, s: any
     const primes = s.primes;
     const sqx = isqrtG(X, x);
     const sqz = isqrt(z);
-    const naz: usize = piLE(primes, sqz);
+    const naz: usize = @intCast(s.pio.count(sqz));
     if (naz == 0) return null;
-    const nax: usize = piLE(primes, xstar);
+    const nax: usize = @intCast(s.pio.count(xstar));
     const segw: usize = 273 * 960;
     const total = z + 1;
     const tm = try buildSmallTemplates(gpa, primes);
@@ -1027,6 +1132,7 @@ fn initBlkCtx(comptime X: type, comptime P: type, gpa: std.mem.Allocator, s: any
         .delta = s.delta,
         .pi_tab = s.pi_tab,
         .primes = primes,
+        .pio = &s.pio,
         .x = x,
         .y = y,
         .sqx = sqx,
@@ -1035,8 +1141,8 @@ fn initBlkCtx(comptime X: type, comptime P: type, gpa: std.mem.Allocator, s: any
         .total = total,
         .nax = nax,
         .naz = naz,
-        .nay = piLE(primes, y),
-        .nsx = piLE(primes, sqx),
+        .nay = @intCast(s.pio.count(y)),
+        .nsx = @intCast(s.pio.count(sqx)),
         .segw = segw,
         .nseg = (total + segw - 1) / segw,
         .nb = nb,
@@ -1226,7 +1332,13 @@ pub fn piGourdonV(comptime X: type, gpa: std.mem.Allocator, x: X, y_in: ?u64, ve
     const sqz = isqrt(z);
     const xstar = @max(isqrt(sqx), xdiv(X, x, y * y));
 
-    var s = try Sieve(P).init(gpa, sqx, y);
+    // Explicit prime list only as far as some loop enumerates primes BY VALUE:
+    // y (ω's sparse q-walk), √z (the fold), x^(1/3) (A/Σ's outer p), and A's inner
+    // q ≤ √(x/p) < √(x/x*) ≤ y (since x* ≥ x/y²) — so y already covers A's q, and
+    // the √(x/x*) term is belt-and-braces for the x* = x^(1/4) regime. Every π(v)
+    // query above plist_max goes to the bitset oracle, which spans all of [0, √x].
+    const plist_max = @max(@max(y, sqz), @max(x13, isqrtG(X, x / @as(X, @max(xstar, 1)))));
+    var s = try Sieve(P).init(gpa, sqx, y, plist_max);
     defer s.deinit(gpa);
     const lap = struct {
         fn f(v: bool, tpp: *u64, name: []const u8) void {
@@ -1286,13 +1398,35 @@ pub fn piGourdonV(comptime X: type, gpa: std.mem.Allocator, x: X, y_in: ?u64, ve
 pub fn main() !void {
     const gpa = std.heap.page_allocator;
 
+    // π oracle differential check: count() and prevPrime() against an explicit
+    // prime list, at EVERY v ≤ N (the oracle answers every π query in the terms,
+    // so an off-by-one anywhere in the wheel indexing would silently skew π(x)).
+    {
+        const N: u64 = 3_000_000;
+        const o = try buildPiOracle(gpa, N);
+        defer gpa.free(o.bits);
+        defer gpa.free(o.pref);
+        const ref = try sievePrimes(u32, gpa, N);
+        defer gpa.free(ref);
+        var i: usize = 0;
+        var bad: usize = 0;
+        for (0..N + 1) |v| {
+            while (i < ref.len and ref[i] <= v) i += 1;
+            const want_prev: u64 = if (i == 0) 0 else ref[i - 1];
+            if (o.count(v) != i or o.prevPrime(v) != want_prev) bad += 1;
+        }
+        std.debug.print("π oracle check (v ≤ {d}): π={d} {s} ({d} mismatches)\n\n", .{
+            N, o.count(N), if (bad == 0 and o.count(N) == ref.len) "match" else "MISMATCH", bad,
+        });
+    }
+
     // ω differential check: naive recurrence vs O(1)-kill counter, must match exactly.
     std.debug.print("ω check (naive vs counter):\n", .{});
     for ([_]u64{ 100_000, 1_000_000, 10_000_000, 100_000_000, 1_000_000_000 }) |x| {
         const y = chooseY(u64, x);
         const z = x / y;
         const xstar = @max(isqrt(isqrt(x)), x / (y * y));
-        var s = try Sieve(u32).init(gpa, isqrt(x), y);
+        var s = try Sieve(u32).init(gpa, isqrt(x), y, isqrt(x));
         defer s.deinit(gpa);
         const pi = try buildPi(gpa, z);
         defer gpa.free(pi);
@@ -1317,7 +1451,7 @@ pub fn main() !void {
             const x13 = icbrtG(u64, x);
             const sqz = isqrt(z);
             const xstar = @max(isqrt(isqrt(x)), x / (y * y));
-            var s = try Sieve(u32).init(gpa, sqx, y);
+            var s = try Sieve(u32).init(gpa, sqx, y, sqx);
             defer s.deinit(gpa);
             const t0 = common.nowNs();
             const ser = computeTerms(u64, &s, x, y, sqx, x13, sqz, xstar);
@@ -1369,7 +1503,7 @@ pub fn main() !void {
         const y = chooseY(u64, x);
         const z = x / y;
         const xstar = @max(isqrt(isqrt(x)), x / (y * y));
-        var s = try Sieve(u32).init(gpa, isqrt(x), y);
+        var s = try Sieve(u32).init(gpa, isqrt(x), y, isqrt(x));
         defer s.deinit(gpa);
         std.debug.print("x=10^{d} (y={d}, z={d}):\n", .{ std.math.log10_int(x), y, z });
         std.debug.print("  gourdon(fused) ", .{});
