@@ -305,8 +305,23 @@ fn runCalibrate(gpa: std.mem.Allocator, o: Opts, pins: ?[]const u32) !void {
         if (@abs(res) > worst) worst = @abs(res);
         std.debug.print("  10^{d:<3} {d:>8.2} {d:>8.2} {s}{d:>6.2}{s}\n", .{ q.n, q.astar, pred, if (res < 0) "-" else "+", @abs(res), if (q.edge) "  (edge)" else "" });
     }
-    std.debug.print("\nalpha(x) = {d:.4} + {d:.4} * ln x   (worst residual {d:.2}, {d} thread(s))\n", .{ f.a, f.b, worst, o.threads });
-    std.debug.print("apply with:  --alpha-fit={d:.4},{d:.4}\n", .{ f.a, f.b });
+    // Err-high bias: the basin is asymmetric. Below α* the fold work blows up
+    // hyperbolically (z = x/y) and terminates in the z < y² correctness wall;
+    // above α* the cost is a gentle linear leaf/memory slope. Measured at 10^20:
+    // −30% in α costs +16.7%, +27% costs +6.7%; at 10^18 α=1.5 was 4.8× worse
+    // while α=24 was 1.7×. So the suggested fit aims one residual-RMS ABOVE the
+    // symmetric least squares — cheap where the valley is flat, protective where
+    // it is a cliff.
+    var ssq: f64 = 0;
+    for (anchors[0..na]) |q| {
+        const res = q.astar - (f.a + f.b * q.lx);
+        ssq += res * res;
+    }
+    const rms = @sqrt(ssq / @as(f64, @floatFromInt(na)));
+    const bias = @max(0.3, rms);
+    std.debug.print("\nalpha(x) = {d:.4} + {d:.4} * ln x   (symmetric fit; worst residual {d:.2}, {d} thread(s))\n", .{ f.a, f.b, worst, o.threads });
+    std.debug.print("err-high bias +{d:.2} (rms residual; low side of the basin is the cliff)\n", .{bias});
+    std.debug.print("apply with:  --alpha-fit={d:.4},{d:.4}\n", .{ f.a + bias, f.b });
     if (worst > 1.5) std.debug.print("note: residuals are large — this machine may want a per-x --alpha rather than a line\n", .{});
 }
 
