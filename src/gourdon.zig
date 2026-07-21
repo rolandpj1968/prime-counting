@@ -1318,7 +1318,15 @@ const Stats = struct {
 /// primes[] at scattered offsets and move MORE bytes than the sequential scan it
 /// replaces (~2.2 MB vs 1.7 MB per segment at 10^20). Contiguous 16-byte entries
 /// bring that to ~140 KB. p ≤ √z < 2^32 for any x this code can address.
-const Ent = struct { next: u64, p: u32, wp: u8 };
+/// One pending strike, packed into a u64: [p : 43][wp : 3][offset-in-slot-segment
+/// : 18]. The offset is relative to the SLOT's segment base, so it is < segw = 2^18
+/// for every reachable x (and √z < 2^32 always fits 43 bits) — packing is
+/// scale-safe with no guard. 8 B/entry halves the ring's L3 working set.
+const Ent = u64;
+
+inline fn entPack(off: u64, wp: u8, p: u64) Ent {
+    return off | (@as(u64, wp) << 18) | (p << 21);
+}
 
 /// Grow-only vector. Each bucket reaches its high-water mark within the first few
 /// segments and never reallocates again, so the growth path is cold. Total across
@@ -1545,11 +1553,8 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, gpa: std
     for (nbuck..naz) |bi| {
         if (next[bi] >= block_hi) continue;
         const si = (next[bi] - block_lo) / segw;
-        try sc.buck[@as(usize, @intCast(si)) & rmask].push(gpa, .{
-            .next = next[bi],
-            .p = @intCast(primes[bi]),
-            .wp = wpos[bi],
-        });
+        const base = block_lo + @as(u64, @intCast(si)) * segw;
+        try sc.buck[@as(usize, @intCast(si)) & rmask].push(gpa, entPack(next[bi] - base, wpos[bi], @intCast(primes[bi])));
     }
 
     // B's descending cursor over the primes of (y, √x] — the only loop that needs
@@ -1648,9 +1653,9 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, gpa: std
             const n = b.len;
             b.len = 0; // refiling targets a strictly later slot, never this one
             for (b.items[0..n]) |e| {
-                var j: u64 = e.next;
-                var wp: u8 = e.wp;
-                const pe: u64 = e.p;
+                var j: u64 = lo + (e & 0x3FFFF);
+                var wp: u8 = @intCast((e >> 18) & 7);
+                const pe: u64 = e >> 21;
                 while (j < hi) {
                     if (INST) st.n_kill += 1;
                     sc.ctr.strike(@intCast(j - lo));
@@ -1659,7 +1664,8 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, gpa: std
                 }
                 if (j < block_hi) {
                     const sj: usize = @intCast((j - block_lo) / segw);
-                    try sc.buck[sj & rmask].push(gpa, .{ .next = j, .p = e.p, .wp = wp });
+                    const sbase = block_lo + @as(u64, @intCast(sj)) * segw;
+                    try sc.buck[sj & rmask].push(gpa, entPack(j - sbase, wp, pe));
                 }
             }
         }
