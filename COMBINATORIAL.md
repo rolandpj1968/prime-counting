@@ -766,6 +766,14 @@ Growth ratio afterwards: flat at ~4.15 across 10¹⁶–10²⁰.
   oracle subsumes π(v) for v ≤ y; δ is only ever compared against p ≤ √y, so
   saturating at 65535 is exact — *while √y < 65535*, which holds to x ≈ 10²⁵ and
   fails at 10²⁶. Guarded with an error rather than a comment.
+- **Fused μ+δ into one u16 leaf table, storing the spf *index*** (−6.7% at 10¹⁷,
+  −6.0% at 10¹⁸ on 6 threads; neutral serial; 3 → 2 bytes/m). The leaf test is an
+  order comparison between primes — spf(m) > p ⟺ π(spf) > bi+1 — so the table
+  stores π(spf) and the hot test compares against the loop index, no prime value
+  needed. μ folds in free: 0 = "μ=0, reject" (rejected regardless of δ, so no
+  separate check), bit 15 = sign. Indices compress ~ln p better than values,
+  moving the δ ceiling from ~10²⁵ to ~10²⁹ — past the runtime horizon. The win
+  being parallel-only is the bandwidth model's own prediction.
 
 ## Dead ends
 
@@ -800,7 +808,7 @@ Perfect rejection removal caps near 3%.
 
 The two halves have opposite memory profiles. The **fold** works on a per-thread
 32 KB counter bitset — L1-resident, private per core, scaling with z. The **leaves**
-stream the *shared* μ/δ tables, and since threads work on different blocks they
+stream the *shared* leaf table (fused μ+δ), and since threads work on different blocks they
 touch different regions: no line sharing, just nthreads× the traffic, scaling with y.
 
 So parallelism multiplies leaf-side bandwidth while fold cost stays private, and the

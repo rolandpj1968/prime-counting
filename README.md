@@ -189,7 +189,7 @@ avoid it measured **4.7% slower** and was reverted).
 
 The same lens explains a third observation: **the parallel path is leaf-side
 bandwidth-bound.** The fold works on a per-thread 32 KB L1-resident bitset, while
-the leaf walk streams the *shared* μ/δ tables, and threads on different blocks touch
+the leaf walk streams the *shared* leaf table (fused μ+δ), and threads on different blocks touch
 different regions — so parallelism multiplies leaf traffic while fold cost stays
 private. Hence α* is thread-count dependent (4.58 on six threads vs ~5.0 on one at
 10¹⁶), and fold-side wins scale poorly: the uncounted-strike change measured 4%
@@ -197,10 +197,13 @@ single-threaded and ~0.7% in the six-thread ladder.
 
 ### Next
 
-- **Pack μ and δ into one u16 array.** They are loaded from two separate arrays at
-  identical indices; `leaf[m] = (μ_code << 14) | min(spf, 16383)` halves the leaf
-  streams. On the bandwidth story this is a *parallel-specific* win, which is where
-  the remaining headroom is.
+- ~~Pack μ and δ into one u16 array~~ **Done** — fused as `leaf[m]` = μ-sign bit +
+  15-bit *spf index* (not value: the leaf test is an order comparison between
+  primes, so π(spf) > bi+1 replaces spf > p, and indices compress ~ln p better).
+  Measured −6.7% at 10¹⁷ / −6.0% at 10¹⁸ on 6 threads, neutral serial — exactly
+  the parallel-specific shape the bandwidth story predicts. Ceiling moved
+  10²⁵ → ~10²⁹. Next rung if the leaf stream still binds: a u8 first-level table
+  (~92% of entries have spf ≤ p₁₂₆) with a u16 overflow, ~1.15y bytes.
 - **`chooseAlpha(x, nthreads)`** — α* demonstrably depends on both; the current fit
   samples one slice. Needs a 2-D sweep.
 - **Phase timing at scale** to settle whether the growth-ratio drift past 10²⁰ is
