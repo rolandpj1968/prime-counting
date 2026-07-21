@@ -1947,8 +1947,15 @@ pub const GResult = struct {
 ///   10^17  6.00  14.54   11.88     18%
 ///   10^18  8.16  76.21   50.42     34%
 ///
-/// Refitted after the bucket ring (2c6e540) removed the fold's O(nseg·π(√z))
-/// traversal term. That term had been inflating α* at the top of the range — α was
+/// Refitted 2026-07-21 after the segmented oracle (471c328..5252767) made
+/// leaf-side π cheaper and pushed every optimum up: measured α* = 4.41 / 5.41 /
+/// 6.55 / 7.97 / 10.58 / 12.21 at 10^15..10^20 (residuals ±0.68), with the
+/// killed 10^21 anchor's bracket (α* ≥ 13.4) matching this fit's 13.45. Expect
+/// another shift when the audit worklist lands; recalibrate with
+/// `pi --calibrate` then, not by hand.
+///
+/// Previous history — refitted after the bucket ring (2c6e540) removed the
+/// fold's O(nseg·π(√z)) traversal term. That term had been inflating α* at the top of the range — α was
 /// the only lever that shrank z — and removing it pulled the optima down by an
 /// amount that grows with x, confirming the diagnosis:
 ///
@@ -1968,8 +1975,8 @@ pub const GResult = struct {
 /// z < y² Legendre condition (α > 1) that B's read-off depends on. Clamped, the
 /// failure mode off the bottom of the fitted range is "degrade to the old constant".
 /// Untested above 10^18 — the ceiling is a guard rail, not a tuned value.
-const ALPHA_A: f64 = -17.7273;
-const ALPHA_B: f64 = 0.5980;
+const ALPHA_A: f64 = -20.1100;
+const ALPHA_B: f64 = 0.6940;
 const ALPHA_LO: f64 = 4.0;
 const ALPHA_HI: f64 = 24.0;
 
