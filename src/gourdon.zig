@@ -1342,7 +1342,6 @@ const Scratch = struct {
     cur: []u64,
     next: []u64,
     wpos: []u8,
-    seg_cnt: []i64,
     phi_run: []i64,
     buck: []Bucket, // ring, indexed by (segment index & ring_mask)
     pwin: PiWin, // per-thread π window over the current sweep segment
@@ -1358,7 +1357,6 @@ const Scratch = struct {
             .cur = try gpa.alloc(u64, nax),
             .next = try gpa.alloc(u64, naz),
             .wpos = try gpa.alloc(u8, naz),
-            .seg_cnt = try gpa.alloc(i64, nax),
             .phi_run = try gpa.alloc(i64, nax),
             .buck = buck,
             .pwin = .{ .bits = try gpa.alloc(u64, nwin), .pref = try gpa.alloc(u32, nwin + 1), .lo = 0, .base = 0 },
@@ -1372,7 +1370,6 @@ const Scratch = struct {
         gpa.free(self.cur);
         gpa.free(self.next);
         gpa.free(self.wpos);
-        gpa.free(self.seg_cnt);
         gpa.free(self.phi_run);
         for (self.buck) |*b| if (b.items.len > 0) gpa.free(b.items);
         gpa.free(self.buck);
@@ -1509,7 +1506,6 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, gpa: std
     const cur = sc.cur;
     const next = sc.next;
     const wpos = sc.wpos;
-    const seg_cnt = sc.seg_cnt;
     const phi_run = sc.phi_run;
 
     const block_lo = @min((t * nseg / nb) * segw, total);
@@ -1585,7 +1581,6 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, gpa: std
         for (0..nfold_c) |bi| {
             const p: u64 = @intCast(primes[bi]);
             {
-                if (bi >= 3) seg_cnt[bi] = sc.ctr.total;
                 if (p > 2 and p <= sqrt_y) {
                     // DENSE m-walk. Both segment bounds are algebraic, not arithmetic:
                     //   v = x/(mp) < hi  ⟺  m > x/(p·hi),   v ≥ lo  ⟺  m ≤ x/(p·lo)
@@ -1633,6 +1628,10 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, gpa: std
                     cur[bi] = qc;
                 }
             }
+            // phi_run accumulates HERE — after this stage's leaves (which never
+            // touch the counter, so total equals the old pre-leaf snapshot) and
+            // before this stage's fold. The seg_cnt snapshot array is gone.
+            if (bi >= 3) phi_run[bi] += sc.ctr.total;
             if (bi >= 3) foldPrime(INST, true, ctx, &sc.ctr, st, bi, p, lo, hi, len, next, wpos);
         }
         // Stages above π(x*) carry no leaves, so nothing reads the counter until the
@@ -1676,7 +1675,6 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, gpa: std
             pB = bwinPrev(P, &sc.bwin, primes, ctx.nwb, pB - 1, y);
         }
         phi_run_full += sc.ctr.total;
-        for (3..nax) |bi| phi_run[bi] += seg_cnt[bi];
     }
     for (0..nax) |bi| ctx.blk_total[t * nax + bi] = phi_run[bi];
     ctx.blk_total_full[t] = phi_run_full;
