@@ -724,6 +724,95 @@ fn buildPiOraclePar(gpa: std.mem.Allocator, n: u64, nthreads: usize, pins: ?[]co
     return .{ .bits = bits, .pref = pref, .n = n, .nbits = nbits };
 }
 
+// ------------------------------------------------- windowed π (the segmented oracle)
+// Increment toward retiring the resident [0, √x] bitset (35 GB at 10^24): π(v)
+// answered from a per-thread WINDOW covering exactly the sweep segment [lo, hi).
+// This works because the ω sweep already delivers every C-leaf query inside the
+// current segment (the m-/q-walk guard is `if (v >= hi) break; if (v >= lo)`), so
+// the sweep itself is the window pass — no deferral, no sorting. All C-leaves have
+// v ≤ √x, i.e. they live in the first √x/z of the z-line, so the window is built
+// only for those early segments (~0.2% of segments at 10^20).
+//
+// A window is segw = 262080 integers = segw/240 = 1092 words (240 ints per word),
+// plus a per-word u32 prefix so a query is O(1): 13 KB per thread, L1-resident.
+// The global offset comes from bpi[k] = π(k·segw − 1), a boundary array derived
+// (for now) from the resident oracle; the streaming build replaces that source
+// when the oracle is capped at y in the final increment.
+
+/// Per-thread window over one sweep segment. count(vv) is exact for vv in
+/// [lo, hi) with vv ≤ √x.
+const PiWin = struct {
+    bits: []u64, // segw/240 words, coprime-30, 1 = prime
+    pref: []u32, // pref[w] = # set bits in words [0, w)
+    lo: u64, // segment base (240-aligned; segw multiple)
+    base: u64, // π(lo − 1), full (includes 2, 3, 5 once lo > 0)
+
+    fn count(self: *const PiWin, vv: u64) u64 {
+        var c: u64 = self.base;
+        if (self.lo == 0) { // 2, 3, 5 have no wheel bit; oracle count() fixes up too
+            if (vv >= 2) c += 1;
+            if (vv >= 3) c += 1;
+            if (vv >= 5) c += 1;
+        }
+        const k = PiOracle.kpos(vv) - @as(usize, @intCast(self.lo / 30)) * 8;
+        const w = k >> 6;
+        c += self.pref[w];
+        const r: u32 = @intCast(k & 63);
+        if (r != 0) c += @popCount(self.bits[w] & ((@as(u64, 1) << @intCast(r)) - 1));
+        return c;
+    }
+};
+
+/// Build the window for segment [lo, hi): MASK30 fill (phase from the GLOBAL word
+/// index), cursor-driven strikes for base primes 7.. (indices 3..nwb — the cursors
+/// live in the caller and carry across consecutive segments, so the per-window
+/// fast-forward cost is paid once per block, not once per segment), then the
+/// prefix. Bits beyond min(hi, √x) may be wrong (their striking primes exceed the
+/// base set) — harmless, queries never reach them.
+fn pwinBuild(comptime P: type, win: *PiWin, primes: []const P, nwb: usize, pw_next: []u64, pw_wpos: []u8, lo: u64, hi: u64) void {
+    const nwin = win.bits.len;
+    const gw0: usize = @intCast(lo / 240);
+    // Wheel-COMPRESSED bits: every position is a coprime-30 integer, so the blank
+    // slate is all-ones (NOT the counter's dense MASK30 pattern — that mistake
+    // undercounts π everywhere and the suite differential exists to catch it).
+    @memset(win.bits, ~@as(u64, 0));
+    if (lo == 0) win.bits[0] &= ~@as(u64, 1); // 1 is not prime
+    win.lo = lo;
+
+    for (3..nwb) |bi| {
+        const p: u64 = @intCast(primes[bi]);
+        var j: u64 = pw_next[bi];
+        var wp: u8 = pw_wpos[bi];
+        while (j < hi) {
+            const k = PiOracle.kidx(j) - gw0 * 64;
+            win.bits[k >> 6] &= ~(@as(u64, 1) << @intCast(k & 63));
+            j += p * W30GAP[wp];
+            wp = (wp + 1) & 7;
+        }
+        pw_next[bi] = j;
+        pw_wpos[bi] = wp;
+    }
+
+    var acc: u32 = 0;
+    for (0..nwin) |w| {
+        win.pref[w] = acc;
+        acc += @popCount(win.bits[w]);
+    }
+    win.pref[nwin] = acc;
+}
+
+/// Fast-forward the window strike cursors to block_lo — the window twin of the
+/// fold's next[]/wpos[] init.
+fn pwinInitCursors(comptime P: type, primes: []const P, nwb: usize, pw_next: []u64, pw_wpos: []u8, block_lo: u64) void {
+    for (3..nwb) |bi| {
+        const p: u64 = @intCast(primes[bi]);
+        var m0: u64 = if (block_lo == 0) p else @max(p, (block_lo + p - 1) / p);
+        while (!COP30[@intCast(m0 % 30)]) m0 += 1;
+        pw_next[bi] = p * m0;
+        pw_wpos[bi] = W30IDX[@intCast(m0 % 30)];
+    }
+}
+
 const Terms = struct {
     A: i128,
     sig4: i128,
@@ -949,10 +1038,11 @@ fn computeB(comptime INST: bool, gpa: std.mem.Allocator, s: anytype, x: u64, y: 
 /// (D, is_d=true — the leaf needs a cross-block φ correction). π(v) comes from the
 /// oracle; the old y-sized pi_tab direct-index table was measured at 0.7% (inside
 /// noise) against 196 MB at 10^20, so it is gone.
-inline fn evalPhi(comptime INST: bool, st: *Stats, vv: u64, b: usize, pp: u64, pio: *const PiOracle, pr_bi: i64, ct: *const Ctr, l: u64, sx: u64) struct { phi: i64, is_d: bool } {
+inline fn evalPhi(comptime INST: bool, st: *Stats, vv: u64, b: usize, pp: u64, pw: *const PiWin, pr_bi: i64, ct: *const Ctr, l: u64, sx: u64) struct { phi: i64, is_d: bool } {
     var piv: i64 = -1;
     if (pp * pp > vv) {
-        if (vv <= sx) piv = @intCast(pio.count(vv));
+        // vv ∈ [lo, hi) by the walk guards, and vv ≤ √x ⇒ the window was built
+        if (vv <= sx) piv = @intCast(pw.count(vv));
     }
     if (piv >= 0) {
         if (INST) st.n_easy += 1;
@@ -1017,9 +1107,13 @@ const Scratch = struct {
     seg_cnt: []i64,
     phi_run: []i64,
     buck: []Bucket, // ring, indexed by (segment index & ring_mask)
-    fn init(gpa: std.mem.Allocator, nax: usize, naz: usize, segw: usize, nring: usize) !Scratch {
+    pwin: PiWin, // per-thread π window over the current sweep segment
+    pw_next: []u64, // window strike cursors (base primes ≤ x^(1/4))
+    pw_wpos: []u8,
+    fn init(gpa: std.mem.Allocator, nax: usize, naz: usize, segw: usize, nring: usize, nwb: usize) !Scratch {
         const buck = try gpa.alloc(Bucket, nring);
         @memset(buck, Bucket{});
+        const nwin = segw / 240;
         return .{
             .ctr = try Ctr.init(gpa, segw),
             .cur = try gpa.alloc(u64, nax),
@@ -1028,6 +1122,9 @@ const Scratch = struct {
             .seg_cnt = try gpa.alloc(i64, nax),
             .phi_run = try gpa.alloc(i64, nax),
             .buck = buck,
+            .pwin = .{ .bits = try gpa.alloc(u64, nwin), .pref = try gpa.alloc(u32, nwin + 1), .lo = 0, .base = 0 },
+            .pw_next = try gpa.alloc(u64, nwb),
+            .pw_wpos = try gpa.alloc(u8, nwb),
         };
     }
     fn deinit(self: *Scratch, gpa: std.mem.Allocator) void {
@@ -1039,6 +1136,10 @@ const Scratch = struct {
         gpa.free(self.phi_run);
         for (self.buck) |*b| if (b.items.len > 0) gpa.free(b.items);
         gpa.free(self.buck);
+        gpa.free(self.pwin.bits);
+        gpa.free(self.pwin.pref);
+        gpa.free(self.pw_next);
+        gpa.free(self.pw_wpos);
     }
 };
 
@@ -1068,6 +1169,8 @@ fn BlkCtx(comptime X: type, comptime P: type) type {
         blk_bcount: []u64,
         blk_omega: []i128,
         blk_b: []i128,
+        bpi: []u64, // π(k·segw − 1) at segment boundaries below √x (bpi[0] = 0)
+        nwb: usize, // # base primes for window strikes (π(x^(1/4)); indices 3.. used)
         nbuck: usize, // first prime index handled by the bucket ring (naz ⇒ disabled)
         nring: usize, // ring slots, power of two ≥ max segments a prime can skip
         ring_mask: usize,
@@ -1191,6 +1294,10 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, gpa: std
         next[bi] = p * m0;
         wpos[bi] = W30IDX[@intCast(m0 % 30)];
     }
+    // Window strike cursors for the C-leaf π windows (only blocks touching [0, √x]
+    // ever build one — all C-leaves have v ≤ √x).
+    if (block_lo <= sqx) pwinInitCursors(P, primes, ctx.nwb, sc.pw_next, sc.pw_wpos, block_lo);
+
     // Seed the bucket ring: each sparse prime is filed under the segment its first
     // multiple lands in, so a segment later touches only the primes that hit it.
     const nbuck = ctx.nbuck;
@@ -1228,6 +1335,10 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, gpa: std
         const len: usize = @intCast(hi - lo);
         sc.ctr.reset(len);
         if (INST) st.n_seg += 1;
+        if (lo <= sqx) { // π window for this segment's C-leaves
+            sc.pwin.base = ctx.bpi[@intCast(lo / segw)];
+            pwinBuild(P, &sc.pwin, primes, ctx.nwb, sc.pw_next, sc.pw_wpos, lo, hi);
+        }
         for (0..nfold_c) |bi| {
             const p: u64 = @intCast(primes[bi]);
             {
@@ -1253,7 +1364,7 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, gpa: std
                                 if (INST) st.n_small += 1;
                                 omega += @as(i128, sign) * @as(i128, phiSmall(v, bi));
                             } else {
-                                const r = evalPhi(INST, st, v, bi, p, ctx.pio, phi_run[bi], &sc.ctr, lo, sqx);
+                                const r = evalPhi(INST, st, v, bi, p, &sc.pwin, phi_run[bi], &sc.ctr, lo, sqx);
                                 omega += @as(i128, sign) * @as(i128, r.phi);
                                 if (r.is_d) omega_mu[bi] += sign;
                             }
@@ -1270,7 +1381,7 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, gpa: std
                         const v: u64 = xdiv(X, x, p * q);
                         if (v >= hi) break;
                         if (v >= lo) {
-                            const r = evalPhi(INST, st, v, bi, p, ctx.pio, phi_run[bi], &sc.ctr, lo, sqx);
+                            const r = evalPhi(INST, st, v, bi, p, &sc.pwin, phi_run[bi], &sc.ctr, lo, sqx);
                             omega += @as(i128, r.phi);
                             if (r.is_d) omega_mu[bi] += 1;
                         }
@@ -1382,6 +1493,15 @@ fn initBlkCtx(comptime X: type, comptime P: type, gpa: std.mem.Allocator, s: any
         while (@as(u64, nring) < span) nring *= 2;
     }
     const total = z + 1;
+    // Window support: base primes for the strikes (p ≤ x^(1/4)) and π at segment
+    // boundaries below √x. bpi is derived from the resident oracle for now; the
+    // streaming pass replaces this source when the oracle is capped at y.
+    const nwb: usize = @max(3, @as(usize, @intCast(s.pio.count(isqrt(sqx)))));
+    const nbpi = @as(usize, @intCast(sqx / segw)) + 2;
+    const bpi = try gpa.alloc(u64, nbpi);
+    bpi[0] = 0;
+    for (1..nbpi) |k| bpi[k] = s.pio.count(@as(u64, k) * segw - 1);
+
     const tm = try buildSmallTemplates(gpa, primes);
     return .{
         .leaf = s.leaf,
@@ -1407,6 +1527,8 @@ fn initBlkCtx(comptime X: type, comptime P: type, gpa: std.mem.Allocator, s: any
         .blk_bcount = try gpa.alloc(u64, nb),
         .blk_omega = try gpa.alloc(i128, nb),
         .blk_b = try gpa.alloc(i128, nb),
+        .bpi = bpi,
+        .nwb = nwb,
         .nbuck = nbuck,
         .nring = nring,
         .ring_mask = nring - 1,
@@ -1425,6 +1547,7 @@ fn freeBlkCtx(comptime X: type, comptime P: type, gpa: std.mem.Allocator, ctx: *
     gpa.free(ctx.blk_b);
     gpa.free(ctx.small_tmpl);
     gpa.free(ctx.small_off);
+    gpa.free(ctx.bpi);
 }
 
 fn omegaCounter(comptime INST: bool, comptime X: type, gpa: std.mem.Allocator, s: anytype, x: X, y: u64, z: u64, xstar: u64) !OmegaB {
@@ -1436,7 +1559,7 @@ fn omegaBlocked(comptime INST: bool, comptime X: type, gpa: std.mem.Allocator, s
     const P = std.meta.Child(@TypeOf(s.primes));
     var ctx = (try initBlkCtx(X, P, gpa, s, x, y, z, xstar, nb)) orelse return .{ .omega = 0, .b = 0 };
     defer freeBlkCtx(X, P, gpa, &ctx);
-    var sc = try Scratch.init(gpa, ctx.nax, ctx.naz, ctx.segw, ctx.nring);
+    var sc = try Scratch.init(gpa, ctx.nax, ctx.naz, ctx.segw, ctx.nring, ctx.nwb);
     defer sc.deinit(gpa);
     var st = Stats{};
     for (0..nb) |t| try runOneBlock(INST, X, P, gpa, &ctx, &sc, &st, t);
@@ -1458,7 +1581,7 @@ fn omegaBlockedPar(comptime INST: bool, comptime X: type, gpa: std.mem.Allocator
     var ninit: usize = 0;
     defer for (0..ninit) |k| scratches[k].deinit(gpa);
     for (0..nthreads) |i| {
-        scratches[i] = try Scratch.init(gpa, ctx.nax, ctx.naz, ctx.segw, ctx.nring);
+        scratches[i] = try Scratch.init(gpa, ctx.nax, ctx.naz, ctx.segw, ctx.nring, ctx.nwb);
         ninit = i + 1;
     }
     const stats = try gpa.alloc(Stats, nthreads);
@@ -1801,6 +1924,41 @@ pub fn main() !void {
             if (bad == 0) "" else " (see first_bad)",
         });
         if (bad != 0) std.debug.print("  {d} mismatches, first at x={d}\n", .{ bad, first_bad });
+    }
+
+    // π window differential: pwinBuild/count vs the resident oracle at EVERY v over
+    // segw-aligned windows — the same machinery the ω sweep uses for C-leaves.
+    {
+        const SEGW: u64 = 273 * 960;
+        const N: u64 = SEGW * 20; // 5.24M
+        const ref = try buildPiOracle(gpa, N);
+        defer gpa.free(ref.bits);
+        defer gpa.free(ref.pref);
+        const base = try sievePrimes(u32, gpa, isqrt(N));
+        defer gpa.free(base);
+        const nwin: usize = @intCast(SEGW / 240);
+        const wb = try gpa.alloc(u64, nwin);
+        defer gpa.free(wb);
+        const wpref = try gpa.alloc(u32, nwin + 1);
+        defer gpa.free(wpref);
+        const pn = try gpa.alloc(u64, base.len);
+        defer gpa.free(pn);
+        const pwv = try gpa.alloc(u8, base.len);
+        defer gpa.free(pwv);
+        var win = PiWin{ .bits = wb, .pref = wpref, .lo = 0, .base = 0 };
+        pwinInitCursors(u32, base, base.len, pn, pwv, 0);
+        var bad: usize = 0;
+        var lo: u64 = 0;
+        while (lo < N) : (lo += SEGW) {
+            const hi = @min(lo + SEGW, N);
+            win.base = if (lo == 0) 0 else ref.count(lo - 1);
+            pwinBuild(u32, &win, base, base.len, pn, pwv, lo, hi);
+            var vv: u64 = lo;
+            while (vv < hi) : (vv += 1) {
+                if (win.count(vv) != ref.count(vv)) bad += 1;
+            }
+        }
+        std.debug.print("π window check (v < {d}, {d} windows): {s} ({d} mismatches)\n\n", .{ N, N / SEGW, if (bad == 0) "match" else "MISMATCH", bad });
     }
 
     // ω differential check: naive recurrence vs O(1)-kill counter, must match exactly.
