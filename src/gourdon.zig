@@ -1512,6 +1512,12 @@ const ALPHA_B: f64 = 0.5980;
 const ALPHA_LO: f64 = 4.0;
 const ALPHA_HI: f64 = 24.0;
 
+/// The built-in default α(x) at u128 width, for callers (the CLI's calibrator)
+/// that want the fit's prediction without duplicating the constants.
+pub fn defaultAlpha(x: u128) f64 {
+    return chooseAlpha(u128, x);
+}
+
 fn chooseAlpha(comptime X: type, x: X) f64 {
     if (x < 1000) return ALPHA_LO;
     const a = ALPHA_A + ALPHA_B * @log(@as(f64, @floatFromInt(x)));
