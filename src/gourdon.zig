@@ -813,6 +813,73 @@ fn pwinInitCursors(comptime P: type, primes: []const P, nwb: usize, pw_next: []u
     }
 }
 
+/// Descending chunked primality window for B's prevPrime walk over (y, √x].
+/// Unlike PiWin (which rides the ascending sweep and carries strike cursors),
+/// refills jump DOWNWARD, so each fill computes fresh per-prime offsets — paid
+/// once per chunk, and B's cursor is monotone within a block so each block fills
+/// its own p-subrange exactly once. lo > hi marks "invalid" (set at block start).
+const BWin = struct {
+    bits: []u64,
+    lo: u64 = 1,
+    hi: u64 = 0,
+};
+
+fn bwinFill(comptime P: type, bits: []u64, primes: []const P, nwb: usize, lo: u64, hi: u64) void {
+    @memset(bits, ~@as(u64, 0));
+    if (lo == 0) bits[0] &= ~@as(u64, 1); // 1 is not prime
+    const gw0: usize = @intCast(lo / 240);
+    for (3..nwb) |bi| {
+        const p: u64 = @intCast(primes[bi]);
+        if (p * p >= hi) break;
+        var m0: u64 = @max(p, (lo + p - 1) / p);
+        while (!COP30[@intCast(m0 % 30)]) m0 += 1;
+        var wp: u8 = W30IDX[@intCast(m0 % 30)];
+        var j: u64 = p * m0;
+        while (j < hi) {
+            const k = PiOracle.kidx(j) - gw0 * 64;
+            bits[k >> 6] &= ~(@as(u64, 1) << @intCast(k & 63));
+            j += p * W30GAP[wp];
+            wp = (wp + 1) & 7;
+        }
+    }
+}
+
+/// Largest prime ≤ v0, walking the window and refilling downward as needed.
+/// Exact while every composite ≤ v0 has a factor ≤ primes[nwb-1] (v0 ≤ x^(1/2)
+/// with nwb = π(x^(1/4))). Once the window floor reaches `floor_hint` the search
+/// stops (the caller's `pB > y` guard makes anything lower irrelevant) and 0 is
+/// returned.
+fn bwinPrev(comptime P: type, bw: *BWin, primes: []const P, nwb: usize, v0: u64, floor_hint: u64) u64 {
+    if (v0 < 7) return if (v0 >= 5) 5 else if (v0 >= 3) 3 else if (v0 >= 2) 2 else 0;
+    const span: u64 = @as(u64, @intCast(bw.bits.len)) * 240;
+    var v = v0;
+    while (true) {
+        if (v < bw.lo or v >= bw.hi) {
+            const whi = (v / 240) * 240 + 240;
+            const wlo = whi -| span;
+            bwinFill(P, bw.bits, primes, nwb, wlo, whi);
+            bw.lo = wlo;
+            bw.hi = whi;
+        }
+        const gk0 = @as(usize, @intCast(bw.lo / 30)) * 8; // global bit index of window start
+        const k = PiOracle.kpos(v) - gk0; // one past v's bit, window-local
+        if (k > 0) {
+            var w = (k - 1) >> 6;
+            const r: u32 = @intCast(k & 63);
+            var m = bw.bits[w];
+            if (r != 0) m &= (@as(u64, 1) << @intCast(r)) - 1;
+            while (true) {
+                if (m != 0) return PiOracle.val((w << 6) + 63 - @clz(m) + gk0);
+                if (w == 0) break;
+                w -= 1;
+                m = bw.bits[w];
+            }
+        }
+        if (bw.lo <= floor_hint) return 0; // nothing relevant remains below
+        v = bw.lo - 1; // contiguous descent into the next lower chunk
+    }
+}
+
 const Terms = struct {
     A: i128,
     sig4: i128,
@@ -1110,6 +1177,7 @@ const Scratch = struct {
     pwin: PiWin, // per-thread π window over the current sweep segment
     pw_next: []u64, // window strike cursors (base primes ≤ x^(1/4))
     pw_wpos: []u8,
+    bwin: BWin, // descending prime window for B's cursor
     fn init(gpa: std.mem.Allocator, nax: usize, naz: usize, segw: usize, nring: usize, nwb: usize) !Scratch {
         const buck = try gpa.alloc(Bucket, nring);
         @memset(buck, Bucket{});
@@ -1125,6 +1193,7 @@ const Scratch = struct {
             .pwin = .{ .bits = try gpa.alloc(u64, nwin), .pref = try gpa.alloc(u32, nwin + 1), .lo = 0, .base = 0 },
             .pw_next = try gpa.alloc(u64, nwb),
             .pw_wpos = try gpa.alloc(u8, nwb),
+            .bwin = .{ .bits = try gpa.alloc(u64, nwin) },
         };
     }
     fn deinit(self: *Scratch, gpa: std.mem.Allocator) void {
@@ -1140,6 +1209,7 @@ const Scratch = struct {
         gpa.free(self.pwin.pref);
         gpa.free(self.pw_next);
         gpa.free(self.pw_wpos);
+        gpa.free(self.bwin.bits);
     }
 };
 
@@ -1297,6 +1367,8 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, gpa: std
     // Window strike cursors for the C-leaf π windows (only blocks touching [0, √x]
     // ever build one — all C-leaves have v ≤ √x).
     if (block_lo <= sqx) pwinInitCursors(P, primes, ctx.nwb, sc.pw_next, sc.pw_wpos, block_lo);
+    sc.bwin.lo = 1; // invalidate: this block's cursor starts a fresh descent
+    sc.bwin.hi = 0;
 
     // Seed the bucket ring: each sparse prime is filed under the segment its first
     // multiple lands in, so a segment later touches only the primes that hit it.
@@ -1316,7 +1388,7 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, gpa: std
     // B's descending cursor over the primes of (y, √x] — the only loop that needs
     // prime VALUES above the explicit list, so it walks the oracle bitset instead.
     var pB: u64 = if (block_lo == 0) sqx else @min(sqx, xdiv(X, x, block_lo));
-    pB = ctx.pio.prevPrime(pB);
+    pB = bwinPrev(P, &sc.bwin, primes, ctx.nwb, pB, y);
 
     const omega_mu = ctx.blk_mu[t * nax ..][0..nax];
     @memset(omega_mu, 0);
@@ -1430,7 +1502,7 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, gpa: std
                 b_sum += @as(i128, phi_run_full + sc.ctr.prefix(@intCast(v - lo)) + naz_i - 1);
                 b_count += 1;
             }
-            pB = ctx.pio.prevPrime(pB - 1);
+            pB = bwinPrev(P, &sc.bwin, primes, ctx.nwb, pB - 1, y);
         }
         phi_run_full += sc.ctr.total;
         for (3..nax) |bi| phi_run[bi] += seg_cnt[bi];
@@ -1958,7 +2030,23 @@ pub fn main() !void {
                 if (win.count(vv) != ref.count(vv)) bad += 1;
             }
         }
-        std.debug.print("π window check (v < {d}, {d} windows): {s} ({d} mismatches)\n\n", .{ N, N / SEGW, if (bad == 0) "match" else "MISMATCH", bad });
+        std.debug.print("π window check (v < {d}, {d} windows): {s} ({d} mismatches)\n", .{ N, N / SEGW, if (bad == 0) "match" else "MISMATCH", bad });
+
+        // B-window differential: bwinPrev's full descending walk (refilling chunk
+        // by chunk) must reproduce the oracle's prevPrime at every step.
+        var bw = BWin{ .bits = wb };
+        var bbad: usize = 0;
+        var nsteps: usize = 0;
+        var v2: u64 = N;
+        while (v2 >= 2) {
+            const got = bwinPrev(u32, &bw, base, base.len, v2, 0);
+            const want = ref.prevPrime(v2);
+            if (got != want) bbad += 1;
+            nsteps += 1;
+            if (want < 2) break;
+            v2 = want - 1;
+        }
+        std.debug.print("B window check ({d} descending steps): {s} ({d} mismatches)\n\n", .{ nsteps, if (bbad == 0) "match" else "MISMATCH", bbad });
     }
 
     // ω differential check: naive recurrence vs O(1)-kill counter, must match exactly.
