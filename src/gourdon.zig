@@ -585,6 +585,21 @@ const PiOracle = struct {
 
 const ORACLE_SEGW: usize = 1 << 15; // 32768 words = 256 KB of bits = 7.86M integers
 
+/// The ω sweep's segment width (bits = 32 KB = L1d) — also the granularity of the
+/// bpi boundary array, so window bases index it directly.
+const SWEEP_SEGW: usize = 273 * 960;
+
+/// First index with list[i] ≥ val (the prime list is ascending).
+fn lowerBound(comptime P: type, list: []const P, val: u64) usize {
+    var lo: usize = 0;
+    var hi: usize = list.len;
+    while (lo < hi) {
+        const mid = (lo + hi) / 2;
+        if (@as(u64, @intCast(list[mid])) < val) lo = mid + 1 else hi = mid;
+    }
+    return lo;
+}
+
 /// Strike one oracle segment (words [w0, w0+ORACLE_SEGW)). A word covers exactly
 /// 240 integers, so segments touch disjoint words — the parallel build needs no
 /// synchronisation beyond handing out segment indices.
@@ -952,17 +967,24 @@ fn computeTerms(comptime X: type, s: anytype, x: X, y: u64, sqx: u64, x13: u64, 
 
 const Partial = struct { A: i128 = 0, sig4: i128 = 0, sig5: i128 = 0, sig6: i128 = 0 };
 
-/// Parallel A/Σ (Model-A phase 1): embarrassingly parallel over the prime range
-/// (x*, x^1/3]. Workers pull index chunks from an atomic dispenser, accumulate a
-/// thread-local Partial (shared read-only prime list, no cross-thread state), and the
-/// partials are summed. Scalars a,b,c,d,P are serial (5 binary searches).
-fn computeTermsPar(comptime X: type, gpa: std.mem.Allocator, s: anytype, x: X, y: u64, sqx: u64, x13: u64, sqz: u64, xstar: u64, nthreads: usize, pins: ?[]const u32) !Terms {
+/// Parallel A/Σ (Model-A phase 1), in two sub-phases per worker:
+///   1. p-chunks from an atomic dispenser: Σ₄/Σ₅/Σ₆ (every query ≤ y, since
+///      p > x* ≥ x/y² bounds them — proven per-term) and A's v < y pairs (χ = 2).
+///   2. v-windows over [y, √x] from a second dispenser: A's v ≥ y pairs (χ = 1),
+///      π(v) answered from a freshly sieved wheel window + per-word prefix, based
+///      at bpi[window/segw]. Threads own disjoint windows; for each window the
+///      (p, q) pairs mapping into it are enumerated off the prime list (q < y
+///      always, so the list suffices).
+/// The resident oracle serves only v ≤ y queries and the scalars — everything the
+/// y-capped oracle of the final increment can still answer. π(√x) arrives as a
+/// parameter (bpi's builder knows it).
+fn computeTermsPar(comptime X: type, gpa: std.mem.Allocator, s: anytype, x: X, y: u64, sqx: u64, x13: u64, sqz: u64, xstar: u64, nthreads: usize, pins: ?[]const u32, bpi: []const u64, pi_sqx: i128) !Terms {
     const pio = &s.pio;
     const a: i128 = @intCast(pio.count(y));
     const b: i128 = @intCast(pio.count(x13));
     const c: i128 = @intCast(pio.count(sqz));
     const d: i128 = @intCast(pio.count(xstar));
-    const Pi: i128 = @intCast(pio.count(sqx));
+    const Pi: i128 = pi_sqx;
 
     const i_lo: usize = @intCast(pio.count(xstar)); // first prime index with p > x*
     const i_hi: usize = @intCast(pio.count(x13)); // one past last prime ≤ x^1/3
@@ -970,40 +992,53 @@ fn computeTermsPar(comptime X: type, gpa: std.mem.Allocator, s: anytype, x: X, y
     const nchunks = @max(@as(usize, 1), @min(n_primes, nthreads * 16)); // over-partition: small p ⇒ more work
     const csize = (n_primes + nchunks - 1) / nchunks;
 
+    const AWIN: u64 = 16 * SWEEP_SEGW; // ~4.19M ints: bits 140 KB + prefix 70 KB, L2-resident
+
     const Ctx = struct {
         disp: std.atomic.Value(usize),
+        disp2: std.atomic.Value(usize),
         s: @TypeOf(s),
         x: X,
         y: u64,
         x13: u64,
         sqz: u64,
         xstar: u64,
+        sqx: u64,
         i_lo: usize,
         i_hi: usize,
         csize: usize,
         nchunks: usize,
+        w0: u64,
+        nwb: usize,
+        bpi: []const u64,
     };
     var ctx = Ctx{
         .disp = std.atomic.Value(usize).init(0),
+        .disp2 = std.atomic.Value(usize).init(0),
         .s = s,
         .x = x,
         .y = y,
         .x13 = x13,
         .sqz = sqz,
         .xstar = xstar,
+        .sqx = sqx,
         .i_lo = i_lo,
         .i_hi = i_hi,
         .csize = csize,
         .nchunks = nchunks,
+        .w0 = (y / AWIN) * AWIN,
+        .nwb = @max(3, @as(usize, @intCast(pio.count(isqrt(sqx))))),
+        .bpi = bpi,
     };
     const partials = try gpa.alloc(Partial, nthreads);
     defer gpa.free(partials);
     @memset(partials, Partial{});
 
     const Worker = struct {
-        fn run(cx: *Ctx, out: *Partial, cpu: ?u32) void {
+        fn run(cx: *Ctx, out: *Partial, wbits: []u64, wpref: []u32, cpu: ?u32) void {
             if (cpu) |cp| pinToCpu(cp);
             const prr = cx.s.primes;
+            const PP = std.meta.Child(@TypeOf(prr));
             const po = &cx.s.pio;
             var A: i128 = 0;
             var s4: i128 = 0;
@@ -1018,15 +1053,17 @@ fn computeTermsPar(comptime X: type, gpa: std.mem.Allocator, s: anytype, x: X, y
                 while (idx < hi) : (idx += 1) {
                     const p: u64 = @intCast(prr[idx]);
                     if (p > cx.xstar and p <= cx.x13) {
-                        // A: monotone π-cursor over q ∈ (p, √(x/p)]
+                        // A, v < y pairs only (χ = 2): q > x/(p·y) ⟺ v < y, up to
+                        // division slop rechecked per q. v ≥ y pairs → window phase.
                         const qhi = isqrtG(X, cx.x / @as(X, p));
-                        var qi = idx + 1;
+                        var qi = lowerBound(PP, prr, mBound(X, cx.x, p, cx.y) + 1);
+                        if (qi <= idx) qi = idx + 1;
                         while (qi < prr.len) : (qi += 1) {
                             const qq: u64 = @intCast(prr[qi]);
                             if (qq > qhi) break;
                             const v = xdiv(X, cx.x, p * qq);
-                            const chi: i128 = if (v < cx.y) 2 else 1;
-                            A += chi * @as(i128, @intCast(po.count(v)));
+                            if (v >= cx.y) continue;
+                            A += 2 * @as(i128, @intCast(po.count(v)));
                         }
                         const t: i128 = @intCast(po.count(isqrt(xdiv(X, cx.x, p)))); // Σ₆
                         s6 += t * t;
@@ -1035,19 +1072,58 @@ fn computeTermsPar(comptime X: type, gpa: std.mem.Allocator, s: anytype, x: X, y
                     if (p > cx.sqz and p <= cx.x13) s5 += @intCast(po.count(xdiv(X, cx.x, p * p))); // Σ₅
                 }
             }
+            // Phase 2 — A's v ∈ [y, √x] pairs (χ = 1) over disjoint v-windows.
+            const awin: u64 = @intCast(wbits.len * 240);
+            while (true) {
+                const wi = cx.disp2.fetchAdd(1, .monotonic);
+                const wlo = cx.w0 + @as(u64, wi) * awin;
+                if (wlo > cx.sqx) break;
+                const whi = @min(wlo + awin, cx.sqx + 1);
+                bwinFill(PP, wbits, prr, cx.nwb, wlo, whi);
+                var acc: u32 = 0;
+                for (0..wbits.len) |w2| {
+                    wpref[w2] = acc;
+                    acc += @popCount(wbits[w2]);
+                }
+                wpref[wbits.len] = acc;
+                const win = PiWin{ .bits = wbits, .pref = wpref, .lo = wlo, .base = cx.bpi[@intCast(wlo / SWEEP_SEGW)] };
+                const vmin = @max(wlo, cx.y);
+                var pidx = cx.i_lo;
+                while (pidx < cx.i_hi) : (pidx += 1) {
+                    const p: u64 = @intCast(prr[pidx]);
+                    // beyond this p even q = p + 1 lands below the window
+                    if (@as(u128, p) * p * vmin > @as(u128, cx.x)) break;
+                    const qmax = @min(isqrtG(X, cx.x / @as(X, p)), mBound(X, cx.x, p, vmin));
+                    var qi = lowerBound(PP, prr, mBound(X, cx.x, p, whi) + 1);
+                    if (qi <= pidx) qi = pidx + 1;
+                    while (qi < prr.len) : (qi += 1) {
+                        const qq: u64 = @intCast(prr[qi]);
+                        if (qq > qmax) break;
+                        const v = xdiv(X, cx.x, p * qq);
+                        if (v < vmin or v >= whi) continue;
+                        A += @intCast(win.count(v));
+                    }
+                }
+            }
             out.* = .{ .A = A, .sig4 = s4, .sig5 = s5, .sig6 = s6 };
         }
     };
+
+    const nww = (16 * SWEEP_SEGW) / 240;
+    const wbits_flat = try gpa.alloc(u64, nthreads * nww);
+    defer gpa.free(wbits_flat);
+    const wpref_flat = try gpa.alloc(u32, nthreads * (nww + 1));
+    defer gpa.free(wpref_flat);
 
     const threads = try gpa.alloc(std.Thread, nthreads);
     defer gpa.free(threads);
     var spawned: usize = 0;
     for (1..nthreads) |i| {
         const cpu: ?u32 = if (pins) |pp| pp[i] else null;
-        threads[i] = std.Thread.spawn(.{}, Worker.run, .{ &ctx, &partials[i], cpu }) catch break;
+        threads[i] = std.Thread.spawn(.{}, Worker.run, .{ &ctx, &partials[i], wbits_flat[i * nww ..][0..nww], wpref_flat[i * (nww + 1) ..][0 .. nww + 1], cpu }) catch break;
         spawned = i;
     }
-    Worker.run(&ctx, &partials[0], if (pins) |pp| pp[0] else null);
+    Worker.run(&ctx, &partials[0], wbits_flat[0..nww], wpref_flat[0 .. nww + 1], if (pins) |pp| pp[0] else null);
     var j: usize = 1;
     while (j <= spawned) : (j += 1) threads[j].join();
 
@@ -1545,7 +1621,7 @@ fn initBlkCtx(comptime X: type, comptime P: type, gpa: std.mem.Allocator, s: any
     const naz: usize = @intCast(s.pio.count(sqz));
     if (naz == 0) return null;
     const nax: usize = @intCast(s.pio.count(xstar));
-    const segw: usize = 273 * 960;
+    const segw: usize = SWEEP_SEGW;
 
     // Bucket ring: primes sparse enough to miss most segments. A prime contributes
     // segw·(8/30)/p strikes per segment, so bucketing pays once p > segw·8/30. Only
@@ -1900,11 +1976,18 @@ pub fn piGourdonV(comptime X: type, gpa: std.mem.Allocator, x: X, cfg: Config) !
     }.f;
     lap(verbose, &tp, "sieve");
 
-    // A/Σ via binary-search π (all points ≤ √x). Phase 1 (parallel if nthreads>1).
-    const t = if (nthreads > 1)
-        try computeTermsPar(X, gpa, &s, x, y, sqx, x13, sqz, xstar, nthreads, pins)
-    else
-        computeTerms(X, &s, x, y, sqx, x13, sqz, xstar);
+    // π at segment boundaries below √x + π(√x), for A's window phase. Derived from
+    // the resident oracle for now; the final increment streams both.
+    const nbpi = @as(usize, @intCast(sqx / SWEEP_SEGW)) + 2;
+    const bpi = try gpa.alloc(u64, nbpi);
+    defer gpa.free(bpi);
+    bpi[0] = 0;
+    for (1..nbpi) |k| bpi[k] = s.pio.count(@as(u64, k) * SWEEP_SEGW - 1);
+    const pi_sqx: i128 = @intCast(s.pio.count(sqx));
+
+    // A/Σ phase 1 (nthreads = 1 runs the same code inline; computeTerms survives
+    // only as the suite's oracle-backed differential reference).
+    const t = try computeTermsPar(X, gpa, &s, x, y, sqx, x13, sqz, xstar, nthreads, pins, bpi, pi_sqx);
     lap(verbose, &tp, "A/Σ");
 
     // ω+B fused. Phase 2: block-and-scan (nb = nthreads·8 over-partition) if parallel.
@@ -2085,8 +2168,13 @@ pub fn main() !void {
             const t0 = common.nowNs();
             const ser = computeTerms(u64, &s, x, y, sqx, x13, sqz, xstar);
             const st = @as(f64, @floatFromInt(common.nowNs() - t0)) / 1e9;
+            const nbpi = @as(usize, @intCast(sqx / SWEEP_SEGW)) + 2;
+            const bpi = try gpa.alloc(u64, nbpi);
+            defer gpa.free(bpi);
+            bpi[0] = 0;
+            for (1..nbpi) |k| bpi[k] = s.pio.count(@as(u64, k) * SWEEP_SEGW - 1);
             const t1 = common.nowNs();
-            const par = try computeTermsPar(u64, gpa, &s, x, y, sqx, x13, sqz, xstar, 4, &pins);
+            const par = try computeTermsPar(u64, gpa, &s, x, y, sqx, x13, sqz, xstar, 4, &pins, bpi, @intCast(s.pio.count(sqx)));
             const pt = @as(f64, @floatFromInt(common.nowNs() - t1)) / 1e9;
             const ok = ser.A == par.A and ser.sig4 == par.sig4 and ser.sig5 == par.sig5 and ser.sig6 == par.sig6;
             std.debug.print("  x=10^{d}: {s}  serial {d:.4}s  4-thread {d:.4}s  ({d:.2}x)\n", .{ std.math.log10_int(x), if (ok) "match" else "MISMATCH", st, pt, st / pt });
