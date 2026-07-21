@@ -206,8 +206,8 @@ single-threaded and ~0.7% in the six-thread ladder.
 - **Phase timing at scale** to settle whether the growth-ratio drift past 10²⁰ is
   the oracle leaving cache or the serial phases (Amdahl). `piGourdonV` already laps
   each phase behind a `verbose` flag.
-- **A real CLI** — one binary exposing every algorithm and tuning parameter as
-  options, in the style of primecount — plus a `build.zig`.
+- **A `build.zig`** with a bench step. The CLI (`src/pi.zig`) and the `Config`
+  refactor behind it are done — see Build & run.
 
 ## Empirical highlights
 
@@ -245,21 +245,16 @@ not against any table but against the prime number theorem itself.
 
 ## Build & run
 
-Zig **0.16**, hand-driven (no `build.zig` yet):
-
-```
-zig build-exe -O ReleaseFast -mcpu=native src/main.zig -femit-bin=./sieve && ./sieve
-zig build-exe -O ReleaseSafe ...        # correctness pass: asserts + bounds live
-```
-
-### The `pi` CLI
-
-One binary for every implementation, with the tuning knobs exposed rather than
-recompiled — in the spirit of primecount's CLI:
+Zig **0.16**, hand-driven (no `build.zig` yet). Start here:
 
 ```
 zig build-exe -O ReleaseFast -mcpu=native src/pi.zig -femit-bin=./pi
+```
 
+`pi` is one binary for every implementation, with the tuning knobs exposed as
+options rather than recompiled — in the spirit of primecount's CLI:
+
+```
 ./pi 1e20                     # fastest algorithm, defaults
 ./pi 1e20 -t 0 --pin          # one thread per physical core, pinned
 ./pi 1e18 -a lmo -t 6         # pick algorithm and thread count
@@ -267,14 +262,17 @@ zig build-exe -O ReleaseFast -mcpu=native src/pi.zig -femit-bin=./pi
 ./pi 1e16 --check             # verify against the known π(10ⁿ) table
 ```
 
-x accepts `1e20`, `10^20`, `1_000_000` or plain digits (`e` is scientific, `^` is
-exponentiation, and both are built by repeated multiplication so they stay exact at
-the top of the u128 range). `--check` exits non-zero on mismatch.
+`--help` lists the rest. x accepts `1e20`, `10^20`, `1_000_000` or plain digits
+(`e` is scientific, `^` is exponentiation; both are built by repeated
+multiplication, never via f64, so they stay exact at the top of the u128 range).
+Options that do not apply to the chosen algorithm say so rather than being silently
+dropped, and `--check` exits non-zero on mismatch, so it scripts.
 
 ### Experiment drivers
 
-`src/main.zig` is the current experiment driver, swapped per investigation. Standing
-drivers alongside it:
+Alongside the CLI, each investigation has a standing driver — built the same way
+(`zig build-exe -O ReleaseFast -mcpu=native src/<file> -femit-bin=./<name>`), and
+`-O ReleaseSafe` for a correctness pass with asserts and bounds live:
 
 | file | what it does |
 |---|---|
@@ -282,10 +280,10 @@ drivers alongside it:
 | `gsweep.zig` | π(10ⁿ) ladder, n = 13…20, parallel, checked against known values |
 | `gasweep.zig` | α sweep — times y = α·x^(1/3) over a grid of α and x |
 | `g2122.zig` | the 10²¹ / 10²² runs |
-| `pi.zig` | the CLI above |
+| `main.zig` | scratch driver, swapped per investigation (sieve benchmarks) |
 
-**The project is still in flux**, so the tooling (a proper `build.zig` + bench step,
-a single CLI entry point with tuning parameters exposed) is itself on the list.
+**The project is still in flux**, so the tooling — a proper `build.zig` with a bench
+step — is itself on the list.
 
 ## References
 
