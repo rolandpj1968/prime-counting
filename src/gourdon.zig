@@ -168,9 +168,9 @@ fn Sieve(comptime P: type) type {
         primes: []P, // ascending, ≤ plist_max (enumeration only)
         pio: PiOracle, // π(v) and descending prime walk over [0, √x]
 
-    fn init(gpa: std.mem.Allocator, sqx: u64, y: u64, plist_max: u64) !Self {
+    fn init(gpa: std.mem.Allocator, sqx: u64, y: u64, plist_max: u64, nthreads: usize, pins: ?[]const u32) !Self {
         const primes = try sievePrimes(P, gpa, plist_max);
-        const pio = try buildPiOracle(gpa, @max(sqx, plist_max));
+        const pio = try buildPiOraclePar(gpa, @max(sqx, plist_max), nthreads, pins);
         const Ny: usize = @intCast(y + 1);
 
         // Guard: saturation is exact iff no compared index reaches LEAF_SAT, i.e.
@@ -583,10 +583,44 @@ const PiOracle = struct {
     }
 };
 
+const ORACLE_SEGW: usize = 1 << 15; // 32768 words = 256 KB of bits = 7.86M integers
+
+/// Strike one oracle segment (words [w0, w0+ORACLE_SEGW)). A word covers exactly
+/// 240 integers, so segments touch disjoint words — the parallel build needs no
+/// synchronisation beyond handing out segment indices.
+fn oracleStrikeSeg(bits: []u64, base: []const u32, n: u64, nw: usize, w0: usize) void {
+    const w1 = @min(w0 + ORACLE_SEGW, nw);
+    const lo: u64 = @as(u64, w0) * 240;
+    const hi: u64 = @min(@as(u64, w1) * 240, n + 1);
+    for (base) |p32| {
+        const p: u64 = p32;
+        if (p < 7) continue;
+        if (p * p >= hi) break;
+        var m: u64 = @max(p, (lo + p - 1) / p);
+        while (!COP30[@intCast(m % 30)]) m += 1;
+        var wp: u8 = W30IDX[@intCast(m % 30)];
+        var v: u64 = p * m;
+        while (v < hi) {
+            const k = PiOracle.kidx(v);
+            bits[k >> 6] &= ~(@as(u64, 1) << @intCast(k & 63));
+            v += p * W30GAP[wp];
+            wp = (wp + 1) & 7;
+        }
+    }
+}
+
 /// Segmented wheel sieve into the oracle bitset. Marks only coprime-30 multiples
 /// (3.75× fewer stores than a byte sieve) and writes no prime list, so this both
 /// costs less time than sievePrimes(n) and leaves n/30 bytes behind instead of 8·π(n).
 fn buildPiOracle(gpa: std.mem.Allocator, n: u64) !PiOracle {
+    return buildPiOraclePar(gpa, n, 1, null);
+}
+
+/// Parallel oracle build: the strike phase fans segments out via an atomic
+/// dispenser (disjoint words, no locks), and the prefix pass becomes per-block
+/// popcounts in parallel followed by one serial exclusive scan. The build is the
+/// largest SERIAL phase at scale — Amdahl's first bite on a many-core box.
+fn buildPiOraclePar(gpa: std.mem.Allocator, n: u64, nthreads: usize, pins: ?[]const u32) !PiOracle {
     const nbits: usize = if (n < 1) 0 else PiOracle.kpos(n);
     const nw = (nbits + 63) / 64;
     const nwp = ((nw + PiOracle.BLKW - 1) / PiOracle.BLKW) * PiOracle.BLKW;
@@ -600,37 +634,93 @@ fn buildPiOracle(gpa: std.mem.Allocator, n: u64) !PiOracle {
     const base = try sievePrimes(u32, gpa, isqrt(n));
     defer gpa.free(base);
 
-    const SEGW: usize = 1 << 15; // 32768 words = 256 KB of bits = 7.86M integers
-    var w0: usize = 0;
-    while (w0 < nw) : (w0 += SEGW) {
-        const w1 = @min(w0 + SEGW, nw);
-        const lo: u64 = @as(u64, w0) * 240;
-        const hi: u64 = @min(@as(u64, w1) * 240, n + 1);
-        for (base) |p32| {
-            const p: u64 = p32;
-            if (p < 7) continue;
-            if (p * p >= hi) break;
-            var m: u64 = @max(p, (lo + p - 1) / p);
-            while (!COP30[@intCast(m % 30)]) m += 1;
-            var wp: u8 = W30IDX[@intCast(m % 30)];
-            var v: u64 = p * m;
-            while (v < hi) {
-                const k = PiOracle.kidx(v);
-                bits[k >> 6] &= ~(@as(u64, 1) << @intCast(k & 63));
-                v += p * W30GAP[wp];
-                wp = (wp + 1) & 7;
+    const nseg = (nw + ORACLE_SEGW - 1) / ORACLE_SEGW;
+    if (nthreads <= 1 or nseg < 2 * nthreads) {
+        var w0: usize = 0;
+        while (w0 < nw) : (w0 += ORACLE_SEGW) oracleStrikeSeg(bits, base, n, nw, w0);
+    } else {
+        const Ctx = struct {
+            disp: std.atomic.Value(usize),
+            bits: []u64,
+            base: []const u32,
+            n: u64,
+            nw: usize,
+            nseg: usize,
+        };
+        var ctx = Ctx{
+            .disp = std.atomic.Value(usize).init(0),
+            .bits = bits,
+            .base = base,
+            .n = n,
+            .nw = nw,
+            .nseg = nseg,
+        };
+        const Worker = struct {
+            fn run(cx: *Ctx, cpu: ?u32) void {
+                if (cpu) |c| pinToCpu(c);
+                while (true) {
+                    const t = cx.disp.fetchAdd(1, .monotonic);
+                    if (t >= cx.nseg) break;
+                    oracleStrikeSeg(cx.bits, cx.base, cx.n, cx.nw, t * ORACLE_SEGW);
+                }
             }
+        };
+        const threads = try gpa.alloc(std.Thread, nthreads);
+        defer gpa.free(threads);
+        var spawned: usize = 0;
+        for (1..nthreads) |i| {
+            const cpu: ?u32 = if (pins) |pp| pp[i] else null;
+            threads[i] = std.Thread.spawn(.{}, Worker.run, .{ &ctx, cpu }) catch break;
+            spawned = i;
         }
+        Worker.run(&ctx, if (pins) |pp| pp[0] else null);
+        var j: usize = 1;
+        while (j <= spawned) : (j += 1) threads[j].join();
     }
 
-    const npref = bits.len / PiOracle.BLKW + 1;
-    const pref = try gpa.alloc(u64, npref);
-    var acc: u64 = 0;
-    for (0..npref) |b| {
-        pref[b] = acc;
-        if (b * PiOracle.BLKW >= bits.len) break;
-        for (bits[b * PiOracle.BLKW ..][0..PiOracle.BLKW]) |word| acc += @popCount(word);
+    // pref[b] = # set bits strictly below block b. Phase 1 (parallel-friendly):
+    // per-block popcounts. Phase 2: one serial exclusive scan in place.
+    const nblk = bits.len / PiOracle.BLKW;
+    const pref = try gpa.alloc(u64, nblk + 1);
+    errdefer gpa.free(pref);
+    if (nthreads <= 1 or nblk < 1 << 16) {
+        for (0..nblk) |b| {
+            var c: u64 = 0;
+            for (bits[b * PiOracle.BLKW ..][0..PiOracle.BLKW]) |word| c += @popCount(word);
+            pref[b] = c;
+        }
+    } else {
+        const PCtx = struct { bits: []const u64, pref: []u64, b0: usize, b1: usize };
+        const PW = struct {
+            fn run(cx: PCtx) void {
+                for (cx.b0..cx.b1) |b| {
+                    var c: u64 = 0;
+                    for (cx.bits[b * PiOracle.BLKW ..][0..PiOracle.BLKW]) |word| c += @popCount(word);
+                    cx.pref[b] = c;
+                }
+            }
+        };
+        const chunk = (nblk + nthreads - 1) / nthreads;
+        const threads = try gpa.alloc(std.Thread, nthreads);
+        defer gpa.free(threads);
+        var spawned: usize = 0;
+        for (1..nthreads) |i| {
+            const b0 = @min(i * chunk, nblk);
+            const b1 = @min(b0 + chunk, nblk);
+            threads[i] = std.Thread.spawn(.{}, PW.run, .{PCtx{ .bits = bits, .pref = pref, .b0 = b0, .b1 = b1 }}) catch break;
+            spawned = i;
+        }
+        PW.run(.{ .bits = bits, .pref = pref, .b0 = 0, .b1 = @min(chunk, nblk) });
+        var j: usize = 1;
+        while (j <= spawned) : (j += 1) threads[j].join();
     }
+    var acc: u64 = 0;
+    for (0..nblk) |b| {
+        const c = pref[b];
+        pref[b] = acc;
+        acc += c;
+    }
+    pref[nblk] = acc;
     return .{ .bits = bits, .pref = pref, .n = n, .nbits = nbits };
 }
 
@@ -1603,7 +1693,7 @@ pub fn piGourdonV(comptime X: type, gpa: std.mem.Allocator, x: X, cfg: Config) !
     // the √(x/x*) term is belt-and-braces for the x* = x^(1/4) regime. Every π(v)
     // query above plist_max goes to the bitset oracle, which spans all of [0, √x].
     const plist_max = @max(@max(y, sqz), @max(x13, isqrtG(X, x / @as(X, @max(xstar, 1)))));
-    var s = try Sieve(P).init(gpa, sqx, y, plist_max);
+    var s = try Sieve(P).init(gpa, sqx, y, plist_max, nthreads, pins);
     defer s.deinit(gpa);
     const lap = struct {
         fn f(v: bool, tpp: *u64, name: []const u8) void {
@@ -1719,7 +1809,7 @@ pub fn main() !void {
         const y = chooseY(u64, x);
         const z = x / y;
         const xstar = @max(isqrt(isqrt(x)), x / (y * y));
-        var s = try Sieve(u32).init(gpa, isqrt(x), y, isqrt(x));
+        var s = try Sieve(u32).init(gpa, isqrt(x), y, isqrt(x), 1, null);
         defer s.deinit(gpa);
         const pi = try buildPi(gpa, z);
         defer gpa.free(pi);
@@ -1744,7 +1834,7 @@ pub fn main() !void {
             const x13 = icbrtG(u64, x);
             const sqz = isqrt(z);
             const xstar = @max(isqrt(isqrt(x)), x / (y * y));
-            var s = try Sieve(u32).init(gpa, sqx, y, sqx);
+            var s = try Sieve(u32).init(gpa, sqx, y, sqx, 1, null);
             defer s.deinit(gpa);
             const t0 = common.nowNs();
             const ser = computeTerms(u64, &s, x, y, sqx, x13, sqz, xstar);
@@ -1796,7 +1886,7 @@ pub fn main() !void {
         const y = chooseY(u64, x);
         const z = x / y;
         const xstar = @max(isqrt(isqrt(x)), x / (y * y));
-        var s = try Sieve(u32).init(gpa, isqrt(x), y, isqrt(x));
+        var s = try Sieve(u32).init(gpa, isqrt(x), y, isqrt(x), 1, null);
         defer s.deinit(gpa);
         std.debug.print("x=10^{d} (y={d}, z={d}):\n", .{ std.math.log10_int(x), y, z });
         std.debug.print("  gourdon(fused) ", .{});
