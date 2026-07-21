@@ -136,7 +136,8 @@ fn sievePrimes(comptime P: type, gpa: std.mem.Allocator, nmax: u64) ![]P {
     return gpa.realloc(primes, cnt);
 }
 
-/// Persistent tables: δ/μ/π only to y (ω leaves, φ₀ — never read past y), an explicit
+/// Persistent tables: the fused μ+δ leaf table only to y (ω leaves, φ₀ — never read
+/// past y), an explicit
 /// prime list only to plist_max (the largest prime any loop enumerates by value), and
 /// the O(1) π oracle over [0, √x] as a coprime-30 bitset. Storing the √x primes as a
 /// u64 list instead costs 8·π(√x) — 3.5 GB at x=10²⁰, ~10× the oracle.
@@ -144,14 +145,26 @@ fn sievePrimes(comptime P: type, gpa: std.mem.Allocator, nmax: u64) ![]P {
 /// against, so saturating is exact iff √y < DELTA_MAX, i.e. y < 4.295e9. With
 /// y = α·x^(1/3) and α from chooseAlpha that holds to x ≈ 10^25 and fails at 10^26
 /// (y = 8.7e9, √y = 93529). Sieve.init enforces it rather than trusting the bound.
-const DELTA_MAX: u16 = 65535;
-const DeltaTooNarrow = error.YExceedsU16DeltaRange;
+/// Fused μ+δ leaf table, one u16 per m ∈ [0..y]:
+///   0        ⇒ μ(m) = 0 (some p² | m) — rejected everywhere, so μ's zero bit is free
+///   bit 15   ⇒ μ(m) = +1 (even # prime factors); clear ⇒ −1. (+1 sets the bit so
+///              m = 1 encodes as 0x8000 and cannot collide with the 0 sentinel.)
+///   bits 0-14⇒ min(π(spf(m)), LEAF_SAT) — the INDEX of the smallest prime factor,
+///              not its value. The only consumer is the leaf test spf(m) > p with
+///              p = primes[bi], and spf > p ⟺ π(spf) > bi+1, so the compare is
+///              against the loop index and needs no prime value at all. Indices
+///              compress ~ln p better than values: 15 bits reaches p_32766 =
+///              386,051, i.e. √y < 386k ⇒ x ≈ 10^29 — past the runtime horizon —
+///              where the old u16 VALUE encoding died at √y > 65535 (x ≈ 10^25).
+/// One table and one stream where μ (i8) + δ (u16) were two; 2 bytes/m instead of 3.
+const LEAF_SAT: u16 = 0x7FFF;
+const LEAF_PLUS: u16 = 0x8000;
+const LeafIdxTooNarrow = error.YExceedsLeafIndexRange;
 
 fn Sieve(comptime P: type) type {
     return struct {
         const Self = @This();
-        mu: []i8, // [0..y]
-        delta: []u16, // smallest prime factor saturated at DELTA_MAX, [0..y]
+        leaf: []u16, // fused μ + spf-index table, [0..y] — see LEAF_SAT above
         primes: []P, // ascending, ≤ plist_max (enumeration only)
         pio: PiOracle, // π(v) and descending prime walk over [0, √x]
 
@@ -160,47 +173,42 @@ fn Sieve(comptime P: type) type {
         const pio = try buildPiOracle(gpa, @max(sqx, plist_max));
         const Ny: usize = @intCast(y + 1);
 
-        // μ by sign-flipping over the primes (not by descending the spf chain), so
-        // that δ never has to hold an exact smallest prime factor and can be narrowed.
-        const mu = try gpa.alloc(i8, Ny);
-        errdefer gpa.free(mu);
-        @memset(mu, 1);
-        if (Ny > 0) mu[0] = 0;
-        for (primes) |q32| {
+        // Guard: saturation is exact iff no compared index reaches LEAF_SAT, i.e.
+        // π(√y) < LEAF_SAT. An error, not a comment — the u16-value guard's lesson.
+        if (pio.count(isqrt(y)) >= LEAF_SAT) return LeafIdxTooNarrow;
+
+        const leaf = try gpa.alloc(u16, Ny);
+        errdefer gpa.free(leaf);
+        @memset(leaf, LEAF_PLUS); // μ=+1, spf-index unset (0)
+
+        // Pass 1, primes ascending: flip the sign bit per prime factor; first flip
+        // also stamps the spf index (first-write-wins ⇒ smallest, since q ascends).
+        for (primes, 0..) |q32, qi| {
             const q: usize = @intCast(q32);
             if (q >= Ny) break;
-            var j: usize = q;
-            while (j < Ny) : (j += q) mu[j] = -mu[j];
-            const qq = q * q;
-            if (qq < Ny) {
-                j = qq;
-                while (j < Ny) : (j += qq) mu[j] = 0;
-            }
-        }
-
-        // δ = smallest prime factor, SATURATED at DELTA_MAX. Its only runtime use is
-        // the leaf test δ[m] > p with p ≤ √y, so while √y < DELTA_MAX saturation is
-        // indistinguishable from the exact value — and it halves the table
-        // (196 → 98 MB at 10^20). Guarded, not assumed.
-        if (isqrt(y) >= DELTA_MAX) return DeltaTooNarrow;
-        const delta = try gpa.alloc(u16, Ny);
-        errdefer gpa.free(delta);
-        @memset(delta, DELTA_MAX);
-        for (primes) |q32| {
-            const q: usize = @intCast(q32);
-            if (q >= Ny or q >= DELTA_MAX) break;
+            const qidx1: u16 = @intCast(@min(qi + 1, LEAF_SAT)); // 1-based π(q), saturated
             var j: usize = q;
             while (j < Ny) : (j += q) {
-                if (delta[j] == DELTA_MAX) delta[j] = @intCast(q);
+                var v = leaf[j] ^ LEAF_PLUS;
+                if (v & LEAF_SAT == 0) v |= qidx1;
+                leaf[j] = v;
             }
         }
-        if (Ny > 0) delta[0] = 0;
-        if (Ny > 1) delta[1] = 0; // m=1 is never a leaf; keep it rejected as before
-        return .{ .mu = mu, .delta = delta, .primes = primes, .pio = pio };
+        // Pass 2, AFTER all sign/idx writes so nothing revives a zeroed entry:
+        // q² | m ⇒ μ(m) = 0 ⇒ the 0 sentinel.
+        for (primes) |q32| {
+            const q: usize = @intCast(q32);
+            const qq = q * q;
+            if (qq >= Ny) break;
+            var j: usize = qq;
+            while (j < Ny) : (j += qq) leaf[j] = 0;
+        }
+        if (Ny > 0) leaf[0] = 0;
+        // leaf[1] stays LEAF_PLUS: μ(1) = +1 (φ₀ needs it), idx 0 ⇒ never a leaf.
+        return .{ .leaf = leaf, .primes = primes, .pio = pio };
     }
     fn deinit(self: *Self, gpa: std.mem.Allocator) void {
-        gpa.free(self.mu);
-        gpa.free(self.delta);
+        gpa.free(self.leaf);
         gpa.free(self.primes);
         gpa.free(self.pio.bits);
         gpa.free(self.pio.pref);
@@ -947,8 +955,7 @@ const Scratch = struct {
 /// Shared read-only context + per-block output arrays + block dispenser.
 fn BlkCtx(comptime X: type, comptime P: type) type {
     return struct {
-        mu: []const i8,
-        delta: []const u16,
+        leaf: []const u16,
         primes: []const P,
         pio: *const PiOracle,
         x: X,
@@ -1147,10 +1154,11 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, gpa: std
                     const mlo: u64 = @max(y / p, mBound(X, x, p, hi));
                     while (m > mlo) {
                         if (INST) st.n_mwalk += 1;
-                        const mm = ctx.mu[@intCast(m)];
-                        if (mm != 0 and ctx.delta[@intCast(m)] > p) {
+                        // one load answers μ≠0 AND spf>p: (leaf & SAT) > bi+1
+                        const lv = ctx.leaf[@intCast(m)];
+                        if (@as(usize, lv & LEAF_SAT) > bi + 1) {
                             const v: u64 = xdiv(X, x, m * p);
-                            const sign: i64 = -mm;
+                            const sign: i64 = if (lv & LEAF_PLUS != 0) -1 else 1; // -μ
                             if (bi <= 2) {
                                 if (INST) st.n_small += 1;
                                 omega += @as(i128, sign) * @as(i128, phiSmall(v, bi));
@@ -1286,8 +1294,7 @@ fn initBlkCtx(comptime X: type, comptime P: type, gpa: std.mem.Allocator, s: any
     const total = z + 1;
     const tm = try buildSmallTemplates(gpa, primes);
     return .{
-        .mu = s.mu,
-        .delta = s.delta,
+        .leaf = s.leaf,
         .primes = primes,
         .pio = &s.pio,
         .x = x,
@@ -1414,7 +1421,7 @@ fn phiRec(primes: []const u32, pi: []const u32, u: u64, b: usize) i64 {
     if (pb * pb > u) return @as(i64, @intCast(pi[@intCast(u)])) - @as(i64, @intCast(b)) + 1;
     return phiRec(primes, pi, u, b - 1) - phiRec(primes, pi, u / pb, b - 1);
 }
-fn omegaNaive(primes: []const u32, mu: []const i8, delta: []const u16, pi: []const u32, x: u64, y: u64, xstar: u64) i128 {
+fn omegaNaive(primes: []const u32, leaf: []const u16, pi: []const u32, x: u64, y: u64, xstar: u64) i128 {
     var omega: i128 = 0;
     for (primes, 0..) |p32, pidx| {
         const p: u64 = p32;
@@ -1422,10 +1429,11 @@ fn omegaNaive(primes: []const u32, mu: []const i8, delta: []const u16, pi: []con
         if (p > xstar) break;
         var m: u64 = y / p + 1;
         while (m <= y) : (m += 1) {
-            if (mu[@intCast(m)] == 0) continue;
-            if (delta[@intCast(m)] <= p) continue;
+            const lv = leaf[@intCast(m)];
+            if (@as(usize, lv & LEAF_SAT) <= pidx + 1) continue; // μ=0 or spf ≤ p
             const u = x / (p * m);
-            omega += @as(i128, mu[@intCast(m)]) * @as(i128, phiRec(primes, pi, u, pidx));
+            const mun: i128 = if (lv & LEAF_PLUS != 0) 1 else -1;
+            omega += mun * @as(i128, phiRec(primes, pi, u, pidx));
         }
     }
     return -omega;
@@ -1622,10 +1630,12 @@ pub fn piGourdonV(comptime X: type, gpa: std.mem.Allocator, x: X, cfg: Config) !
     {
         var n: u64 = 1;
         while (n <= y) : (n += 1) {
-            if (s.mu[@intCast(n)] == 0) continue;
+            const lv = s.leaf[@intCast(n)];
+            if (lv == 0) continue;
             if (n % 2 == 0) continue;
             const u: X = x / @as(X, n); // NOT xdiv: for x>2^64 and n∈{1,3,5}, x/n exceeds u64
-            phi0 += @as(i128, s.mu[@intCast(n)]) * @as(i128, @intCast(u - u / 2));
+            const mun: i128 = if (lv & LEAF_PLUS != 0) 1 else -1;
+            phi0 += mun * @as(i128, @intCast(u - u / 2));
         }
     }
     lap(verbose, &tp, "phi0");
@@ -1707,7 +1717,7 @@ pub fn main() !void {
         defer s.deinit(gpa);
         const pi = try buildPi(gpa, z);
         defer gpa.free(pi);
-        const on = omegaNaive(s.primes, s.mu, s.delta, pi, x, y, xstar);
+        const on = omegaNaive(s.primes, s.leaf, pi, x, y, xstar);
         const wb = try omegaCounter(false, u64, gpa, &s, x, y, z, xstar);
         const b_ref = try computeB(false, gpa, &s, x, y, z, isqrt(x)); // standalone B reference
         // block-consistency: nb blocks + reduction must equal the nb=1 sweep
