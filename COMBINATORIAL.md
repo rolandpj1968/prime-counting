@@ -836,10 +836,51 @@ reduction are all serial and all grow with x. `piGourdonV` laps each phase behin
 anyone projects 10²³ (~21 h and ~14 GB on the *measured* ratio, versus ~15 h on the
 old one).
 
+## The segmented oracle: memory O(√x) → O(x^(1/3))
+
+The last resident √x structure was the π oracle — 35 GB at 10²⁴, and the absolute
+scaling wall since every other structure scales with y. Retired in five verified
+increments (471c328…5252767), each converting one consumer against the
+still-resident oracle with its own differential before the oracle was capped:
+
+1. **bpi** — π at segment boundaries below √x, plus per-thread window scratch.
+2. **ω's C-leaves.** The enabling observation: the m-/q-walk guard
+   (`if (v >= hi) break; if (v >= lo)`) means every C-leaf π(v) query arrives
+   *inside the current sweep segment* — the sweep is the window pass. An 8.7 KB
+   primality window per segment (strike cursors carried across a block, the
+   fold's own pattern) answers them; and all C-leaves have v ≤ √x, so only the
+   first √x/z of segments (~0.2% at 10²⁰) ever build one. No deferral, no
+   sorting — the design originally sketched (banked per-window query buckets)
+   was unnecessary.
+3. **B's cursor** onto a descending chunked window (refills compute fresh
+   offsets; the cursor is monotone per block, so each block sieves its p-subrange
+   once).
+4. **A split at χ's own boundary.** v < y pairs (χ=2) stay on the capped oracle;
+   v ∈ [y, √x] pairs (χ=1) move to disjoint 4.2M-integer v-windows under a second
+   dispenser (140 KB bits + 70 KB prefix, L2-resident). Σ₄/₅/₆ provably never
+   exceed y (p > x* ≥ x/y² bounds each), so A was the only term to restructure.
+5. **Cap the oracle at ~y; stream bpi** — a parallel sieve over [0, √x] retaining
+   only per-segment counts: √x/32760 bytes where the bits were √x/30.
+
+Measured (6 threads, vs the pre-window baseline): RSS 72→36 MB at 10¹⁸,
+202→90 at 10¹⁹, 570→215 at 10²⁰ — the ratio grows with x because the deleted
+term was the √x one — **and 5–9% faster throughout**, because resident random
+probes (LLC-cold at scale) became freshly sieved L1/L2 windows the iteration was
+already passing. The first window build was 100% wrong (filled with the
+counter's dense MASK30 pattern instead of the wheel-compressed all-ones) and was
+caught immediately by the new window differential — which stays in the suite.
+
+At 10²⁴ the projection drops from ~40 GB to ~4 GB: the memory wall is gone, and
+runtime is the only remaining constraint.
+
 ## Verification
 
 - **Differential**: ω against a naive φ recursion, and B against an independent
   reference sweep, at 10⁵…10⁹; blocked partitions (nb = 4, 7) against monolithic.
+- **Windows**: pwinBuild/count vs the resident oracle at every v over 20 segw
+  windows; bwinPrev's full 364k-step descending walk vs prevPrime; A/Σ's
+  windowed parallel path vs the serial oracle-backed computeTerms (kept as an
+  independent reference).
 - **π oracle**: count() *and* prevPrime() against an explicit prime list at every
   v ≤ 3×10⁶. The oracle answers every π query in the terms, so a wheel-indexing
   off-by-one would silently skew π(x) rather than crash.

@@ -40,15 +40,22 @@ L3 16 MiB, 28 GiB RAM** (6-core Ryzen 5 6600H), `zig 0.16 build-exe -O ReleaseFa
 | x | π(x) | 6-core | RSS | ×prev |
 |---|------|-----:|----:|----:|
 | 10¹³ | 346,065,536,839 | 0.05 s | 2 MB | — |
-| 10¹⁴ | 3,204,941,750,802 | 0.18 s | 3 MB | 3.69 |
-| 10¹⁵ | 29,844,570,422,669 | 0.70 s | 5 MB | 3.91 |
-| 10¹⁶ | 279,238,341,033,925 | 2.73 s | 11 MB | 3.92 |
-| 10¹⁷ | 2,623,557,157,654,233 | 11.25 s | 28 MB | 4.12 |
-| 10¹⁸ | 24,739,954,287,740,860 | 47.11 s | 78 MB | 4.19 |
-| 10¹⁹ | 234,057,667,276,344,607 | 3.25 min | 219 MB | 4.14 |
-| 10²⁰ | 2,220,819,602,560,918,840 | 13.8 min | 614 MB | 4.25 |
-| 10²¹ | 21,127,269,486,018,731,928 | **1.05 h** | 1.71 GB | 4.56 |
-| 10²² | 201,467,286,689,315,906,290 | **4.74 h** | 4.87 GB | 4.51 |
+| 10¹⁴ | 3,204,941,750,802 | 0.16 s | 3 MB | 3.37 |
+| 10¹⁵ | 29,844,570,422,669 | 0.61 s | 4 MB | 3.80 |
+| 10¹⁶ | 279,238,341,033,925 | 2.52 s | 7 MB | 4.13 |
+| 10¹⁷ | 2,623,557,157,654,233 | 9.41 s | 15 MB | 3.73 |
+| 10¹⁸ | 24,739,954,287,740,860 | 39.1 s | 36 MB | 4.15 |
+| 10¹⁹ | 234,057,667,276,344,607 | 2.82 min | 90 MB | 4.32 |
+| 10²⁰ | 2,220,819,602,560,918,840 | **12.3 min** | **215 MB** | 4.37 |
+| 10²¹ | 21,127,269,486,018,731,928 | 1.05 h† | 1.71 GB† | — |
+| 10²² | 201,467,286,689,315,906,290 | **4.74 h†** | 4.87 GB† | — |
+
+† 10²¹/10²² predate the segmented oracle (whose memory saving *grows* with x —
+projected ~0.6/1.5 GB — and which measured 5–9% faster below); rerun pending.
+**Memory now scales as O(x^(1/3))**, not O(√x): the largest resident structures
+are the y-sized leaf table and prime list. 10²⁴ needs ~4 GB (was ~40 GB) — the
+memory wall is gone, leaving runtime (~4 days at 10²⁴ on this laptop) as the
+only constraint.
 
 The ×prev column is the empirical growth per power of ten; theory (x^(2/3)) says
 **4.64**. It sits at 4.12–4.25 through 10²⁰ and converges *up* to ~4.5 beyond — a
@@ -65,11 +72,15 @@ What earns it, beyond the decomposition itself:
   folded it holds φ(·, π(√z)), so B's π(x/p) is read straight off it by Legendre
   (valid since z < y²). Gourdon folds π(√z) primes against LMO's π(y) — one pass
   serves both terms.
-- **A coprime-30 bitset π oracle over [0, √x]**, not a prime list. π(v) is a prefix
-  load plus ≤8 popcounts; a 64-bit word covers exactly 240 integers (64 bits ÷
-  8-per-30), so indexing is a shift. Against storing the √x primes as u64 this is
-  **9.7× less memory and 2.7× faster to build** (3472 → 358 MB, 27.1 → 10.0 s at
-  √x = 10¹⁰) — it moves less memory *and* does less work.
+- **Segmented π, no resident √x structure at all.** Every π(v) above y is answered
+  from a freshly sieved *window*: ω's C-leaves ride the sweep itself (the walk
+  guards deliver each query inside the current segment — the sweep *is* the window
+  pass), B's cursor walks a descending chunked window, and A's v ≥ y pairs are
+  enumerated per v-window off the prime list. The only resident remnants are a
+  y-capped oracle (a coprime-30 bitset: one 64-bit word covers exactly 240
+  integers, so indexing is a shift) and `bpi` — π at segment boundaries, 8 bytes
+  per 262,080 integers. Replacing resident random probes with L1/L2 windows also
+  measured **5–9% faster**.
 - **A fitted α(x)**, not a constant. α = clamp(−17.727 + 0.5980·ln x, 4, 24), from
   measured optima. Worth 18% at 10¹⁷ and 34% at 10¹⁸ over the hardcoded α = 4.
 - **A bucket ring for sparse fold primes.** Once √z > segw, most fold primes hit a
