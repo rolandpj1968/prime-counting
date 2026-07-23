@@ -635,6 +635,50 @@ fn oracleStrikeSeg(bits: []u64, base: []const u32, n: u64, nw: usize, w0: usize)
 /// O(√x/segw) memory where the resident oracle kept √x/30 bytes of bits. This is
 /// what lets the oracle be capped at plist_max (≈ y): every π value above y now
 /// comes from bpi + a freshly sieved window.
+// ---------------------------------------------- verbose progress
+// Periodic intra-phase progress lines for multi-hour runs. Enabled only by
+// Config.verbose (set per call in piGourdonV); every tick is a load-and-branch
+// when disabled, and at most one clock read + atomic add per work unit when on.
+// Work units are coarse (segments/windows/chunks), so the cost is noise.
+var g_progress: bool = false;
+const PROG_GATE_NS: u64 = 60 * 1_000_000_000; // min interval between lines
+
+const Prog = struct {
+    name: []const u8 = "",
+    total: u64 = 1,
+    done: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    t0: u64 = 0,
+    last: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+
+    fn begin(self: *Prog, name: []const u8, total: u64) void {
+        if (!g_progress) return;
+        const now = common.nowNs();
+        self.name = name;
+        self.total = @max(total, 1);
+        self.done.store(0, .monotonic);
+        self.t0 = now;
+        self.last.store(now, .monotonic);
+    }
+    fn tick(self: *Prog) void {
+        if (!g_progress) return;
+        const d = self.done.fetchAdd(1, .monotonic) + 1;
+        const now = common.nowNs();
+        const prev = self.last.load(.monotonic);
+        if (now -% prev < PROG_GATE_NS) return;
+        // one printer per gate window; losers just keep working
+        if (self.last.cmpxchgStrong(prev, now, .monotonic, .monotonic) != null) return;
+        const dd = @min(d, self.total);
+        const el = @as(f64, @floatFromInt(now - self.t0)) / 1e9;
+        const pct = 100.0 * @as(f64, @floatFromInt(dd)) / @as(f64, @floatFromInt(self.total));
+        const eta = el * @as(f64, @floatFromInt(self.total - dd)) / @as(f64, @floatFromInt(dd));
+        std.debug.print("    [{s:>6}] {d:5.1}%  {d}/{d}  elapsed {d:.0} s  eta {d:.0} s\n", .{ self.name, pct, dd, self.total, el, eta });
+    }
+};
+var prog_bpi: Prog = .{};
+var prog_ap: Prog = .{};
+var prog_aw: Prog = .{};
+var prog_om: Prog = .{};
+
 fn buildBoundaryPi(gpa: std.mem.Allocator, sqx: u64, segw: usize, nthreads: usize, pins: ?[]const u32) !struct { bpi: []u64, total: u64 } {
     const nbpi = @as(usize, @intCast(sqx / segw)) + 2;
     const bpi = try gpa.alloc(u64, nbpi);
@@ -694,9 +738,11 @@ fn buildBoundaryPi(gpa: std.mem.Allocator, sqx: u64, segw: usize, nthreads: usiz
                     for (bits[si * segww ..][0..segww]) |word| c += @popCount(word);
                     cx.bpi[seg] = c;
                 }
+                prog_bpi.tick();
             }
         }
     };
+    prog_bpi.begin("bpi", nwin);
     const wbits = try gpa.alloc(u64, nthreads * nww);
     defer gpa.free(wbits);
     const threads = try gpa.alloc(std.Thread, nthreads);
@@ -1170,6 +1216,7 @@ fn computeTermsPar(comptime X: type, gpa: std.mem.Allocator, s: anytype, x: X, y
                     if (p > cx.xstar and p <= cx.sqz) s4 += @intCast(po.count(xdiv(X, cx.x, p * cx.y))); // Σ₄
                     if (p > cx.sqz and p <= cx.x13) s5 += @intCast(po.count(xdiv(X, cx.x, p * p))); // Σ₅
                 }
+                prog_ap.tick();
             }
             // Phase 2 — A's v ∈ [y, √x] pairs (χ = 1) over disjoint v-windows.
             const awin: u64 = @intCast(wbits.len * 240);
@@ -1203,11 +1250,14 @@ fn computeTermsPar(comptime X: type, gpa: std.mem.Allocator, s: anytype, x: X, y
                         A += @intCast(win.count(v));
                     }
                 }
+                prog_aw.tick();
             }
             out.* = .{ .A = A, .sig4 = s4, .sig5 = s5, .sig6 = s6 };
         }
     };
 
+    prog_ap.begin("A/Σ p", nchunks);
+    prog_aw.begin("A/Σ v", @intCast((sqx - ctx.w0) / AWIN + 1));
     const nww = (16 * segw) / 240;
     const wbits_flat = try gpa.alloc(u64, nthreads * nww);
     defer gpa.free(wbits_flat);
@@ -1695,6 +1745,7 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, gpa: std
             pB = bwinPrev(P, &sc.bwin, primes, ctx.nwb, pB - 1, y);
         }
         phi_run_full += sc.ctr.total;
+        prog_om.tick();
     }
     for (0..nax) |bi| ctx.blk_total[t * nax + bi] = phi_run[bi];
     ctx.blk_total_full[t] = phi_run_full;
@@ -1825,6 +1876,7 @@ fn omegaBlocked(comptime INST: bool, comptime X: type, gpa: std.mem.Allocator, s
     const P = std.meta.Child(@TypeOf(s.primes));
     var ctx = (try initBlkCtx(X, P, gpa, s, x, y, z, xstar, nb, bpi_in, segw)) orelse return .{ .omega = 0, .b = 0 };
     defer freeBlkCtx(X, P, gpa, &ctx);
+    prog_om.begin("ω+B", ctx.nseg);
     var sc = try Scratch.init(gpa, ctx.nax, ctx.naz, ctx.segw, ctx.nring, ctx.nwb);
     defer sc.deinit(gpa);
     var st = Stats{};
@@ -1841,6 +1893,7 @@ fn omegaBlockedPar(comptime INST: bool, comptime X: type, gpa: std.mem.Allocator
     const P = std.meta.Child(@TypeOf(s.primes));
     var ctx = (try initBlkCtx(X, P, gpa, s, x, y, z, xstar, nb, bpi_in, segw)) orelse return .{ .omega = 0, .b = 0 };
     defer freeBlkCtx(X, P, gpa, &ctx);
+    prog_om.begin("ω+B", ctx.nseg);
 
     const scratches = try gpa.alloc(Scratch, nthreads);
     defer gpa.free(scratches);
@@ -2077,6 +2130,7 @@ pub fn piGourdonPar(gpa: std.mem.Allocator, x: u128, nthreads: usize, pins: ?[]c
 pub fn piGourdonV(comptime X: type, gpa: std.mem.Allocator, x: X, cfg: Config) !GResult {
     const y_in = cfg.y;
     const verbose = cfg.verbose;
+    g_progress = verbose;
     const nthreads = cfg.nthreads;
     const pins = cfg.pins;
     const P = if (X == u64) u32 else u64; // prime element type: √x < 2³² ⇔ X = u64

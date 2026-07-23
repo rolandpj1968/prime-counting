@@ -51,7 +51,7 @@ const usage =
     \\                         32 KB counter bits; multiple of 960, ≤ 2097152)
     \\      --pin-list <csv>   pin one worker per listed logical cpu (sets -t);
     \\                         e.g. 0,1 = both SMT threads of core 0
-    \\  -v, --verbose          per-phase timing
+    \\  -v, --verbose          per-phase timing + periodic in-phase progress (≥60 s apart)
     \\      --check            compare against the known π(10ⁿ) table
     \\      --no-time          print only the value
     \\      --calibrate        measure α* on THIS machine at anchors 10¹⁵… and
@@ -102,7 +102,7 @@ fn parseX(sraw: []const u8) !u128 {
     return std.fmt.parseInt(u128, s, 10);
 }
 
-/// π(10ⁿ) for n = 0..22 (OEIS A006880 / Oliveira e Silva). Used only by --check.
+/// π(10ⁿ) for n = 0..24 (OEIS A006880 / Oliveira e Silva). Used only by --check.
 const known = [_]i128{
     0,                       4,
     25,                      168,
@@ -115,7 +115,8 @@ const known = [_]i128{
     279238341033925,         2623557157654233,
     24739954287740860,       234057667276344607,
     2220819602560918840,     21127269486018731928,
-    201467286689315906290,
+    201467286689315906290,   1925320391606803968923,
+    18435599767349200867866,
 };
 
 fn knownFor(x: u128) ?i128 {
