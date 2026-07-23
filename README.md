@@ -47,8 +47,13 @@ L3 16 MiB, 28 GiB RAM** (6-core Ryzen 5 6600H), `zig 0.16 build-exe -O ReleaseFa
 | 10¹⁸ | 24,739,954,287,740,860 | 39.1 s | 36 MB | 4.15 |
 | 10¹⁹ | 234,057,667,276,344,607 | 2.82 min | 90 MB | 4.32 |
 | 10²⁰ | 2,220,819,602,560,918,840 | **12.3 min** | **215 MB** | 4.37 |
-| 10²¹ | 21,127,269,486,018,731,928 | 55.0 min | 354 MB | 4.46 |
-| 10²² | 201,467,286,689,315,906,290 | **3.79 h** | 985 MB | 4.14 |
+| 10²¹ | 21,127,269,486,018,731,928 | 50.1 min | 433 MB | 4.06 |
+| 10²² | 201,467,286,689,315,906,290 | **3.79 h** | 985 MB | 4.54 |
+
+(Timing provenance: cool-start runs; sustained multi-hour load costs up to ~9%
+on this laptop — measured, not assumed. Profiles of both top rows show the
+sieve's kill loop — `bt`/`btr` — as the hottest instructions, i.e. the machine
+spends its time on the algorithm, not on stalls.)
 **Memory now scales as O(x^(1/3))**, not O(√x): the largest resident structures
 are the y-sized leaf table and prime list. 10²⁴ needs ~4 GB (was ~40 GB) — the
 memory wall is gone, leaving runtime (~4 days at 10²⁴ on this laptop) as the
@@ -194,6 +199,17 @@ m-walk turned out to be 8% of runtime, and it delivered 1.3%), and batching the
 counter's per-kill bookkeeping (the count array is **256 bytes** — permanently
 L1-resident — so the update was never expensive, and adding a compare per kill to
 avoid it measured **4.7% slower** and was reverted).
+
+The sharpest single lesson cost a night at 10²²: the bucket ring was rebuilt as
+a chain-linked arena (exact memory, no slack) and measured *time-neutral* at
+every tested scale — then **+33% at 10²²**, where its ~3 MB/thread of chains ×6
+threads crossed the 16 MB L3 exactly between 10²¹ (9.6 MB, fits) and 10²²
+(18 MB, cliff). A live `perf` attach found **one chain-following load carrying
+37.6% of all cycles**. The fix — the same packed 8-byte entries in contiguous
+per-slot vectors, so drains stream instead of chase — took 10²² from 22,671 s to
+**13,640 s, 20% under the pre-refactor record**. The law it stamped: *every
+performance verdict is scale-indexed* — "neutral at tested scales" is a claim
+about the tests, and cache boundaries are where it goes to die.
 
 The same lens explains a third observation: **the parallel path is leaf-side
 bandwidth-bound.** The fold works on a per-thread 32 KB L1-resident bitset, while

@@ -27,6 +27,7 @@ const Opts = struct {
     check: bool = false,
     time: bool = true,
     calibrate: bool = false,
+    pin_list: ?[]const u8 = null,
     budget: f64 = 300,
     fit_a: ?f64 = null,
     fit_b: ?f64 = null,
@@ -45,6 +46,8 @@ const usage =
     \\      --alpha <f>        override the fitted α in y = α·x^(1/3)
     \\      --y <n>            set y directly (overrides --alpha)
     \\      --pin              pin workers to cores 0,2,4,… (physical, skipping SMT)
+    \\      --pin-list <csv>   pin one worker per listed logical cpu (sets -t);
+    \\                         e.g. 0,1 = both SMT threads of core 0
     \\  -v, --verbose          per-phase timing
     \\      --check            compare against the known π(10ⁿ) table
     \\      --no-time          print only the value
@@ -384,6 +387,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
             o.alpha = std.fmt.parseFloat(f64, eat(&it, &eq_val, "--alpha")) catch die("--alpha needs a number", .{});
         } else if (std.mem.eql(u8, a, "--y")) {
             o.y = std.fmt.parseInt(u64, eat(&it, &eq_val, "--y"), 10) catch die("--y needs an integer", .{});
+        } else if (std.mem.eql(u8, a, "--pin-list")) {
+            o.pin_list = eat(&it, &eq_val, "--pin-list");
         } else if (std.mem.eql(u8, a, "--pin")) {
             o.pin = true;
         } else if (std.mem.eql(u8, a, "-v") or std.mem.eql(u8, a, "--verbose")) {
@@ -411,7 +416,20 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     var pins_buf: [256]u32 = undefined;
     var pins: ?[]const u32 = null;
-    if (o.pin) {
+    if (o.pin_list) |pl| {
+        // explicit topology: comma-separated logical CPUs, one worker pinned to
+        // each; thread count follows the list (SMT/cloud topologies welcome)
+        var n: usize = 0;
+        var itp = std.mem.tokenizeScalar(u8, pl, ',');
+        while (itp.next()) |tok| {
+            if (n == pins_buf.len) die("--pin-list: too many cpus", .{});
+            pins_buf[n] = std.fmt.parseInt(u32, tok, 10) catch die("--pin-list: bad cpu '{s}'", .{tok});
+            n += 1;
+        }
+        if (n == 0) die("--pin-list: empty", .{});
+        o.threads = n;
+        pins = pins_buf[0..n];
+    } else if (o.pin) {
         const n = @min(o.threads, pins_buf.len);
         for (0..n) |i| pins_buf[i] = @intCast(i * 2); // physical cores, skipping siblings
         pins = pins_buf[0..n];

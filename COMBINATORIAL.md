@@ -873,6 +873,41 @@ caught immediately by the new window differential — which stays in the suite.
 At 10²⁴ the projection drops from ~40 GB to ~4 GB: the memory wall is gone, and
 runtime is the only remaining constraint.
 
+## The 10²² cache cliff — a case study in scale-indexed verdicts
+
+The sparse-prime ring went through three storage designs, each measured:
+16-byte struct vectors, then packed 8-byte vectors (−20% RSS, time-neutral),
+then a chain-linked arena (another −20% RSS, *exact* memory, time-neutral at
+10¹⁸/10¹⁹ — and the aliasing hazard structurally removed). The arena's first
+10²² run came in at **22,671 s — +33% over the pre-refactor record** — while its
+RSS was 5.9× better. A live `perf record` on the running process (cpu-clock;
+the PMU was unavailable) showed **37.6% of all cycles in one instruction**:
+`movl (%rcx,%r8,4), %edi` — the arena's chain-follow load — plus 14.7% sample
+skid on its successor. The arithmetic closed exactly: chains ≈ 3 MB/thread × 6
+threads = 18 MB against a 16 MB L3, with 10²¹ at 9.6 MB — the fast/slow boundary
+sat precisely on the cache edge, where ~10¹² refile events became dependent DRAM
+round-trips. The profile also *exonerated* two suspects (the u128-divide items
+previously reverted as ineffective): no division instruction was hot.
+
+Fix: keep the 8-byte packed entries, store them in contiguous per-slot vectors
+again — drains stream sequentially. Verified time-neutral at 10¹⁹ (in-cache,
+where the arena was also fine), then **13,640 s at 10²² — −40% vs the arena and
+20% under the pre-refactor record** — with the post-fix profile led by the kill
+loop's `bt`/`btr` at ~11%/5% and nothing else above 6%: the hottest thing in the
+program is the algorithm again.
+
+Standing findings from the same profiling runs: the A/Σ phase is **~19% of the
+run at 10²¹ and ~29% at 10²²** (share grows with x), with `udivmod` — the u128
+divide per (p, q) pair — at 12–14% of that phase: the next scale target, likely
+via per-p reciprocal (Barrett) batching. And sustained multi-hour thermal load
+costs up to ~9% on this hardware (3,297 s heat-soaked vs 3,004 s cool at 10²¹) —
+a provenance note every cross-run comparison now carries.
+
+The law, stamped three times this week (growth-ratio plateau, α optima, the
+arena): **every performance verdict is scale-indexed.** "Neutral at tested
+scales" describes the tests. Cache boundaries are where extrapolation dies, so
+the test matrix must include them.
+
 ## Verification
 
 - **Differential**: ω against a naive φ recursion, and B against an independent
