@@ -1318,13 +1318,37 @@ const Stats = struct {
 /// primes[] at scattered offsets and move MORE bytes than the sequential scan it
 /// replaces (~2.2 MB vs 1.7 MB per segment at 10^20). Contiguous 16-byte entries
 /// bring that to ~140 KB. p ≤ √z < 2^32 for any x this code can address.
-/// Ring storage is a LINEAR ARENA: bucketed prime bi owns arena slot bi − nbuck
-/// permanently (its p comes from the prime list, never stored), and slots are
-/// threaded onto per-ring-segment chains via link[]. Payload is u32:
-/// [wp : 3][offset-in-slot-segment : 18] — off < segw = 2^18 always. Exactly
-/// 8 B per bucketed prime, no growth, no doubling slack, no allocator floors,
-/// and same-slot refiling is structurally impossible to corrupt (no realloc).
-const ENT_NIL: u32 = std.math.maxInt(u32);
+/// One pending strike, packed into a u64: [p : 43][wp : 3][offset-in-slot-segment
+/// : 18]. Offset relative to the SLOT's segment base (< segw = 2^18 always, and
+/// √z < 2^32 fits 43 bits) — scale-safe with no guard.
+///
+/// Storage is contiguous per-slot VECTORS, not an arena of chains. The arena
+/// (8 B/prime exact, chain-linked) measured time-neutral at 10^18-19 — where it
+/// fit in L3 — and cost +33% at 10^22 (22671 s vs 17072 s pre-refactor, perf:
+/// one indexed u32 chain-load = 37.6% of ALL cycles): ~3 MB/thread of chains ×6
+/// threads crossed the 16 MB L3 exactly between 10^21 (9.6 MB, fast) and 10^22
+/// (18 MB, cliff), turning ~10^12 refile events into dependent DRAM round-trips.
+/// Vectors drain SEQUENTIALLY — the prefetcher's favorite shape — at the price
+/// of doubling slack (tens of MB at 10^22; noise against the hours reclaimed).
+/// Every performance verdict carries an "...at the scales measured" rider; this
+/// one is stamped for 10^22.
+const Ent = u64;
+
+inline fn entPack(off: u64, wp: u8, p: u64) Ent {
+    return off | (@as(u64, wp) << 18) | (p << 21);
+}
+
+const Bucket = struct {
+    items: []Ent = &.{},
+    len: usize = 0,
+    inline fn push(self: *Bucket, gpa: std.mem.Allocator, e: Ent) !void {
+        if (self.len == self.items.len) {
+            self.items = try gpa.realloc(self.items, if (self.items.len == 0) 64 else self.items.len * 2);
+        }
+        self.items[self.len] = e;
+        self.len += 1;
+    }
+};
 
 const Scratch = struct {
     ctr: Ctr,
@@ -1332,9 +1356,7 @@ const Scratch = struct {
     next: []u64,
     wpos: []u8,
     phi_run: []i64,
-    ent: []u32, // arena payloads, indexed by bi − nbuck
-    link: []u32, // chain: next arena index in the same ring slot
-    head: []u32, // per ring slot: first arena index (ENT_NIL = empty)
+    buck: []Bucket, // ring of per-slot vectors, indexed by (segment index & ring_mask)
     pwin: PiWin, // per-thread π window over the current sweep segment
     pw_next: []u64, // window strike cursors (base primes ≤ x^(1/4))
     pw_wpos: []u8,
@@ -1347,9 +1369,11 @@ const Scratch = struct {
             .next = try gpa.alloc(u64, naz),
             .wpos = try gpa.alloc(u8, naz),
             .phi_run = try gpa.alloc(i64, nax),
-            .ent = try gpa.alloc(u32, naz),
-            .link = try gpa.alloc(u32, naz),
-            .head = try gpa.alloc(u32, nring),
+            .buck = blk: {
+                const b = try gpa.alloc(Bucket, nring);
+                @memset(b, Bucket{});
+                break :blk b;
+            },
             .pwin = .{ .bits = try gpa.alloc(u64, nwin), .pref = try gpa.alloc(u32, nwin + 1), .lo = 0, .base = 0 },
             .pw_next = try gpa.alloc(u64, nwb),
             .pw_wpos = try gpa.alloc(u8, nwb),
@@ -1362,9 +1386,8 @@ const Scratch = struct {
         gpa.free(self.next);
         gpa.free(self.wpos);
         gpa.free(self.phi_run);
-        gpa.free(self.ent);
-        gpa.free(self.link);
-        gpa.free(self.head);
+        for (self.buck) |*b| if (b.items.len > 0) gpa.free(b.items);
+        gpa.free(self.buck);
         gpa.free(self.pwin.bits);
         gpa.free(self.pwin.pref);
         gpa.free(self.pw_next);
@@ -1482,7 +1505,7 @@ inline fn foldPrime(comptime INST: bool, comptime counted: bool, ctx: anytype, c
 
 /// Sweep block t (segw-aligned) with fast-forwarded cursors + LOCAL phi_run; write the
 /// reduction data into ctx.blk_*[t] (disjoint per t ⇒ concurrency-safe across threads).
-fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, ctx: *BlkCtx(X, P), sc: *Scratch, st: *Stats, t: usize) void {
+fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, gpa: std.mem.Allocator, ctx: *BlkCtx(X, P), sc: *Scratch, st: *Stats, t: usize) !void {
     const primes = ctx.primes;
     const x = ctx.x;
     const y = ctx.y;
@@ -1533,16 +1556,12 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, ctx: *Bl
     // multiple lands in, so a segment later touches only the primes that hit it.
     const nbuck = ctx.nbuck;
     const rmask = ctx.ring_mask;
-    @memset(sc.head, ENT_NIL);
+    for (sc.buck) |*b| b.len = 0;
     for (nbuck..naz) |bi| {
         if (next[bi] >= block_hi) continue;
         const si = (next[bi] - block_lo) / segw;
         const base = block_lo + @as(u64, @intCast(si)) * segw;
-        const idx: u32 = @intCast(bi - nbuck);
-        sc.ent[idx] = @intCast((next[bi] - base) | (@as(u64, wpos[bi]) << 18));
-        const slot: usize = @as(usize, @intCast(si)) & rmask;
-        sc.link[idx] = sc.head[slot];
-        sc.head[slot] = idx;
+        try sc.buck[@as(usize, @intCast(si)) & rmask].push(gpa, entPack(next[bi] - base, wpos[bi], @intCast(primes[bi])));
     }
 
     // B's descending cursor over the primes of (y, √x] — the only loop that needs
@@ -1637,14 +1656,13 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, ctx: *Bl
             // Drain the primes filed under this segment, refiling each under the
             // segment of its next multiple. Entries are contiguous, so this streams.
             const si: usize = @intCast((lo - block_lo) / segw);
-            var idx = sc.head[si & rmask];
-            sc.head[si & rmask] = ENT_NIL;
-            while (idx != ENT_NIL) {
-                const nxt = sc.link[idx]; // before refile overwrites it
-                const e = sc.ent[idx];
+            const b = &sc.buck[si & rmask];
+            const n = b.len;
+            b.len = 0; // refiling targets a strictly later slot, never this one
+            for (b.items[0..n]) |e| {
                 var j: u64 = lo + (e & 0x3FFFF);
                 var wp: u8 = @intCast((e >> 18) & 7);
-                const pe: u64 = @intCast(primes[nbuck + idx]);
+                const pe: u64 = e >> 21;
                 while (j < hi) {
                     if (INST) st.n_kill += 1;
                     sc.ctr.strike(@intCast(j - lo));
@@ -1653,12 +1671,12 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, ctx: *Bl
                 }
                 if (j < block_hi) {
                     const sj: usize = @intCast((j - block_lo) / segw);
+                    // audit flag 10a: a same-slot refile after realloc would alias
+                    // the slice being drained; the ring-span invariant forbids it.
+                    std.debug.assert((sj & rmask) != (si & rmask));
                     const sbase = block_lo + @as(u64, @intCast(sj)) * segw;
-                    sc.ent[idx] = @intCast((j - sbase) | (@as(u64, wp) << 18));
-                    sc.link[idx] = sc.head[sj & rmask];
-                    sc.head[sj & rmask] = idx;
+                    try sc.buck[sj & rmask].push(gpa, entPack(j - sbase, wp, pe));
                 }
-                idx = nxt;
             }
         }
         if (naz > nfold_c) sc.ctr.rebuild();
@@ -1806,7 +1824,7 @@ fn omegaBlocked(comptime INST: bool, comptime X: type, gpa: std.mem.Allocator, s
     var sc = try Scratch.init(gpa, ctx.nax, ctx.naz, ctx.segw, ctx.nring, ctx.nwb);
     defer sc.deinit(gpa);
     var st = Stats{};
-    for (0..nb) |t| runOneBlock(INST, X, P, &ctx, &sc, &st, t);
+    for (0..nb) |t| try runOneBlock(INST, X, P, gpa, &ctx, &sc, &st, t);
     const r = try reduceOmB(X, P, gpa, &ctx);
     if (INST) std.debug.print("  ωB-stats: nax={d} naz={d} nb={d} segs={d} mwalk={d} leaves(small/C/D)={d}/{d}/{d} kills={d} Bqueries={d}\n", .{ ctx.nax, ctx.naz, nb, st.n_seg, st.n_mwalk, st.n_small, st.n_easy, st.n_hard, st.n_kill, st.n_bq });
     return r;
@@ -1833,26 +1851,33 @@ fn omegaBlockedPar(comptime INST: bool, comptime X: type, gpa: std.mem.Allocator
     @memset(stats, Stats{});
 
     const Worker = struct {
-        fn run(cx: *BlkCtx(X, P), sc: *Scratch, stt: *Stats, cpu: ?u32) void {
+        fn run(g: std.mem.Allocator, cx: *BlkCtx(X, P), sc: *Scratch, stt: *Stats, cpu: ?u32, errp: *?anyerror) void {
             if (cpu) |c| pinToCpu(c);
             while (true) {
                 const t = cx.disp.fetchAdd(1, .monotonic);
                 if (t >= cx.nb) break;
-                runOneBlock(INST, X, P, cx, sc, stt, t);
+                runOneBlock(INST, X, P, g, cx, sc, stt, t) catch |e| {
+                    errp.* = e; // bucket growth OOM: record and stop this worker
+                    return;
+                };
             }
         }
     };
     const threads = try gpa.alloc(std.Thread, nthreads);
     defer gpa.free(threads);
+    const werr = try gpa.alloc(?anyerror, nthreads);
+    defer gpa.free(werr);
+    @memset(werr, null);
     var spawned: usize = 0;
     for (1..nthreads) |i| {
         const cpu: ?u32 = if (pins) |pp| pp[i] else null;
-        threads[i] = std.Thread.spawn(.{}, Worker.run, .{ &ctx, &scratches[i], &stats[i], cpu }) catch break;
+        threads[i] = std.Thread.spawn(.{}, Worker.run, .{ gpa, &ctx, &scratches[i], &stats[i], cpu, &werr[i] }) catch break;
         spawned = i;
     }
-    Worker.run(&ctx, &scratches[0], &stats[0], if (pins) |pp| pp[0] else null);
+    Worker.run(gpa, &ctx, &scratches[0], &stats[0], if (pins) |pp| pp[0] else null, &werr[0]);
     var j: usize = 1;
     while (j <= spawned) : (j += 1) threads[j].join();
+    for (werr) |e| if (e) |ee| return ee;
 
     if (INST) {
         var st = Stats{};
