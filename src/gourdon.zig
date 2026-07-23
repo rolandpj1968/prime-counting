@@ -635,17 +635,17 @@ fn oracleStrikeSeg(bits: []u64, base: []const u32, n: u64, nw: usize, w0: usize)
 /// O(√x/segw) memory where the resident oracle kept √x/30 bytes of bits. This is
 /// what lets the oracle be capped at plist_max (≈ y): every π value above y now
 /// comes from bpi + a freshly sieved window.
-fn buildBoundaryPi(gpa: std.mem.Allocator, sqx: u64, nthreads: usize, pins: ?[]const u32) !struct { bpi: []u64, total: u64 } {
-    const nbpi = @as(usize, @intCast(sqx / SWEEP_SEGW)) + 2;
+fn buildBoundaryPi(gpa: std.mem.Allocator, sqx: u64, segw: usize, nthreads: usize, pins: ?[]const u32) !struct { bpi: []u64, total: u64 } {
+    const nbpi = @as(usize, @intCast(sqx / segw)) + 2;
     const bpi = try gpa.alloc(u64, nbpi);
     errdefer gpa.free(bpi);
     @memset(bpi, 0);
     const base = try sievePrimes(u32, gpa, isqrt(sqx));
     defer gpa.free(base);
 
-    const AW: u64 = 16 * SWEEP_SEGW;
+    const AW: u64 = 16 * @as(u64, segw);
     const nwin: usize = @intCast(sqx / AW + 1);
-    const nww = (16 * SWEEP_SEGW) / 240;
+    const nww = (16 * segw) / 240;
     const nsegs_total = nbpi - 1; // count slots: segment k = [k·segw, (k+1)·segw)
 
     const Ctx = struct {
@@ -655,6 +655,7 @@ fn buildBoundaryPi(gpa: std.mem.Allocator, sqx: u64, nthreads: usize, pins: ?[]c
         sqx: u64,
         nwin: usize,
         nsegs: usize,
+        segw: usize,
     };
     var ctx = Ctx{
         .disp = std.atomic.Value(usize).init(0),
@@ -663,16 +664,17 @@ fn buildBoundaryPi(gpa: std.mem.Allocator, sqx: u64, nthreads: usize, pins: ?[]c
         .sqx = sqx,
         .nwin = nwin,
         .nsegs = nsegs_total,
+        .segw = segw,
     };
     const Worker = struct {
         fn run(cx: *Ctx, bits: []u64, cpu: ?u32) void {
             if (cpu) |c| pinToCpu(c);
-            const segww = SWEEP_SEGW / 240; // words per segment
+            const segww = cx.segw / 240; // words per segment
             while (true) {
                 const wi = cx.disp.fetchAdd(1, .monotonic);
                 if (wi >= cx.nwin) break;
-                const wlo = @as(u64, wi) * (16 * SWEEP_SEGW);
-                const whi = @min(wlo + 16 * SWEEP_SEGW, cx.sqx + 1);
+                const wlo = @as(u64, wi) * (16 * @as(u64, cx.segw));
+                const whi = @min(wlo + 16 * @as(u64, cx.segw), cx.sqx + 1);
                 bwinFill(u32, bits, cx.base, cx.base.len, wlo, whi);
                 if (whi == cx.sqx + 1) {
                     // zero every bit at values > √x so counts stay exact
@@ -1073,7 +1075,7 @@ const Partial = struct { A: i128 = 0, sig4: i128 = 0, sig5: i128 = 0, sig6: i128
 /// The resident oracle serves only v ≤ y queries and the scalars — everything the
 /// y-capped oracle of the final increment can still answer. π(√x) arrives as a
 /// parameter (bpi's builder knows it).
-fn computeTermsPar(comptime X: type, gpa: std.mem.Allocator, s: anytype, x: X, y: u64, sqx: u64, x13: u64, sqz: u64, xstar: u64, nthreads: usize, pins: ?[]const u32, bpi: []const u64, pi_sqx: i128) !Terms {
+fn computeTermsPar(comptime X: type, gpa: std.mem.Allocator, s: anytype, x: X, y: u64, sqx: u64, x13: u64, sqz: u64, xstar: u64, nthreads: usize, pins: ?[]const u32, bpi: []const u64, pi_sqx: i128, segw: usize) !Terms {
     const pio = &s.pio;
     const a: i128 = @intCast(pio.count(y));
     const b: i128 = @intCast(pio.count(x13));
@@ -1087,7 +1089,7 @@ fn computeTermsPar(comptime X: type, gpa: std.mem.Allocator, s: anytype, x: X, y
     const nchunks = @max(@as(usize, 1), @min(n_primes, nthreads * 16)); // over-partition: small p ⇒ more work
     const csize = (n_primes + nchunks - 1) / nchunks;
 
-    const AWIN: u64 = 16 * SWEEP_SEGW; // ~4.19M ints: bits 140 KB + prefix 70 KB, L2-resident
+    const AWIN: u64 = 16 * @as(u64, segw); // 16 sweep segments: L2-scale windows
 
     const Ctx = struct {
         disp: std.atomic.Value(usize),
@@ -1106,6 +1108,7 @@ fn computeTermsPar(comptime X: type, gpa: std.mem.Allocator, s: anytype, x: X, y
         w0: u64,
         nwb: usize,
         bpi: []const u64,
+        segw: usize,
     };
     var ctx = Ctx{
         .disp = std.atomic.Value(usize).init(0),
@@ -1124,6 +1127,7 @@ fn computeTermsPar(comptime X: type, gpa: std.mem.Allocator, s: anytype, x: X, y
         .w0 = (y / AWIN) * AWIN,
         .nwb = @max(3, @as(usize, @intCast(pio.count(isqrt(sqx))))),
         .bpi = bpi,
+        .segw = segw,
     };
     const partials = try gpa.alloc(Partial, nthreads);
     defer gpa.free(partials);
@@ -1181,7 +1185,7 @@ fn computeTermsPar(comptime X: type, gpa: std.mem.Allocator, s: anytype, x: X, y
                     acc += @popCount(wbits[w2]);
                 }
                 wpref[wbits.len] = acc;
-                const win = PiWin{ .bits = wbits, .pref = wpref, .lo = wlo, .base = cx.bpi[@intCast(wlo / SWEEP_SEGW)] };
+                const win = PiWin{ .bits = wbits, .pref = wpref, .lo = wlo, .base = cx.bpi[@intCast(wlo / cx.segw)] };
                 const vmin = @max(wlo, cx.y);
                 var pidx = cx.i_lo;
                 while (pidx < cx.i_hi) : (pidx += 1) {
@@ -1204,7 +1208,7 @@ fn computeTermsPar(comptime X: type, gpa: std.mem.Allocator, s: anytype, x: X, y
         }
     };
 
-    const nww = (16 * SWEEP_SEGW) / 240;
+    const nww = (16 * segw) / 240;
     const wbits_flat = try gpa.alloc(u64, nthreads * nww);
     defer gpa.free(wbits_flat);
     const wpref_flat = try gpa.alloc(u32, nthreads * (nww + 1));
@@ -1335,7 +1339,7 @@ const Stats = struct {
 const Ent = u64;
 
 inline fn entPack(off: u64, wp: u8, p: u64) Ent {
-    return off | (@as(u64, wp) << 18) | (p << 21);
+    return off | (@as(u64, wp) << 21) | (p << 24);
 }
 
 const Bucket = struct {
@@ -1660,9 +1664,9 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, gpa: std
             const n = b.len;
             b.len = 0; // refiling targets a strictly later slot, never this one
             for (b.items[0..n]) |e| {
-                var j: u64 = lo + (e & 0x3FFFF);
-                var wp: u8 = @intCast((e >> 18) & 7);
-                const pe: u64 = e >> 21;
+                var j: u64 = lo + (e & 0x1FFFFF);
+                var wp: u8 = @intCast((e >> 21) & 7);
+                const pe: u64 = e >> 24;
                 while (j < hi) {
                     if (INST) st.n_kill += 1;
                     sc.ctr.strike(@intCast(j - lo));
@@ -1723,14 +1727,14 @@ fn reduceOmB(comptime X: type, comptime P: type, gpa: std.mem.Allocator, ctx: *B
 }
 
 /// Build the BlkCtx (derived sizes + output arrays). null ⇒ no fold primes (tiny x).
-fn initBlkCtx(comptime X: type, comptime P: type, gpa: std.mem.Allocator, s: anytype, x: X, y: u64, z: u64, xstar: u64, nb: usize, bpi_in: ?[]const u64) !?BlkCtx(X, P) {
+fn initBlkCtx(comptime X: type, comptime P: type, gpa: std.mem.Allocator, s: anytype, x: X, y: u64, z: u64, xstar: u64, nb: usize, bpi_in: ?[]const u64, segw_in: usize) !?BlkCtx(X, P) {
     const primes = s.primes;
     const sqx = isqrtG(X, x);
     const sqz = isqrt(z);
     const naz: usize = @intCast(s.pio.count(sqz));
     if (naz == 0) return null;
     const nax: usize = @intCast(s.pio.count(xstar));
-    const segw: usize = SWEEP_SEGW;
+    const segw: usize = segw_in;
 
     // Bucket ring: primes sparse enough to miss most segments. A prime contributes
     // segw·(8/30)/p strikes per segment, so bucketing pays once p > segw·8/30. Only
@@ -1813,13 +1817,13 @@ fn freeBlkCtx(comptime X: type, comptime P: type, gpa: std.mem.Allocator, ctx: *
 }
 
 fn omegaCounter(comptime INST: bool, comptime X: type, gpa: std.mem.Allocator, s: anytype, x: X, y: u64, z: u64, xstar: u64) !OmegaB {
-    return omegaBlocked(INST, X, gpa, s, x, y, z, xstar, 1, null);
+    return omegaBlocked(INST, X, gpa, s, x, y, z, xstar, 1, null, SWEEP_SEGW);
 }
 
 /// Serial ω+B over nb blocks (nb=1 = monolithic sweep). Threaded: omegaBlockedPar.
-fn omegaBlocked(comptime INST: bool, comptime X: type, gpa: std.mem.Allocator, s: anytype, x: X, y: u64, z: u64, xstar: u64, nb: usize, bpi_in: ?[]const u64) !OmegaB {
+fn omegaBlocked(comptime INST: bool, comptime X: type, gpa: std.mem.Allocator, s: anytype, x: X, y: u64, z: u64, xstar: u64, nb: usize, bpi_in: ?[]const u64, segw: usize) !OmegaB {
     const P = std.meta.Child(@TypeOf(s.primes));
-    var ctx = (try initBlkCtx(X, P, gpa, s, x, y, z, xstar, nb, bpi_in)) orelse return .{ .omega = 0, .b = 0 };
+    var ctx = (try initBlkCtx(X, P, gpa, s, x, y, z, xstar, nb, bpi_in, segw)) orelse return .{ .omega = 0, .b = 0 };
     defer freeBlkCtx(X, P, gpa, &ctx);
     var sc = try Scratch.init(gpa, ctx.nax, ctx.naz, ctx.segw, ctx.nring, ctx.nwb);
     defer sc.deinit(gpa);
@@ -1833,9 +1837,9 @@ fn omegaBlocked(comptime INST: bool, comptime X: type, gpa: std.mem.Allocator, s
 /// Threaded ω+B (Model-A phase 2): nthreads workers pull blocks from an atomic
 /// dispenser, each with its own Scratch + Stats; block outputs are disjoint so no
 /// locks. Serial reduceOmB stitches after join. nb = nthreads·k_over (over-partition).
-fn omegaBlockedPar(comptime INST: bool, comptime X: type, gpa: std.mem.Allocator, s: anytype, x: X, y: u64, z: u64, xstar: u64, nb: usize, nthreads: usize, pins: ?[]const u32, bpi_in: ?[]const u64) !OmegaB {
+fn omegaBlockedPar(comptime INST: bool, comptime X: type, gpa: std.mem.Allocator, s: anytype, x: X, y: u64, z: u64, xstar: u64, nb: usize, nthreads: usize, pins: ?[]const u32, bpi_in: ?[]const u64, segw: usize) !OmegaB {
     const P = std.meta.Child(@TypeOf(s.primes));
-    var ctx = (try initBlkCtx(X, P, gpa, s, x, y, z, xstar, nb, bpi_in)) orelse return .{ .omega = 0, .b = 0 };
+    var ctx = (try initBlkCtx(X, P, gpa, s, x, y, z, xstar, nb, bpi_in, segw)) orelse return .{ .omega = 0, .b = 0 };
     defer freeBlkCtx(X, P, gpa, &ctx);
 
     const scratches = try gpa.alloc(Scratch, nthreads);
@@ -2030,6 +2034,11 @@ pub const Config = struct {
     pins: ?[]const u32 = null,
     /// Per-phase timing to stderr.
     verbose: bool = false,
+    /// Sweep segment width in integers (counter bits = segw/8 bytes). null ⇒
+    /// SWEEP_SEGW (32 KB bits, this laptop's L1d). Must be a multiple of 960
+    /// (MASK30 phase) and ≤ 2^21 (ring-entry offset field). The cache-hierarchy
+    /// knob: tune per machine, e.g. halved when running 2 threads/core.
+    segw: ?usize = null,
 };
 
 /// Below this the decomposition is not well defined: chooseY's clamps collapse (y is
@@ -2097,8 +2106,11 @@ pub fn piGourdonV(comptime X: type, gpa: std.mem.Allocator, x: X, cfg: Config) !
     }.f;
     lap(verbose, &tp, "sieve");
 
+    const segw: usize = cfg.segw orelse SWEEP_SEGW;
+    if (segw < 960 or segw % 960 != 0 or segw > (1 << 21)) return error.BadSegw;
+
     // π at segment boundaries below √x + π(√x), streamed — O(√x/segw) retained.
-    const bp = try buildBoundaryPi(gpa, sqx, nthreads, pins);
+    const bp = try buildBoundaryPi(gpa, sqx, segw, nthreads, pins);
     const bpi = bp.bpi;
     defer gpa.free(bpi);
     const pi_sqx: i128 = @intCast(bp.total);
@@ -2106,14 +2118,14 @@ pub fn piGourdonV(comptime X: type, gpa: std.mem.Allocator, x: X, cfg: Config) !
 
     // A/Σ phase 1 (nthreads = 1 runs the same code inline; computeTerms survives
     // only as the suite's oracle-backed differential reference).
-    const t = try computeTermsPar(X, gpa, &s, x, y, sqx, x13, sqz, xstar, nthreads, pins, bpi, pi_sqx);
+    const t = try computeTermsPar(X, gpa, &s, x, y, sqx, x13, sqz, xstar, nthreads, pins, bpi, pi_sqx, segw);
     lap(verbose, &tp, "A/Σ");
 
     // ω+B fused. Phase 2: block-and-scan (nb = nthreads·8 over-partition) if parallel.
     const wb = if (nthreads > 1)
-        try omegaBlockedPar(false, X, gpa, &s, x, y, z, xstar, nthreads * 8, nthreads, pins, bpi)
+        try omegaBlockedPar(false, X, gpa, &s, x, y, z, xstar, nthreads * 8, nthreads, pins, bpi, segw)
     else
-        try omegaBlocked(false, X, gpa, &s, x, y, z, xstar, 1, bpi);
+        try omegaBlocked(false, X, gpa, &s, x, y, z, xstar, 1, bpi, segw);
     const omega = wb.omega;
     const B = wb.b;
     lap(verbose, &tp, "ω+B");
@@ -2265,8 +2277,8 @@ pub fn main() !void {
         const wb = try omegaCounter(false, u64, gpa, &s, x, y, z, xstar);
         const b_ref = try computeB(false, gpa, &s, x, y, z, isqrt(x)); // standalone B reference
         // block-consistency: nb blocks + reduction must equal the nb=1 sweep
-        const wb4 = try omegaBlocked(false, u64, gpa, &s, x, y, z, xstar, 4, null);
-        const wb7 = try omegaBlocked(false, u64, gpa, &s, x, y, z, xstar, 7, null);
+        const wb4 = try omegaBlocked(false, u64, gpa, &s, x, y, z, xstar, 4, null, SWEEP_SEGW);
+        const wb7 = try omegaBlocked(false, u64, gpa, &s, x, y, z, xstar, 7, null, SWEEP_SEGW);
         const blk_ok = wb4.omega == wb.omega and wb4.b == wb.b and wb7.omega == wb.omega and wb7.b == wb.b;
         std.debug.print("  {d:>12}  ω naive={d:>14} counter={d:>14} {s}   B fused={d} ref={d} {s}   blocks(4,7){s}\n", .{ x, on, wb.omega, if (on == wb.omega) "match" else "MISMATCH", wb.b, b_ref, if (wb.b == b_ref) "match" else "MISMATCH", if (blk_ok) "=✓" else "=MISMATCH" });
     }
@@ -2293,7 +2305,7 @@ pub fn main() !void {
             bpi[0] = 0;
             for (1..nbpi) |k| bpi[k] = s.pio.count(@as(u64, k) * SWEEP_SEGW - 1);
             const t1 = common.nowNs();
-            const par = try computeTermsPar(u64, gpa, &s, x, y, sqx, x13, sqz, xstar, 4, &pins, bpi, @intCast(s.pio.count(sqx)));
+            const par = try computeTermsPar(u64, gpa, &s, x, y, sqx, x13, sqz, xstar, 4, &pins, bpi, @intCast(s.pio.count(sqx)), SWEEP_SEGW);
             const pt = @as(f64, @floatFromInt(common.nowNs() - t1)) / 1e9;
             const ok = ser.A == par.A and ser.sig4 == par.sig4 and ser.sig5 == par.sig5 and ser.sig6 == par.sig6;
             std.debug.print("  x=10^{d}: {s}  serial {d:.4}s  4-thread {d:.4}s  ({d:.2}x)\n", .{ std.math.log10_int(x), if (ok) "match" else "MISMATCH", st, pt, st / pt });

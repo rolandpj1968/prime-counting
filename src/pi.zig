@@ -28,6 +28,7 @@ const Opts = struct {
     time: bool = true,
     calibrate: bool = false,
     pin_list: ?[]const u8 = null,
+    segw: ?usize = null,
     budget: f64 = 300,
     fit_a: ?f64 = null,
     fit_b: ?f64 = null,
@@ -46,6 +47,8 @@ const usage =
     \\      --alpha <f>        override the fitted α in y = α·x^(1/3)
     \\      --y <n>            set y directly (overrides --alpha)
     \\      --pin              pin workers to cores 0,2,4,… (physical, skipping SMT)
+    \\      --segw <n>         sweep segment width in integers (default 262080 =
+    \\                         32 KB counter bits; multiple of 960, ≤ 2097152)
     \\      --pin-list <csv>   pin one worker per listed logical cpu (sets -t);
     \\                         e.g. 0,1 = both SMT threads of core 0
     \\  -v, --verbose          per-phase timing
@@ -387,6 +390,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
             o.alpha = std.fmt.parseFloat(f64, eat(&it, &eq_val, "--alpha")) catch die("--alpha needs a number", .{});
         } else if (std.mem.eql(u8, a, "--y")) {
             o.y = std.fmt.parseInt(u64, eat(&it, &eq_val, "--y"), 10) catch die("--y needs an integer", .{});
+        } else if (std.mem.eql(u8, a, "--segw")) {
+            const v = eat(&it, &eq_val, "--segw");
+            const n = std.fmt.parseInt(usize, v, 10) catch die("--segw needs an integer", .{});
+            if (n < 960 or n % 960 != 0 or n > (1 << 21)) die("--segw must be a multiple of 960, 960..2097152", .{});
+            o.segw = n;
         } else if (std.mem.eql(u8, a, "--pin-list")) {
             o.pin_list = eat(&it, &eq_val, "--pin-list");
         } else if (std.mem.eql(u8, a, "--pin")) {
@@ -468,6 +476,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             .nthreads = o.threads,
             .pins = pins,
             .verbose = o.verbose,
+            .segw = o.segw,
         })).pi,
         .lmo => blk: {
             // piLMOPar takes no y; --y/--alpha therefore apply to serial lmo only.
