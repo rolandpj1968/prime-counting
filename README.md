@@ -47,11 +47,8 @@ L3 16 MiB, 28 GiB RAM** (6-core Ryzen 5 6600H), `zig 0.16 build-exe -O ReleaseFa
 | 10¹⁸ | 24,739,954,287,740,860 | 39.1 s | 36 MB | 4.15 |
 | 10¹⁹ | 234,057,667,276,344,607 | 2.82 min | 90 MB | 4.32 |
 | 10²⁰ | 2,220,819,602,560,918,840 | **12.3 min** | **215 MB** | 4.37 |
-| 10²¹ | 21,127,269,486,018,731,928 | 1.05 h† | 1.71 GB† | — |
-| 10²² | 201,467,286,689,315,906,290 | **4.74 h†** | 4.87 GB† | — |
-
-† 10²¹/10²² predate the segmented oracle (whose memory saving *grows* with x —
-projected ~0.6/1.5 GB — and which measured 5–9% faster below); rerun pending.
+| 10²¹ | 21,127,269,486,018,731,928 | 55.0 min | 354 MB | 4.46 |
+| 10²² | 201,467,286,689,315,906,290 | **3.79 h** | 985 MB | 4.14 |
 **Memory now scales as O(x^(1/3))**, not O(√x): the largest resident structures
 are the y-sized leaf table and prime list. 10²⁴ needs ~4 GB (was ~40 GB) — the
 memory wall is gone, leaving runtime (~4 days at 10²⁴ on this laptop) as the
