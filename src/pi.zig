@@ -32,6 +32,7 @@ const Opts = struct {
     budget: f64 = 300,
     fit_a: ?f64 = null,
     fit_b: ?f64 = null,
+    u128: bool = false,
 };
 
 const usage =
@@ -58,6 +59,8 @@ const usage =
     \\                         fit α(x) = A + B·ln x; x (if given) caps the anchors
     \\      --budget <sec>     calibration time budget (default 300)
     \\      --alpha-fit <A,B>  use a fit from a prior --calibrate run
+    \\      --u128             force the u128 code path on x < 2^64 (measures the
+    \\                         wide-arithmetic tax; result must be identical)
     \\  -h, --help             this text
     \\
     \\gourdon: all options. lmo: --y/--alpha serial only, --pin parallel only, u128 ok.
@@ -402,6 +405,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
             o.pin = true;
         } else if (std.mem.eql(u8, a, "-v") or std.mem.eql(u8, a, "--verbose")) {
             o.verbose = true;
+        } else if (std.mem.eql(u8, a, "--u128")) {
+            o.u128 = true;
         } else if (std.mem.eql(u8, a, "--check")) {
             o.check = true;
         } else if (std.mem.eql(u8, a, "--no-time")) {
@@ -470,15 +475,23 @@ pub fn main(init: std.process.Init.Minimal) !void {
     if (o.algo != .gourdon and o.verbose)
         std.debug.print("pi: note: --verbose is gourdon-only\n", .{});
 
+    if (o.u128 and o.algo != .gourdon) die("--u128 is gourdon-only", .{});
+    if (o.u128 and o.x <= 10_000) die("--u128 needs x > 10^4 (below that the direct oracle answers)", .{});
+
     const t0 = common.nowNs();
+    const gcfg: gourdon.Config = .{
+        .y = y,
+        .nthreads = o.threads,
+        .pins = pins,
+        .verbose = o.verbose,
+        .segw = o.segw,
+    };
     const pi: i128 = switch (o.algo) {
-        .gourdon => (try gourdon.piGourdonCfg(gpa, o.x, .{
-            .y = y,
-            .nthreads = o.threads,
-            .pins = pins,
-            .verbose = o.verbose,
-            .segw = o.segw,
-        })).pi,
+        // --u128 bypasses the width dispatch: same x, wide arithmetic throughout.
+        .gourdon => if (o.u128 and o.x <= std.math.maxInt(u64))
+            (try gourdon.piGourdonV(u128, gpa, o.x, gcfg)).pi
+        else
+            (try gourdon.piGourdonCfg(gpa, o.x, gcfg)).pi,
         .lmo => blk: {
             // piLMOPar takes no y; --y/--alpha therefore apply to serial lmo only.
             const r = if (o.threads > 1)
