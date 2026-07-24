@@ -908,6 +908,29 @@ arena): **every performance verdict is scale-indexed.** "Neutral at tested
 scales" describes the tests. Cache boundaries are where extrapolation dies, so
 the test matrix must include them.
 
+## 10²³ — the phase anatomy of an 18-hour run
+
+π(10²³) = 1,925,320,391,606,803,968,923, verified against the known value:
+**66,569 s (18.49 h) / 2,247 MB peak** on the same six laptop cores — ratio 4.88
+over 10²², memory ratio 2.28 (the x^(1/3) law holding). The run carried the new
+`-v` in-phase progress instrumentation and 2-hourly cpu-clock probes, which
+turned the growth drift from conjecture into measurement:
+
+- **Phase split**: sieve 15 s, bpi 42 s, A/Σ 13,579 s (20.4%), ω+B 52,931 s
+  (79.5%), φ₀ 1.4 s. A/Σ grew ×3.3 from 10²² while ω+B grew ×5.6 — the A-share
+  *retreated* (29% → 20%), and the next scale lever moved back into ω+B: nseg
+  ×4.25 with ~1.3× per-segment cost on top, i.e. the O(nseg·π(√z)) stage
+  traversal (π(√z) doubled). Stage demotion — measured dead at 10¹⁸/10¹⁹ —
+  targets exactly this term and is due a retrial at 10²²⁺.
+- **Progress lines exposed A/Σ's internal split**: the v-window subphase is
+  ~130 s of the 13,579 s phase; effectively the entire phase is the p-chunk
+  loop (v < y pairs + Σ terms), where `udivmod` measured 15–16% of cycles
+  (up from 12–14% at 10²²) — the Barrett-batching target, now precisely
+  localized.
+- **Profile stability**: probes across the whole ω+B phase show `runOneBlock`
+  at 92–94% self with udivmod 5–7% and no hot chain-follow — the post-vecfix
+  signature holds at 5× the 10²² segment count.
+
 ## Verification
 
 - **Differential**: ω against a naive φ recursion, and B against an independent
@@ -919,7 +942,7 @@ the test matrix must include them.
 - **π oracle**: count() *and* prevPrime() against an explicit prime list at every
   v ≤ 3×10⁶. The oracle answers every π query in the terms, so a wheel-indexing
   off-by-one would silently skew π(x) rather than crash.
-- **Known values**: exact at every π(10ⁿ), 10¹³ → 10²².
+- **Known values**: exact at every π(10ⁿ), 10¹³ → 10²³.
 - **u128 path**: X = u128 must agree with X = u64 on x < 2⁶⁴ — *and* see the φ₀ bug
   above for why that check alone was not sufficient.
 - **Parallel**: piGourdonPar must equal piGourdon exactly; the bucket ring's

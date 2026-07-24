@@ -14,7 +14,7 @@ compute it, in increasing sophistication and decreasing intuition:
   Deléglise–Rivat → Gourdon. Sub-linear (≈ O(N^(2/3))): counts π(N) *without
   listing the primes*, via a partial-sieve identity π(N) = φ(N,a) + a − 1 − P₂(N,a).
   This is how records reach 10³⁰. **Built here through the LMO/DR line and then
-  Gourdon's decomposition** — π(10²²) in 4.74 h on six cores.
+  Gourdon's decomposition** — π(10²³) in 18.5 h on six laptop cores.
 - **Analytic** — Lagarias–Odlyzko. O(N^(1/2+ε)) by contour-integrating ζ(s).
   Asymptotically best, but high-precision-arithmetic constants leave it
   practically dominated; its real use is independent verification.
@@ -27,7 +27,7 @@ combinatorial method is the intellectual object; the machine is a multiplier.
 Complete through **Gourdon's decomposition**, parallel, with the LMO/Deléglise–Rivat
 line beneath it as reference and correctness oracle, and the full straight-sieving
 characterization beneath that. Everything below is exact and verified against every
-known value 10 → 10²² (plus exhaustively over [0, 5000]). Presented most-advanced first.
+known value 10 → 10²³ (plus exhaustively over [0, 5000]). Presented most-advanced first.
 
 All timings on one quiet laptop: **AVX2 (no AVX-512), L1d 32 KiB / L2 512 KiB /
 L3 16 MiB, 28 GiB RAM** (6-core Ryzen 5 6600H), `zig 0.16 build-exe -O ReleaseFast
@@ -49,9 +49,11 @@ L3 16 MiB, 28 GiB RAM** (6-core Ryzen 5 6600H), `zig 0.16 build-exe -O ReleaseFa
 | 10²⁰ | 2,220,819,602,560,918,840 | **12.3 min** | **215 MB** | 4.37 |
 | 10²¹ | 21,127,269,486,018,731,928 | 50.1 min | 433 MB | 4.06 |
 | 10²² | 201,467,286,689,315,906,290 | **3.79 h** | 985 MB | 4.54 |
+| 10²³ | 1,925,320,391,606,803,968,923 | **18.49 h** | 2,247 MB | 4.88 |
 
 (Timing provenance: cool-start runs; sustained multi-hour load costs up to ~9%
-on this laptop — measured, not assumed. Profiles of both top rows show the
+on this laptop — measured, not assumed. The 10²³ row is inherently heat-soaked —
+no 18-hour run is a cool-start run. Profiles of the top rows show the
 sieve's kill loop — `bt`/`btr` — as the hottest instructions, i.e. the machine
 spends its time on the algorithm, not on stalls.)
 **Memory now scales as O(x^(1/3))**, not O(√x): the largest resident structures
@@ -60,12 +62,16 @@ memory wall is gone, leaving runtime (~4 days at 10²⁴ on this laptop) as the
 only constraint.
 
 The ×prev column is the empirical growth per power of ten; theory (x^(2/3)) says
-**4.64**. It sits at 4.12–4.25 through 10²⁰ and converges *up* to ~4.5 beyond — a
-reminder that the plateau was a property of the measured range, not a permanent
-state (extrapolating it made the 10²² estimate 21% optimistic). Two unmeasured
-candidates for the drift: the π oracle stops fitting any cache (3.5 GB at 10²², and
-its probes are random), and Amdahl — oracle build, prime sieve, μ/δ construction and
-the cross-block reduction are all serial and all grow with x.
+**4.64**. It sits at 4.12–4.25 through 10²⁰ and climbs through it beyond — 4.54,
+then 4.88 at 10²³ — a reminder that the plateau was a property of the measured
+range, not a permanent state (extrapolating it made the 10²² estimate 21%
+optimistic). At 10²³ the drift is finally *measured*, via per-phase timing: A/Σ
+grew only ×3.3 (13,579 s) while ω+B grew ×5.6 (52,931 s). The ω+B excess
+decomposes as segments ×4.25 (nseg ∝ z) times ~1.3× per segment — the stage
+count π(√z) doubled, and the O(nseg·π(√z)) per-segment stage traversal is the
+superlinear term (the stage-demotion optimisation, measured dead at 10¹⁸–10¹⁹,
+targets exactly this and is due a retrial at 10²²⁺). Heat soak contributes some
+unattributed slice of the remainder.
 
 What earns it, beyond the decomposition itself:
 
