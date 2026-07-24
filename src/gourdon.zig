@@ -145,26 +145,53 @@ fn sievePrimes(comptime P: type, gpa: std.mem.Allocator, nmax: u64) ![]P {
 /// against, so saturating is exact iff √y < DELTA_MAX, i.e. y < 4.295e9. With
 /// y = α·x^(1/3) and α from chooseAlpha that holds to x ≈ 10^25 and fails at 10^26
 /// (y = 8.7e9, √y = 93529). Sieve.init enforces it rather than trusting the bound.
-/// Fused μ+δ leaf table, one u16 per m ∈ [0..y]:
-///   0        ⇒ μ(m) = 0 (some p² | m) — rejected everywhere, so μ's zero bit is free
-///   bit 15   ⇒ μ(m) = +1 (even # prime factors); clear ⇒ −1. (+1 sets the bit so
-///              m = 1 encodes as 0x8000 and cannot collide with the 0 sentinel.)
-///   bits 0-14⇒ min(π(spf(m)), LEAF_SAT) — the INDEX of the smallest prime factor,
-///              not its value. The only consumer is the leaf test spf(m) > p with
-///              p = primes[bi], and spf > p ⟺ π(spf) > bi+1, so the compare is
-///              against the loop index and needs no prime value at all. Indices
-///              compress ~ln p better than values: 15 bits reaches p_32766 =
-///              386,051, i.e. √y < 386k ⇒ x ≈ 10^29 — past the runtime horizon —
-///              where the old u16 VALUE encoding died at √y > 65535 (x ≈ 10^25).
-/// One table and one stream where μ (i8) + δ (u16) were two; 2 bytes/m instead of 3.
+/// Fused μ+δ leaf table, u8 first level + sparse u16 overflow, per m ∈ [0..y]:
+///   l8[m] = 0  ⇒ μ(m) = 0 (some p² | m) — rejected everywhere
+///   bit 7      ⇒ μ(m) = +1 (even # prime factors); clear ⇒ −1. (+1 sets the bit so
+///                m = 1 encodes as 0x80 and cannot collide with the 0 sentinel.)
+///   bits 0-6   ⇒ min(π(spf(m)), 127) — the INDEX of the smallest prime factor
+///                (spf > p ⟺ π(spf) > bi+1: the compare is against the loop index).
+///                127 is the overflow sentinel: π(spf) ≥ 127 ⟺ spf > p_126 = 701,
+///                which Mertens puts at a scale-independent ~8.6% of m. Those true
+///                indices live in lovf (u16, min(idx, LEAF_SAT), ascending-m order);
+///                lpre[b] = # sentinels below 256·b seeds O(1) rank queries.
+/// Stages bi+1 < 127 never touch the overflow (sentinel ⇒ spf > p, accept as-is);
+/// stages bi+1 ≥ 127 reject every non-sentinel on the u8 alone and read sentinels'
+/// indices off a per-stage descending cursor — the m-walk visits every m in order,
+/// so the overflow consult is a sequential u16 stream, rank only reseeding it per
+/// (stage, block). ~1.25 bytes/m resident and ~1.17 bytes/m streamed where the
+/// fused u16 was 2 — the leaf stream is the shared-DRAM bound at ≥6 threads.
+/// Saturation unchanged: compares reach at most π(√y) < LEAF_SAT ⇒ exact to x≈10^29.
 const LEAF_SAT: u16 = 0x7FFF;
-const LEAF_PLUS: u16 = 0x8000;
+const L8_SIGN: u8 = 0x80; // μ = +1
+const L8_IDX: u8 = 0x7F; // spf-index field
+const L8_SENT: u8 = 0x7F; // idx field ceiling ⇒ consult lovf
 const LeafIdxTooNarrow = error.YExceedsLeafIndexRange;
+
+/// # sentinel entries at positions ≤ m — block prefix + a ≤256-byte tail scan.
+fn leafRank(l8: []const u8, lpre: []const u32, m: usize) usize {
+    var c: usize = lpre[m >> 8];
+    var j: usize = m & ~@as(usize, 0xFF);
+    while (j <= m) : (j += 1) c += @intFromBool(l8[j] & L8_IDX == L8_SENT);
+    return c;
+}
+
+/// Full spf index for one m, overflow included — suite-reference speed only;
+/// the sweep uses the sequential per-stage cursors instead.
+fn leafIdxFull(l8: []const u8, lovf: []const u16, lpre: []const u32, m: usize) u16 {
+    const b = l8[m];
+    if (b == 0) return 0;
+    const idx7: u16 = b & L8_IDX;
+    if (idx7 != L8_SENT) return idx7;
+    return lovf[leafRank(l8, lpre, m) - 1];
+}
 
 fn Sieve(comptime P: type) type {
     return struct {
         const Self = @This();
-        leaf: []u16, // fused μ + spf-index table, [0..y] — see LEAF_SAT above
+        l8: []u8, // fused μ + spf-index table, [0..y] — see the encoding above
+        lovf: []u16, // true indices for sentinel entries, ascending-m order
+        lpre: []u32, // lpre[b] = # sentinels below 256·b (rank seed)
         primes: []P, // ascending, ≤ plist_max (enumeration only)
         pio: PiOracle, // π(v) and descending prime walk over [0, √x]
 
@@ -183,9 +210,15 @@ fn Sieve(comptime P: type) type {
         // π(√y) < LEAF_SAT. An error, not a comment — the u16-value guard's lesson.
         if (pio.count(isqrt(y)) >= LEAF_SAT) return LeafIdxTooNarrow;
 
-        const leaf = try gpa.alloc(u16, Ny);
-        errdefer gpa.free(leaf);
-        @memset(leaf, LEAF_PLUS); // μ=+1, spf-index unset (0)
+        const l8 = try gpa.alloc(u8, Ny);
+        errdefer gpa.free(l8);
+        @memset(l8, L8_SIGN); // μ=+1, spf-index unset (0)
+
+        // Overflow candidates arrive q-major during pass 1 — collect (m << 16 | idx)
+        // and m-sort afterwards. ~8.6% of y entries, transient.
+        var pend: []u64 = &.{};
+        var npend: usize = 0;
+        defer if (pend.len > 0) gpa.free(pend);
 
         // Pass 1, primes ascending: flip the sign bit per prime factor; first flip
         // also stamps the spf index (first-write-wins ⇒ smallest, since q ascends).
@@ -193,28 +226,67 @@ fn Sieve(comptime P: type) type {
             const q: usize = @intCast(q32);
             if (q >= Ny) break;
             const qidx1: u16 = @intCast(@min(qi + 1, LEAF_SAT)); // 1-based π(q), saturated
-            var j: usize = q;
-            while (j < Ny) : (j += q) {
-                var v = leaf[j] ^ LEAF_PLUS;
-                if (v & LEAF_SAT == 0) v |= qidx1;
-                leaf[j] = v;
+            if (qidx1 < L8_SENT) {
+                const q8: u8 = @intCast(qidx1);
+                var j: usize = q;
+                while (j < Ny) : (j += q) {
+                    var v = l8[j] ^ L8_SIGN;
+                    if (v & L8_IDX == 0) v |= q8;
+                    l8[j] = v;
+                }
+            } else {
+                var j: usize = q;
+                while (j < Ny) : (j += q) {
+                    var v = l8[j] ^ L8_SIGN;
+                    if (v & L8_IDX == 0) {
+                        v |= L8_SENT;
+                        if (npend == pend.len)
+                            pend = try gpa.realloc(pend, if (pend.len == 0) 4096 else pend.len * 2);
+                        pend[npend] = (@as(u64, j) << 16) | qidx1;
+                        npend += 1;
+                    }
+                    l8[j] = v;
+                }
             }
         }
         // Pass 2, AFTER all sign/idx writes so nothing revives a zeroed entry:
-        // q² | m ⇒ μ(m) = 0 ⇒ the 0 sentinel.
+        // q² | m ⇒ μ(m) = 0 ⇒ the 0 sentinel (also voids any pend entry at m).
         for (primes) |q32| {
             const q: usize = @intCast(q32);
             const qq = q * q;
             if (qq >= Ny) break;
             var j: usize = qq;
-            while (j < Ny) : (j += qq) leaf[j] = 0;
+            while (j < Ny) : (j += qq) l8[j] = 0;
         }
-        if (Ny > 0) leaf[0] = 0;
-        // leaf[1] stays LEAF_PLUS: μ(1) = +1 (φ₀ needs it), idx 0 ⇒ never a leaf.
-        return .{ .leaf = leaf, .primes = primes, .pio = pio };
+        if (Ny > 0) l8[0] = 0;
+        // l8[1] stays L8_SIGN: μ(1) = +1 (φ₀ needs it), idx 0 ⇒ never a leaf.
+
+        // m-sort surviving overflow entries; emit lovf + the rank prefix lpre.
+        std.sort.pdq(u64, pend[0..npend], {}, std.sort.asc(u64));
+        const nlblk = (Ny >> 8) + 1;
+        const lpre = try gpa.alloc(u32, nlblk);
+        errdefer gpa.free(lpre);
+        var novf: usize = 0;
+        for (pend[0..npend]) |e| novf += @intFromBool(l8[@intCast(e >> 16)] != 0);
+        const lovf = try gpa.alloc(u16, novf);
+        errdefer gpa.free(lovf);
+        var k: usize = 0;
+        var blk: usize = 0;
+        for (pend[0..npend]) |e| {
+            const m: usize = @intCast(e >> 16);
+            if (l8[m] == 0) continue; // μ=0 zeroed it after the idx write
+            // first entry in a block stamps lpre for it (and any skipped blocks)
+            while (blk <= (m >> 8)) : (blk += 1) lpre[blk] = @intCast(k);
+            lovf[k] = @truncate(e);
+            k += 1;
+        }
+        while (blk < nlblk) : (blk += 1) lpre[blk] = @intCast(k);
+        return .{ .l8 = l8, .lovf = lovf, .lpre = lpre, .primes = primes, .pio = pio };
     }
     fn deinit(self: *Self, gpa: std.mem.Allocator) void {
-        gpa.free(self.leaf);
+        gpa.free(self.l8);
+        gpa.free(self.lovf);
+        gpa.free(self.lpre);
         gpa.free(self.primes);
         gpa.free(self.pio.bits);
         gpa.free(self.pio.pref);
@@ -1418,6 +1490,7 @@ const Bucket = struct {
 const Scratch = struct {
     ctr: Ctr,
     cur: []u64,
+    oc: []usize, // per-stage overflow cursors (consult stages; maxInt = unseeded)
     next: []u64,
     wpos: []u8,
     phi_run: []i64,
@@ -1431,6 +1504,7 @@ const Scratch = struct {
         return .{
             .ctr = try Ctr.init(gpa, segw),
             .cur = try gpa.alloc(u64, nax),
+            .oc = try gpa.alloc(usize, nax),
             .next = try gpa.alloc(u64, naz),
             .wpos = try gpa.alloc(u8, naz),
             .phi_run = try gpa.alloc(i64, nax),
@@ -1448,6 +1522,7 @@ const Scratch = struct {
     fn deinit(self: *Scratch, gpa: std.mem.Allocator) void {
         self.ctr.deinit(gpa);
         gpa.free(self.cur);
+        gpa.free(self.oc);
         gpa.free(self.next);
         gpa.free(self.wpos);
         gpa.free(self.phi_run);
@@ -1464,7 +1539,9 @@ const Scratch = struct {
 /// Shared read-only context + per-block output arrays + block dispenser.
 fn BlkCtx(comptime X: type, comptime P: type) type {
     return struct {
-        leaf: []const u16,
+        l8: []const u8,
+        lovf: []const u16,
+        lpre: []const u32,
         primes: []const P,
         pio: *const PiOracle,
         x: X,
@@ -1593,6 +1670,7 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, gpa: std
 
     // ── fast-forward all cursors to block_lo ──
     @memset(phi_run, 0);
+    @memset(sc.oc, std.math.maxInt(usize)); // overflow cursors: lazily rank-seeded
     for (0..nax) |bi| {
         const p: u64 = @intCast(primes[bi]);
         const bnd: u64 = if (block_lo == 0) y else @min(y, xdiv(X, x, p * block_lo));
@@ -1668,23 +1746,80 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, gpa: std
                     // load and a compare, and only a surviving leaf divides.
                     var m: u64 = @min(cur[bi], mBound(X, x, p, lo));
                     const mlo: u64 = @max(y / p, mBound(X, x, p, hi));
-                    while (m > mlo) {
-                        if (INST) st.n_mwalk += 1;
-                        // one load answers μ≠0 AND spf>p: (leaf & SAT) > bi+1
-                        const lv = ctx.leaf[@intCast(m)];
-                        if (@as(usize, lv & LEAF_SAT) > bi + 1) {
-                            const v: u64 = xdiv(X, x, m * p);
-                            const sign: i64 = if (lv & LEAF_PLUS != 0) -1 else 1; // -μ
-                            if (bi <= 2) {
-                                if (INST) st.n_small += 1;
-                                omega += @as(i128, sign) * @as(i128, phiSmall(v, bi));
-                            } else {
-                                const r = evalPhi(INST, st, v, bi, p, &sc.pwin, phi_run[bi], &sc.ctr, lo, sqx);
-                                omega += @as(i128, sign) * @as(i128, r.phi);
-                                if (r.is_d) omega_mu[bi] += sign;
+                    if (bi + 1 < L8_SENT) {
+                        // u8-complete stages: sentinel (π(spf) ≥ 127 > bi+1) passes
+                        // the spf > p test as-is — one byte answers everything.
+                        while (m > mlo) {
+                            if (INST) st.n_mwalk += 1;
+                            const lv = ctx.l8[@intCast(m)];
+                            if (@as(usize, lv & L8_IDX) > bi + 1) {
+                                const v: u64 = xdiv(X, x, m * p);
+                                const sign: i64 = if (lv & L8_SIGN != 0) -1 else 1; // -μ
+                                if (bi <= 2) {
+                                    if (INST) st.n_small += 1;
+                                    omega += @as(i128, sign) * @as(i128, phiSmall(v, bi));
+                                } else {
+                                    const r = evalPhi(INST, st, v, bi, p, &sc.pwin, phi_run[bi], &sc.ctr, lo, sqx);
+                                    omega += @as(i128, sign) * @as(i128, r.phi);
+                                    if (r.is_d) omega_mu[bi] += sign;
+                                }
                             }
+                            m -= 1;
                         }
-                        m -= 1;
+                    } else if (m > mlo) {
+                        // Consult stages (bi+1 ≥ 127): non-sentinels (idx ≤ 126) can
+                        // never pass, so only sentinels do anything — their true index
+                        // reads off a descending cursor over lovf. The walk visits
+                        // every m in (mlo, m] in order, so the cursor stays in sync;
+                        // rank reseeds it lazily once per (stage, block).
+                        if (sc.oc[bi] == std.math.maxInt(usize))
+                            sc.oc[bi] = leafRank(ctx.l8, ctx.lpre, @intCast(m));
+                        var oc = sc.oc[bi];
+                        // SWAR skip-scan: 8 bytes per load, whole words without a
+                        // sentinel (≈49%, Mertens) cost 4 ops total. Bytes are
+                        // processed high-to-low so the lovf cursor stays descending.
+                        const SENT8: u64 = 0x7F7F7F7F7F7F7F7F;
+                        const HI8: u64 = 0x8080808080808080;
+                        while (m > mlo + 7) {
+                            const base: usize = @intCast(m - 7);
+                            const w = std.mem.readInt(u64, ctx.l8[base..][0..8], .little);
+                            if (INST) st.n_mwalk += 8;
+                            // per-byte (b & 0x7F) == 0x7F ⟺ zero byte in zt
+                            const zt = (w & SENT8) ^ SENT8;
+                            var zmask = (zt -% 0x0101010101010101) & ~zt & HI8;
+                            while (zmask != 0) {
+                                // sentinel flags sit at bit 7 of each byte ⇒ @clz ∈ {0,8,…,56}
+                                const byte_i: u64 = (56 - @as(u64, @clz(zmask))) >> 3;
+                                const mm = @as(u64, base) + byte_i;
+                                const lv = ctx.l8[@intCast(mm)];
+                                oc -= 1;
+                                if (@as(usize, ctx.lovf[oc]) > bi + 1) {
+                                    const v: u64 = xdiv(X, x, mm * p);
+                                    const sign: i64 = if (lv & L8_SIGN != 0) -1 else 1; // -μ
+                                    const r = evalPhi(INST, st, v, bi, p, &sc.pwin, phi_run[bi], &sc.ctr, lo, sqx);
+                                    omega += @as(i128, sign) * @as(i128, r.phi);
+                                    if (r.is_d) omega_mu[bi] += sign;
+                                }
+                                zmask &= ~(@as(u64, 0x80) << @intCast(byte_i * 8));
+                            }
+                            m -= 8;
+                        }
+                        while (m > mlo) {
+                            if (INST) st.n_mwalk += 1;
+                            const lv = ctx.l8[@intCast(m)];
+                            if (lv & L8_IDX == L8_SENT) {
+                                oc -= 1;
+                                if (@as(usize, ctx.lovf[oc]) > bi + 1) {
+                                    const v: u64 = xdiv(X, x, m * p);
+                                    const sign: i64 = if (lv & L8_SIGN != 0) -1 else 1; // -μ
+                                    const r = evalPhi(INST, st, v, bi, p, &sc.pwin, phi_run[bi], &sc.ctr, lo, sqx);
+                                    omega += @as(i128, sign) * @as(i128, r.phi);
+                                    if (r.is_d) omega_mu[bi] += sign;
+                                }
+                            }
+                            m -= 1;
+                        }
+                        sc.oc[bi] = oc;
                     }
                     cur[bi] = m;
                 } else if (p > 2) {
@@ -1832,7 +1967,9 @@ fn initBlkCtx(comptime X: type, comptime P: type, gpa: std.mem.Allocator, s: any
 
     const tm = try buildSmallTemplates(gpa, primes);
     return .{
-        .leaf = s.leaf,
+        .l8 = s.l8,
+        .lovf = s.lovf,
+        .lpre = s.lpre,
         .primes = primes,
         .pio = &s.pio,
         .x = x,
@@ -1964,7 +2101,7 @@ fn phiRec(primes: []const u32, pi: []const u32, u: u64, b: usize) i64 {
     if (pb * pb > u) return @as(i64, @intCast(pi[@intCast(u)])) - @as(i64, @intCast(b)) + 1;
     return phiRec(primes, pi, u, b - 1) - phiRec(primes, pi, u / pb, b - 1);
 }
-fn omegaNaive(primes: []const u32, leaf: []const u16, pi: []const u32, x: u64, y: u64, xstar: u64) i128 {
+fn omegaNaive(primes: []const u32, l8: []const u8, lovf: []const u16, lpre: []const u32, pi: []const u32, x: u64, y: u64, xstar: u64) i128 {
     var omega: i128 = 0;
     for (primes, 0..) |p32, pidx| {
         const p: u64 = p32;
@@ -1972,10 +2109,12 @@ fn omegaNaive(primes: []const u32, leaf: []const u16, pi: []const u32, x: u64, y
         if (p > xstar) break;
         var m: u64 = y / p + 1;
         while (m <= y) : (m += 1) {
-            const lv = leaf[@intCast(m)];
-            if (@as(usize, lv & LEAF_SAT) <= pidx + 1) continue; // μ=0 or spf ≤ p
+            // rank-per-query overflow resolution: exercises the same structure the
+            // sweep reads via cursors, at reference speed
+            const idx = leafIdxFull(l8, lovf, lpre, @intCast(m));
+            if (@as(usize, idx) <= pidx + 1) continue; // μ=0 or spf ≤ p
             const u = x / (p * m);
-            const mun: i128 = if (lv & LEAF_PLUS != 0) 1 else -1;
+            const mun: i128 = if (l8[@intCast(m)] & L8_SIGN != 0) 1 else -1;
             omega += mun * @as(i128, phiRec(primes, pi, u, pidx));
         }
     }
@@ -2200,11 +2339,11 @@ pub fn piGourdonV(comptime X: type, gpa: std.mem.Allocator, x: X, cfg: Config) !
     {
         var n: u64 = 1;
         while (n <= y) : (n += 1) {
-            const lv = s.leaf[@intCast(n)];
+            const lv = s.l8[@intCast(n)];
             if (lv == 0) continue;
             if (n % 2 == 0) continue;
             const u: X = x / @as(X, n); // NOT xdiv: for x>2^64 and n∈{1,3,5}, x/n exceeds u64
-            const mun: i128 = if (lv & LEAF_PLUS != 0) 1 else -1;
+            const mun: i128 = if (lv & L8_SIGN != 0) 1 else -1;
             phi0 += mun * @as(i128, @intCast(u - u / 2));
         }
     }
@@ -2338,7 +2477,7 @@ pub fn main() !void {
         defer s.deinit(gpa);
         const pi = try buildPi(gpa, z);
         defer gpa.free(pi);
-        const on = omegaNaive(s.primes, s.leaf, pi, x, y, xstar);
+        const on = omegaNaive(s.primes, s.l8, s.lovf, s.lpre, pi, x, y, xstar);
         const wb = try omegaCounter(false, u64, gpa, &s, x, y, z, xstar);
         const b_ref = try computeB(false, gpa, &s, x, y, z, isqrt(x)); // standalone B reference
         // block-consistency: nb blocks + reduction must equal the nb=1 sweep
