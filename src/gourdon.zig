@@ -1900,27 +1900,97 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, gpa: std
     ctx.blk_b[t] = b_sum;
 }
 
-/// Serial prefix-sum stitch: ω D-leaf correction (O(nb·π(x*))) + B correction.
-fn reduceOmB(comptime X: type, comptime P: type, gpa: std.mem.Allocator, ctx: *BlkCtx(X, P)) !OmegaB {
+/// One fragment's locally-stitched reduction over the contiguous block range
+/// [t0, t1), with the fragment's ENTRY prefix taken as zero. Every correction is
+/// affine in the entry prefix — Σ_t P_before(t)·μ(t) splits as P_entry·Σμ +
+/// Σ P_within(t)·μ(t) — so a fragment's whole coupling to the blocks before it
+/// is two per-stage vectors (Σμ, Σφ-totals) and two scalars for B. This is the
+/// distribution seam: an agent computes any interval, emits FragOut, and the
+/// merge below reassembles exactly the serial stitch from tiling fragments.
+const FragOut = struct {
+    omega: i128, // fragment ω, within-fragment corrections included
+    b: i128, // fragment B, likewise
+    bcount: u64, // Σ B-queries (multiplies the incoming full-prefix scalar)
+    total_full: i64, // Σ per-block full totals (advances that scalar)
+    mu_sum: []i64, // Σ blk_mu per stage (multiplies the incoming prefix vector)
+    total_sum: []i64, // Σ blk_total per stage (advances the prefix vector)
+    fn deinit(self: *const FragOut, gpa: std.mem.Allocator) void {
+        gpa.free(self.mu_sum);
+        gpa.free(self.total_sum);
+    }
+};
+
+fn reduceFragment(comptime X: type, comptime P: type, gpa: std.mem.Allocator, ctx: *BlkCtx(X, P), t0: usize, t1: usize) !FragOut {
     const nax = ctx.nax;
-    const nb = ctx.nb;
     const prefix = try gpa.alloc(i64, nax);
-    defer gpa.free(prefix);
+    errdefer gpa.free(prefix);
     @memset(prefix, 0);
-    var omega_total: i128 = 0;
-    var b_total: i128 = 0;
+    const mu_sum = try gpa.alloc(i64, nax);
+    errdefer gpa.free(mu_sum);
+    @memset(mu_sum, 0);
+    var omega: i128 = 0;
+    var b: i128 = 0;
     var prefix_full: i64 = 0;
-    for (0..nb) |t| {
-        omega_total += ctx.blk_omega[t];
-        b_total += ctx.blk_b[t];
+    var bcount: u64 = 0;
+    for (t0..t1) |t| {
+        omega += ctx.blk_omega[t];
+        b += ctx.blk_b[t];
         var corr: i128 = 0;
         for (3..nax) |bi| corr += @as(i128, prefix[bi]) * @as(i128, ctx.blk_mu[t * nax + bi]);
-        omega_total += corr;
-        b_total += @as(i128, prefix_full) * @as(i128, @intCast(ctx.blk_bcount[t]));
-        for (3..nax) |bi| prefix[bi] += ctx.blk_total[t * nax + bi];
+        omega += corr;
+        b += @as(i128, prefix_full) * @as(i128, @intCast(ctx.blk_bcount[t]));
+        for (3..nax) |bi| {
+            prefix[bi] += ctx.blk_total[t * nax + bi];
+            mu_sum[bi] += ctx.blk_mu[t * nax + bi];
+        }
         prefix_full += ctx.blk_total_full[t];
+        bcount += ctx.blk_bcount[t];
     }
-    return .{ .omega = omega_total, .b = b_total };
+    // the final local prefix IS Σ blk_total — reuse it as the advance vector
+    return .{ .omega = omega, .b = b, .bcount = bcount, .total_full = prefix_full, .mu_sum = mu_sum, .total_sum = prefix };
+}
+
+/// Merge fragments that tile [0, nb) in block order. Structurally the same loop
+/// as the per-block stitch with fragments as super-blocks — the visible form of
+/// the affine-carry property.
+fn mergeFragments(gpa: std.mem.Allocator, nax: usize, frags: []const FragOut) !OmegaB {
+    const pfx = try gpa.alloc(i64, nax);
+    defer gpa.free(pfx);
+    @memset(pfx, 0);
+    var omega: i128 = 0;
+    var b: i128 = 0;
+    var pfx_full: i64 = 0;
+    for (frags) |f| {
+        omega += f.omega;
+        b += f.b;
+        var corr: i128 = 0;
+        for (3..nax) |bi| corr += @as(i128, pfx[bi]) * @as(i128, f.mu_sum[bi]);
+        omega += corr;
+        b += @as(i128, pfx_full) * @as(i128, @intCast(f.bcount));
+        for (3..nax) |bi| pfx[bi] += f.total_sum[bi];
+        pfx_full += f.total_full;
+    }
+    return .{ .omega = omega, .b = b };
+}
+
+/// Serial prefix-sum stitch, routed through the fragment seam: [0, nb) is cut
+/// into (deliberately uneven) fragments and merged, so every run — and every
+/// suite differential — exercises the same path a distributed reduce will use.
+fn reduceOmB(comptime X: type, comptime P: type, gpa: std.mem.Allocator, ctx: *BlkCtx(X, P)) !OmegaB {
+    const nb = ctx.nb;
+    const cuts = [4]usize{ 0, nb / 3, (2 * nb) / 3, nb }; // empty fragments filtered below
+    var frags: [3]FragOut = undefined;
+    var nf: usize = 0;
+    errdefer for (frags[0..nf]) |*f| f.deinit(gpa);
+    for (0..3) |i| {
+        if (cuts[i + 1] > cuts[i]) {
+            frags[nf] = try reduceFragment(X, P, gpa, ctx, cuts[i], cuts[i + 1]);
+            nf += 1;
+        }
+    }
+    const r = try mergeFragments(gpa, ctx.nax, frags[0..nf]);
+    for (frags[0..nf]) |*f| f.deinit(gpa);
+    return r;
 }
 
 /// Build the BlkCtx (derived sizes + output arrays). null ⇒ no fold primes (tiny x).
