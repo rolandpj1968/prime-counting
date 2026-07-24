@@ -1427,7 +1427,7 @@ inline fn evalPhi(comptime INST: bool, st: *Stats, vv: u64, b: usize, pp: u64, p
     return .{ .phi = pr_bi + ct.prefix(@intCast(vv - l)), .is_d = true };
 }
 
-const OmegaB = struct { omega: i128, b: i128 };
+pub const OmegaB = struct { omega: i128, b: i128 };
 
 /// ω+B instrumentation counters (INST-gated). Per-thread, summed after join.
 const Stats = struct {
@@ -1555,7 +1555,9 @@ fn BlkCtx(comptime X: type, comptime P: type) type {
         nay: usize,
         segw: usize,
         nseg: usize,
-        nb: usize,
+        nb: usize, // GLOBAL block grid (block geometry depends on it, never on t0/t1)
+        t0: usize, // this context sweeps blocks [t0, t1) of the global grid;
+        t1: usize, // blk_* arrays hold only t1−t0 rows, indexed by t − t0
         naz_i: i64,
         blk_total: []i64,
         blk_mu: []i64,
@@ -1712,7 +1714,7 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, gpa: std
     var pB: u64 = if (block_lo == 0) sqx else @min(sqx, xdiv(X, x, block_lo));
     pB = bwinPrev(P, &sc.bwin, primes, ctx.nwb, pB, y);
 
-    const omega_mu = ctx.blk_mu[t * nax ..][0..nax];
+    const omega_mu = ctx.blk_mu[(t - ctx.t0) * nax ..][0..nax];
     @memset(omega_mu, 0);
     var omega: i128 = 0;
     var b_sum: i128 = 0;
@@ -1893,11 +1895,12 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, gpa: std
         phi_run_full += sc.ctr.total;
         prog_om.tick(lo);
     }
-    for (0..nax) |bi| ctx.blk_total[t * nax + bi] = phi_run[bi];
-    ctx.blk_total_full[t] = phi_run_full;
-    ctx.blk_bcount[t] = b_count;
-    ctx.blk_omega[t] = omega;
-    ctx.blk_b[t] = b_sum;
+    const tl = t - ctx.t0;
+    for (0..nax) |bi| ctx.blk_total[tl * nax + bi] = phi_run[bi];
+    ctx.blk_total_full[tl] = phi_run_full;
+    ctx.blk_bcount[tl] = b_count;
+    ctx.blk_omega[tl] = omega;
+    ctx.blk_b[tl] = b_sum;
 }
 
 /// One fragment's locally-stitched reduction over the contiguous block range
@@ -1907,7 +1910,7 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, gpa: std
 /// is two per-stage vectors (Σμ, Σφ-totals) and two scalars for B. This is the
 /// distribution seam: an agent computes any interval, emits FragOut, and the
 /// merge below reassembles exactly the serial stitch from tiling fragments.
-const FragOut = struct {
+pub const FragOut = struct {
     omega: i128, // fragment ω, within-fragment corrections included
     b: i128, // fragment B, likewise
     bcount: u64, // Σ B-queries (multiplies the incoming full-prefix scalar)
@@ -1933,18 +1936,19 @@ fn reduceFragment(comptime X: type, comptime P: type, gpa: std.mem.Allocator, ct
     var prefix_full: i64 = 0;
     var bcount: u64 = 0;
     for (t0..t1) |t| {
-        omega += ctx.blk_omega[t];
-        b += ctx.blk_b[t];
+        const tl = t - ctx.t0; // blk_* rows are local to the context's interval
+        omega += ctx.blk_omega[tl];
+        b += ctx.blk_b[tl];
         var corr: i128 = 0;
-        for (3..nax) |bi| corr += @as(i128, prefix[bi]) * @as(i128, ctx.blk_mu[t * nax + bi]);
+        for (3..nax) |bi| corr += @as(i128, prefix[bi]) * @as(i128, ctx.blk_mu[tl * nax + bi]);
         omega += corr;
-        b += @as(i128, prefix_full) * @as(i128, @intCast(ctx.blk_bcount[t]));
+        b += @as(i128, prefix_full) * @as(i128, @intCast(ctx.blk_bcount[tl]));
         for (3..nax) |bi| {
-            prefix[bi] += ctx.blk_total[t * nax + bi];
-            mu_sum[bi] += ctx.blk_mu[t * nax + bi];
+            prefix[bi] += ctx.blk_total[tl * nax + bi];
+            mu_sum[bi] += ctx.blk_mu[tl * nax + bi];
         }
-        prefix_full += ctx.blk_total_full[t];
-        bcount += ctx.blk_bcount[t];
+        prefix_full += ctx.blk_total_full[tl];
+        bcount += ctx.blk_bcount[tl];
     }
     // the final local prefix IS Σ blk_total — reuse it as the advance vector
     return .{ .omega = omega, .b = b, .bcount = bcount, .total_full = prefix_full, .mu_sum = mu_sum, .total_sum = prefix };
@@ -1953,7 +1957,7 @@ fn reduceFragment(comptime X: type, comptime P: type, gpa: std.mem.Allocator, ct
 /// Merge fragments that tile [0, nb) in block order. Structurally the same loop
 /// as the per-block stitch with fragments as super-blocks — the visible form of
 /// the affine-carry property.
-fn mergeFragments(gpa: std.mem.Allocator, nax: usize, frags: []const FragOut) !OmegaB {
+pub fn mergeFragments(gpa: std.mem.Allocator, nax: usize, frags: []const FragOut) !OmegaB {
     const pfx = try gpa.alloc(i64, nax);
     defer gpa.free(pfx);
     @memset(pfx, 0);
@@ -1977,8 +1981,9 @@ fn mergeFragments(gpa: std.mem.Allocator, nax: usize, frags: []const FragOut) !O
 /// into (deliberately uneven) fragments and merged, so every run — and every
 /// suite differential — exercises the same path a distributed reduce will use.
 fn reduceOmB(comptime X: type, comptime P: type, gpa: std.mem.Allocator, ctx: *BlkCtx(X, P)) !OmegaB {
-    const nb = ctx.nb;
-    const cuts = [4]usize{ 0, nb / 3, (2 * nb) / 3, nb }; // empty fragments filtered below
+    const t0 = ctx.t0;
+    const nb = ctx.t1 - t0;
+    const cuts = [4]usize{ t0, t0 + nb / 3, t0 + (2 * nb) / 3, t0 + nb }; // empty fragments filtered below
     var frags: [3]FragOut = undefined;
     var nf: usize = 0;
     errdefer for (frags[0..nf]) |*f| f.deinit(gpa);
@@ -1994,7 +1999,7 @@ fn reduceOmB(comptime X: type, comptime P: type, gpa: std.mem.Allocator, ctx: *B
 }
 
 /// Build the BlkCtx (derived sizes + output arrays). null ⇒ no fold primes (tiny x).
-fn initBlkCtx(comptime X: type, comptime P: type, gpa: std.mem.Allocator, s: anytype, x: X, y: u64, z: u64, xstar: u64, nb: usize, bpi_in: ?[]const u64, segw_in: usize) !?BlkCtx(X, P) {
+fn initBlkCtx(comptime X: type, comptime P: type, gpa: std.mem.Allocator, s: anytype, x: X, y: u64, z: u64, xstar: u64, nb: usize, t0: usize, t1: usize, bpi_in: ?[]const u64, segw_in: usize) !?BlkCtx(X, P) {
     const primes = s.primes;
     const sqx = isqrtG(X, x);
     const sqz = isqrt(z);
@@ -2054,13 +2059,15 @@ fn initBlkCtx(comptime X: type, comptime P: type, gpa: std.mem.Allocator, s: any
         .segw = segw,
         .nseg = (total + segw - 1) / segw,
         .nb = nb,
+        .t0 = t0,
+        .t1 = t1,
         .naz_i = @intCast(naz),
-        .blk_total = try gpa.alloc(i64, nb * nax),
-        .blk_mu = try gpa.alloc(i64, nb * nax),
-        .blk_total_full = try gpa.alloc(i64, nb),
-        .blk_bcount = try gpa.alloc(u64, nb),
-        .blk_omega = try gpa.alloc(i128, nb),
-        .blk_b = try gpa.alloc(i128, nb),
+        .blk_total = try gpa.alloc(i64, (t1 - t0) * nax),
+        .blk_mu = try gpa.alloc(i64, (t1 - t0) * nax),
+        .blk_total_full = try gpa.alloc(i64, t1 - t0),
+        .blk_bcount = try gpa.alloc(u64, t1 - t0),
+        .blk_omega = try gpa.alloc(i128, t1 - t0),
+        .blk_b = try gpa.alloc(i128, t1 - t0),
         .bpi = bpi,
         .bpi_owned = bpi_owned,
         .nwb = nwb,
@@ -2092,7 +2099,7 @@ fn omegaCounter(comptime INST: bool, comptime X: type, gpa: std.mem.Allocator, s
 /// Serial ω+B over nb blocks (nb=1 = monolithic sweep). Threaded: omegaBlockedPar.
 fn omegaBlocked(comptime INST: bool, comptime X: type, gpa: std.mem.Allocator, s: anytype, x: X, y: u64, z: u64, xstar: u64, nb: usize, bpi_in: ?[]const u64, segw: usize) !OmegaB {
     const P = std.meta.Child(@TypeOf(s.primes));
-    var ctx = (try initBlkCtx(X, P, gpa, s, x, y, z, xstar, nb, bpi_in, segw)) orelse return .{ .omega = 0, .b = 0 };
+    var ctx = (try initBlkCtx(X, P, gpa, s, x, y, z, xstar, nb, 0, nb, bpi_in, segw)) orelse return .{ .omega = 0, .b = 0 };
     defer freeBlkCtx(X, P, gpa, &ctx);
     prog_om.begin("ω+B", ctx.nseg);
     var sc = try Scratch.init(gpa, ctx.nax, ctx.naz, ctx.segw, ctx.nring, ctx.nwb);
@@ -2104,14 +2111,13 @@ fn omegaBlocked(comptime INST: bool, comptime X: type, gpa: std.mem.Allocator, s
     return r;
 }
 
-/// Threaded ω+B (Model-A phase 2): nthreads workers pull blocks from an atomic
-/// dispenser, each with its own Scratch + Stats; block outputs are disjoint so no
-/// locks. Serial reduceOmB stitches after join. nb = nthreads·k_over (over-partition).
-fn omegaBlockedPar(comptime INST: bool, comptime X: type, gpa: std.mem.Allocator, s: anytype, x: X, y: u64, z: u64, xstar: u64, nb: usize, nthreads: usize, pins: ?[]const u32, bpi_in: ?[]const u64, segw: usize) !OmegaB {
-    const P = std.meta.Child(@TypeOf(s.primes));
-    var ctx = (try initBlkCtx(X, P, gpa, s, x, y, z, xstar, nb, bpi_in, segw)) orelse return .{ .omega = 0, .b = 0 };
-    defer freeBlkCtx(X, P, gpa, &ctx);
-    prog_om.begin("ω+B", ctx.nseg);
+/// The threaded block sweep over the context's [t0, t1): nthreads workers pull
+/// blocks from the atomic dispenser, each with its own Scratch + Stats; block
+/// outputs are disjoint so no locks. Reduction is the caller's business —
+/// reduceOmB for a whole run, reduceFragment for a distributed task.
+fn sweepBlocksPar(comptime INST: bool, comptime X: type, comptime P: type, gpa: std.mem.Allocator, ctx: *BlkCtx(X, P), nthreads: usize, pins: ?[]const u32) !void {
+    prog_om.begin("ω+B", (ctx.t1 - ctx.t0) * ((ctx.nseg + ctx.nb - 1) / ctx.nb));
+    ctx.disp.store(ctx.t0, .monotonic);
 
     const scratches = try gpa.alloc(Scratch, nthreads);
     defer gpa.free(scratches);
@@ -2130,7 +2136,7 @@ fn omegaBlockedPar(comptime INST: bool, comptime X: type, gpa: std.mem.Allocator
             if (cpu) |c| pinToCpu(c);
             while (true) {
                 const t = cx.disp.fetchAdd(1, .monotonic);
-                if (t >= cx.nb) break;
+                if (t >= cx.t1) break;
                 runOneBlock(INST, X, P, g, cx, sc, stt, t) catch |e| {
                     errp.* = e; // bucket growth OOM: record and stop this worker
                     return;
@@ -2146,10 +2152,10 @@ fn omegaBlockedPar(comptime INST: bool, comptime X: type, gpa: std.mem.Allocator
     var spawned: usize = 0;
     for (1..nthreads) |i| {
         const cpu: ?u32 = if (pins) |pp| pp[i] else null;
-        threads[i] = std.Thread.spawn(.{}, Worker.run, .{ gpa, &ctx, &scratches[i], &stats[i], cpu, &werr[i] }) catch break;
+        threads[i] = std.Thread.spawn(.{}, Worker.run, .{ gpa, ctx, &scratches[i], &stats[i], cpu, &werr[i] }) catch break;
         spawned = i;
     }
-    Worker.run(gpa, &ctx, &scratches[0], &stats[0], if (pins) |pp| pp[0] else null, &werr[0]);
+    Worker.run(gpa, ctx, &scratches[0], &stats[0], if (pins) |pp| pp[0] else null, &werr[0]);
     var j: usize = 1;
     while (j <= spawned) : (j += 1) threads[j].join();
     for (werr) |e| if (e) |ee| return ee;
@@ -2157,9 +2163,26 @@ fn omegaBlockedPar(comptime INST: bool, comptime X: type, gpa: std.mem.Allocator
     if (INST) {
         var st = Stats{};
         for (stats) |ss| st.add(ss);
-        std.debug.print("  ωB-par-stats: nb={d} nthreads={d} segs={d} kills={d} Bqueries={d}\n", .{ nb, nthreads, st.n_seg, st.n_kill, st.n_bq });
+        std.debug.print("  ωB-par-stats: nb={d} [{d},{d}) nthreads={d} segs={d} kills={d} Bqueries={d}\n", .{ ctx.nb, ctx.t0, ctx.t1, nthreads, st.n_seg, st.n_kill, st.n_bq });
     }
+}
+
+fn omegaBlockedPar(comptime INST: bool, comptime X: type, gpa: std.mem.Allocator, s: anytype, x: X, y: u64, z: u64, xstar: u64, nb: usize, nthreads: usize, pins: ?[]const u32, bpi_in: ?[]const u64, segw: usize) !OmegaB {
+    const P = std.meta.Child(@TypeOf(s.primes));
+    var ctx = (try initBlkCtx(X, P, gpa, s, x, y, z, xstar, nb, 0, nb, bpi_in, segw)) orelse return .{ .omega = 0, .b = 0 };
+    defer freeBlkCtx(X, P, gpa, &ctx);
+    try sweepBlocksPar(INST, X, P, gpa, &ctx, nthreads, pins);
     return reduceOmB(X, P, gpa, &ctx);
+}
+
+/// Distributed task body: sweep blocks [t0, t1) of the GLOBAL nb-grid and return
+/// the fragment's coupling surface (see FragOut). null ⇒ no fold primes (tiny x).
+fn omegaFragmentPar(comptime X: type, gpa: std.mem.Allocator, s: anytype, x: X, y: u64, z: u64, xstar: u64, nb: usize, t0: usize, t1: usize, nthreads: usize, pins: ?[]const u32, bpi_in: ?[]const u64, segw: usize) !?FragOut {
+    const P = std.meta.Child(@TypeOf(s.primes));
+    var ctx = (try initBlkCtx(X, P, gpa, s, x, y, z, xstar, nb, t0, t1, bpi_in, segw)) orelse return null;
+    defer freeBlkCtx(X, P, gpa, &ctx);
+    try sweepBlocksPar(false, X, P, gpa, &ctx, nthreads, pins);
+    return try reduceFragment(X, P, gpa, &ctx, t0, t1);
 }
 
 // ---------------------------------------------- ω reference (for the diff-check)
@@ -2312,6 +2335,10 @@ pub const Config = struct {
     /// (MASK30 phase) and ≤ 2^21 (ring-entry offset field). The cache-hierarchy
     /// knob: tune per machine, e.g. halved when running 2 threads/core.
     segw: ?usize = null,
+    /// Pre-merged ω+B from distributed fragments (pi --merge): skip the sweep
+    /// and use this. The caller is responsible for having validated that the
+    /// fragments were computed with THIS x, y, and segw.
+    omb_in: ?OmegaB = null,
 };
 
 /// Below this the decomposition is not well defined: chooseY's clamps collapse (y is
@@ -2345,6 +2372,40 @@ pub fn piGourdon(gpa: std.mem.Allocator, x: u128, y_in: ?u64) !GResult {
 /// Parallel entry: nthreads workers (pinned per `pins` if given).
 pub fn piGourdonPar(gpa: std.mem.Allocator, x: u128, nthreads: usize, pins: ?[]const u32) !GResult {
     return piGourdonCfg(gpa, x, .{ .nthreads = nthreads, .pins = pins });
+}
+
+/// One distributed ω+B task: build the tables locally, sweep blocks [t0, t1) of
+/// the GLOBAL nb-grid, return the fragment plus the header fields (y, segw) the
+/// merge validates. Transport is the caller's business.
+pub const Fragment = struct { y: u64, segw: usize, frag: FragOut };
+
+pub fn piGourdonFragment(gpa: std.mem.Allocator, x: u128, cfg: Config, nb: usize, t0: usize, t1: usize) !Fragment {
+    if (x <= DIRECT_MAX) return error.XTooSmallToFragment;
+    if (t0 >= t1 or t1 > nb) return error.BadBlockInterval;
+    if (x <= std.math.maxInt(u64)) return piGourdonFragmentV(u64, gpa, @intCast(x), cfg, nb, t0, t1);
+    return piGourdonFragmentV(u128, gpa, x, cfg, nb, t0, t1);
+}
+
+fn piGourdonFragmentV(comptime X: type, gpa: std.mem.Allocator, x: X, cfg: Config, nb: usize, t0: usize, t1: usize) !Fragment {
+    g_progress = cfg.verbose;
+    const nthreads = cfg.nthreads;
+    const pins = cfg.pins;
+    const y = cfg.y orelse chooseY(X, x);
+    const z: u64 = xdiv(X, x, y);
+    const sqx = isqrtG(X, x);
+    const x13 = icbrtG(X, x);
+    const sqz = isqrt(z);
+    const xstar = @max(isqrt(sqx), xdiv(X, x, y * y));
+    const plist_max = @max(@max(y, sqz), @max(x13, isqrtG(X, x / @as(X, @max(xstar, 1)))));
+    const P = if (X == u64) u32 else u64;
+    var s = try Sieve(P).init(gpa, sqx, y, plist_max, nthreads, pins);
+    defer s.deinit(gpa);
+    const segw: usize = cfg.segw orelse SWEEP_SEGW;
+    if (segw < 960 or segw % 960 != 0 or segw > (1 << 21)) return error.BadSegw;
+    const bp = try buildBoundaryPi(gpa, sqx, segw, nthreads, pins);
+    defer gpa.free(bp.bpi);
+    const fo = (try omegaFragmentPar(X, gpa, &s, x, y, z, xstar, nb, t0, t1, nthreads, pins, bp.bpi, segw)) orelse return error.XTooSmallToFragment;
+    return .{ .y = y, .segw = segw, .frag = fo };
 }
 
 pub fn piGourdonV(comptime X: type, gpa: std.mem.Allocator, x: X, cfg: Config) !GResult {
@@ -2396,7 +2457,10 @@ pub fn piGourdonV(comptime X: type, gpa: std.mem.Allocator, x: X, cfg: Config) !
     lap(verbose, &tp, "A/Σ");
 
     // ω+B fused. Phase 2: block-and-scan (nb = nthreads·8 over-partition) if parallel.
-    const wb = if (nthreads > 1)
+    // A pre-merged distributed result (cfg.omb_in) replaces the sweep outright.
+    const wb = if (cfg.omb_in) |ob|
+        ob
+    else if (nthreads > 1)
         try omegaBlockedPar(false, X, gpa, &s, x, y, z, xstar, nthreads * 8, nthreads, pins, bpi, segw)
     else
         try omegaBlocked(false, X, gpa, &s, x, y, z, xstar, 1, bpi, segw);
@@ -2554,7 +2618,17 @@ pub fn main() !void {
         const wb4 = try omegaBlocked(false, u64, gpa, &s, x, y, z, xstar, 4, null, SWEEP_SEGW);
         const wb7 = try omegaBlocked(false, u64, gpa, &s, x, y, z, xstar, 7, null, SWEEP_SEGW);
         const blk_ok = wb4.omega == wb.omega and wb4.b == wb.b and wb7.omega == wb.omega and wb7.b == wb.b;
-        std.debug.print("  {d:>12}  ω naive={d:>14} counter={d:>14} {s}   B fused={d} ref={d} {s}   blocks(4,7){s}\n", .{ x, on, wb.omega, if (on == wb.omega) "match" else "MISMATCH", wb.b, b_ref, if (wb.b == b_ref) "match" else "MISMATCH", if (blk_ok) "=✓" else "=MISMATCH" });
+        // distributed-fragment differential: three independently-built contexts
+        // over [0,3),[3,5),[5,7) of the 7-grid, merged, must equal the monolith
+        const f1 = (try omegaFragmentPar(u64, gpa, &s, x, y, z, xstar, 7, 0, 3, 1, null, null, SWEEP_SEGW)).?;
+        defer f1.deinit(gpa);
+        const f2 = (try omegaFragmentPar(u64, gpa, &s, x, y, z, xstar, 7, 3, 5, 1, null, null, SWEEP_SEGW)).?;
+        defer f2.deinit(gpa);
+        const f3 = (try omegaFragmentPar(u64, gpa, &s, x, y, z, xstar, 7, 5, 7, 1, null, null, SWEEP_SEGW)).?;
+        defer f3.deinit(gpa);
+        const fm = try mergeFragments(gpa, f1.mu_sum.len, &.{ f1, f2, f3 });
+        const frag_ok = fm.omega == wb.omega and fm.b == wb.b;
+        std.debug.print("  {d:>12}  ω naive={d:>14} counter={d:>14} {s}   B fused={d} ref={d} {s}   blocks(4,7){s}   frags(3,2,2){s}\n", .{ x, on, wb.omega, if (on == wb.omega) "match" else "MISMATCH", wb.b, b_ref, if (wb.b == b_ref) "match" else "MISMATCH", if (blk_ok) "=✓" else "=MISMATCH", if (frag_ok) "=✓" else "=MISMATCH" });
     }
 
     // A/Σ parallel check: 4-thread partial-sum must equal serial (phase 1 of Model-A).
