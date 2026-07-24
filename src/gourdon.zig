@@ -659,10 +659,21 @@ const Prog = struct {
         self.t0 = now;
         self.last.store(now, .monotonic);
     }
-    fn tick(self: *Prog) void {
+    /// `pos` is the calling worker's current position in value space (sweep u,
+    /// window base, prime value, …) — a representative coordinate, not a frontier:
+    /// workers hold different dispatch units, so successive lines can wobble.
+    fn tick(self: *Prog, pos: u64) void {
         if (!g_progress) return;
         const d = self.done.fetchAdd(1, .monotonic) + 1;
         const now = common.nowNs();
+        // anchor the rate clock at the first completed unit, not at begin(): some
+        // phases (A/Σ v-windows) only start after another phase drains per-worker.
+        // Re-arm the gate too, so a late-starting phase doesn't print a zero-rate line.
+        if (d == 1) {
+            self.t0 = now;
+            self.last.store(now, .monotonic);
+            return;
+        }
         const prev = self.last.load(.monotonic);
         if (now -% prev < PROG_GATE_NS) return;
         // one printer per gate window; losers just keep working
@@ -671,7 +682,7 @@ const Prog = struct {
         const el = @as(f64, @floatFromInt(now - self.t0)) / 1e9;
         const pct = 100.0 * @as(f64, @floatFromInt(dd)) / @as(f64, @floatFromInt(self.total));
         const eta = el * @as(f64, @floatFromInt(self.total - dd)) / @as(f64, @floatFromInt(dd));
-        std.debug.print("    [{s:>6}] {d:5.1}%  {d}/{d}  elapsed {d:.0} s  eta {d:.0} s\n", .{ self.name, pct, dd, self.total, el, eta });
+        std.debug.print("    [{s:>6}] {d:5.1}%  {d}/{d}  @ {d}  elapsed {d:.0} s  eta {d:.0} s\n", .{ self.name, pct, dd, self.total, pos, el, eta });
     }
 };
 var prog_bpi: Prog = .{};
@@ -738,7 +749,7 @@ fn buildBoundaryPi(gpa: std.mem.Allocator, sqx: u64, segw: usize, nthreads: usiz
                     for (bits[si * segww ..][0..segww]) |word| c += @popCount(word);
                     cx.bpi[seg] = c;
                 }
-                prog_bpi.tick();
+                prog_bpi.tick(wlo);
             }
         }
     };
@@ -1216,7 +1227,7 @@ fn computeTermsPar(comptime X: type, gpa: std.mem.Allocator, s: anytype, x: X, y
                     if (p > cx.xstar and p <= cx.sqz) s4 += @intCast(po.count(xdiv(X, cx.x, p * cx.y))); // Σ₄
                     if (p > cx.sqz and p <= cx.x13) s5 += @intCast(po.count(xdiv(X, cx.x, p * p))); // Σ₅
                 }
-                prog_ap.tick();
+                prog_ap.tick(if (hi > lo) @intCast(prr[hi - 1]) else 0);
             }
             // Phase 2 — A's v ∈ [y, √x] pairs (χ = 1) over disjoint v-windows.
             const awin: u64 = @intCast(wbits.len * 240);
@@ -1250,7 +1261,7 @@ fn computeTermsPar(comptime X: type, gpa: std.mem.Allocator, s: anytype, x: X, y
                         A += @intCast(win.count(v));
                     }
                 }
-                prog_aw.tick();
+                prog_aw.tick(wlo);
             }
             out.* = .{ .A = A, .sig4 = s4, .sig5 = s5, .sig6 = s6 };
         }
@@ -1745,7 +1756,7 @@ fn runOneBlock(comptime INST: bool, comptime X: type, comptime P: type, gpa: std
             pB = bwinPrev(P, &sc.bwin, primes, ctx.nwb, pB - 1, y);
         }
         phi_run_full += sc.ctr.total;
-        prog_om.tick();
+        prog_om.tick(lo);
     }
     for (0..nax) |bi| ctx.blk_total[t * nax + bi] = phi_run[bi];
     ctx.blk_total_full[t] = phi_run_full;
