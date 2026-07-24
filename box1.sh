@@ -3,9 +3,8 @@
 #   1. serial alpha portrait -> ~/calib1.log   (pairs with 16-core calib for 1/sqrt(t) check)
 #   2. first real x>2^64 ARM rung, serial 1e20 -> ~/pi20_serial_arm.log (~90 min)
 # NOTE: rebuilds first (the pull that delivered this script also brought the src).
-# Invocation: git pull && bash box1.sh   (inside tmux)
+# Invocation, from the repo dir: git pull && bash box1.sh   (inside tmux)
 set -e
-cd ~/prime-counting
 zig build-exe -O ReleaseFast -mcpu=native src/pi.zig -femit-bin=./pi
 
 echo "=== calibrate t=1 ===" | tee ~/calib1.log
