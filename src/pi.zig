@@ -33,6 +33,9 @@ const Opts = struct {
     fit_a: ?f64 = null,
     fit_b: ?f64 = null,
     u128: bool = false,
+    blocks: ?[]const u8 = null,
+    emit: ?[]const u8 = null,
+    merge: bool = false,
 };
 
 const usage =
@@ -61,6 +64,12 @@ const usage =
     \\      --alpha-fit <A,B>  use a fit from a prior --calibrate run
     \\      --u128             force the u128 code path on x < 2^64 (measures the
     \\                         wide-arithmetic tax; result must be identical)
+    \\      --blocks <a:b/N>   distributed task: sweep omega+B blocks [a,b) of the
+    \\                         global N-grid only (with --emit; freeze y via
+    \\                         --y/--alpha/--alpha-fit so all tasks agree)
+    \\      --emit <file>      write the task's fragment to <file>
+    \\      --merge <files..>  merge fragment files (must tile [0,N) with matching
+    \\                         headers), compute A/Sigma/phi0 here, print pi
     \\  -h, --help             this text
     \\
     \\gourdon: all options. lmo: --y/--alpha serial only, --pin parallel only, u128 ok.
@@ -355,10 +364,165 @@ fn die(comptime fmt: []const u8, args: anytype) noreturn {
     std.process.exit(2);
 }
 
+/// Distributed task: sweep blocks [a,b) of the global N-grid, write the fragment.
+fn runEmit(gpa: std.mem.Allocator, o: *const Opts, pins: ?[]const u32, y: ?u64) !void {
+    const spec = o.blocks.?;
+    const colon = std.mem.indexOfScalar(u8, spec, ':') orelse die("--blocks wants a:b/N", .{});
+    const slash = std.mem.indexOfScalar(u8, spec, '/') orelse die("--blocks wants a:b/N", .{});
+    if (slash < colon) die("--blocks wants a:b/N", .{});
+    const ba = std.fmt.parseInt(usize, spec[0..colon], 10) catch die("--blocks: bad a", .{});
+    const bb = std.fmt.parseInt(usize, spec[colon + 1 .. slash], 10) catch die("--blocks: bad b", .{});
+    const bn = std.fmt.parseInt(usize, spec[slash + 1 ..], 10) catch die("--blocks: bad N", .{});
+    if (ba >= bb or bb > bn or bn == 0) die("--blocks: need 0 <= a < b <= N", .{});
+    const t0 = common.nowNs();
+    const fr = gourdon.piGourdonFragment(gpa, o.x, .{
+        .y = y,
+        .nthreads = o.threads,
+        .pins = pins,
+        .verbose = o.verbose,
+        .segw = o.segw,
+    }, bn, ba, bb) catch |e| die("fragment failed: {s}", .{@errorName(e)});
+    defer fr.frag.deinit(gpa);
+    const secs = @as(f64, @floatFromInt(common.nowNs() - t0)) / 1e9;
+    const nax = fr.frag.mu_sum.len;
+    const buf = try gpa.alloc(u8, 4096 + 2 * nax * 24);
+    defer gpa.free(buf);
+    var off: usize = 0;
+    off += (std.fmt.bufPrint(buf[off..], "pifrag 1\nx {d}\ny {d}\nsegw {d}\nnb {d}\nt0 {d}\nt1 {d}\nnax {d}\nomega {d}\nb {d}\nbcount {d}\ntotalfull {d}\nmusum", .{ o.x, fr.y, fr.segw, bn, ba, bb, nax, fr.frag.omega, fr.frag.b, fr.frag.bcount, fr.frag.total_full }) catch unreachable).len;
+    for (fr.frag.mu_sum) |v| off += (std.fmt.bufPrint(buf[off..], " {d}", .{v}) catch unreachable).len;
+    off += (std.fmt.bufPrint(buf[off..], "\ntotalsum", .{}) catch unreachable).len;
+    for (fr.frag.total_sum) |v| off += (std.fmt.bufPrint(buf[off..], " {d}", .{v}) catch unreachable).len;
+    off += (std.fmt.bufPrint(buf[off..], "\nend\n", .{}) catch unreachable).len;
+    var tio = std.Io.Threaded.init(gpa, .{});
+    defer tio.deinit();
+    std.Io.Dir.cwd().writeFile(tio.io(), .{ .sub_path = o.emit.?, .data = buf[0..off] }) catch |e| die("cannot write '{s}': {s}", .{ o.emit.?, @errorName(e) });
+    std.debug.print("fragment [{d},{d})/{d}  nax {d}  -> {s} ({d} bytes)  {d:.3} s\n", .{ ba, bb, bn, nax, o.emit.?, off, secs });
+}
+
+const FragFile = struct { x: u128, y: u64, segw: usize, nb: usize, t0: usize, t1: usize, fo: gourdon.FragOut };
+
+fn expectKw(itk: anytype, want: []const u8, path: []const u8) void {
+    const tok = itk.next() orelse die("'{s}': truncated (wanted {s})", .{ path, want });
+    if (!std.mem.eql(u8, tok, want)) die("'{s}': expected '{s}', got '{s}'", .{ path, want, tok });
+}
+fn expectNum(comptime T: type, itk: anytype, path: []const u8) T {
+    const tok = itk.next() orelse die("'{s}': truncated", .{path});
+    return std.fmt.parseInt(T, tok, 10) catch die("'{s}': bad number '{s}'", .{ path, tok });
+}
+
+fn parseFragFile(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !FragFile {
+    const data = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 26)) catch |e| die("cannot read '{s}': {s}", .{ path, @errorName(e) });
+    defer gpa.free(data);
+    var itk = std.mem.tokenizeAny(u8, data, " \n\r\t");
+    expectKw(&itk, "pifrag", path);
+    expectKw(&itk, "1", path);
+    expectKw(&itk, "x", path);
+    const x = expectNum(u128, &itk, path);
+    expectKw(&itk, "y", path);
+    const y = expectNum(u64, &itk, path);
+    expectKw(&itk, "segw", path);
+    const segw = expectNum(usize, &itk, path);
+    expectKw(&itk, "nb", path);
+    const nb = expectNum(usize, &itk, path);
+    expectKw(&itk, "t0", path);
+    const t0 = expectNum(usize, &itk, path);
+    expectKw(&itk, "t1", path);
+    const t1 = expectNum(usize, &itk, path);
+    expectKw(&itk, "nax", path);
+    const nax = expectNum(usize, &itk, path);
+    if (nax == 0 or nax > (1 << 28)) die("'{s}': implausible nax {d}", .{ path, nax });
+    expectKw(&itk, "omega", path);
+    const omega = expectNum(i128, &itk, path);
+    expectKw(&itk, "b", path);
+    const b = expectNum(i128, &itk, path);
+    expectKw(&itk, "bcount", path);
+    const bcount = expectNum(u64, &itk, path);
+    expectKw(&itk, "totalfull", path);
+    const total_full = expectNum(i64, &itk, path);
+    expectKw(&itk, "musum", path);
+    const mu = try gpa.alloc(i64, nax);
+    errdefer gpa.free(mu);
+    for (mu) |*v| v.* = expectNum(i64, &itk, path);
+    expectKw(&itk, "totalsum", path);
+    const ts = try gpa.alloc(i64, nax);
+    errdefer gpa.free(ts);
+    for (ts) |*v| v.* = expectNum(i64, &itk, path);
+    expectKw(&itk, "end", path);
+    return .{ .x = x, .y = y, .segw = segw, .nb = nb, .t0 = t0, .t1 = t1, .fo = .{
+        .omega = omega,
+        .b = b,
+        .bcount = bcount,
+        .total_full = total_full,
+        .mu_sum = mu,
+        .total_sum = ts,
+    } };
+}
+
+/// Merge fragments that tile [0, nb): validate headers, prove the tiling,
+/// carry-walk, then compute the remaining terms here and print pi.
+fn runMerge(gpa: std.mem.Allocator, o: *Opts, pins: ?[]const u32, files: []const []const u8) !void {
+    if (files.len == 0) die("--merge needs fragment files", .{});
+    var tio = std.Io.Threaded.init(gpa, .{});
+    defer tio.deinit();
+    const ffs = try gpa.alloc(FragFile, files.len);
+    for (files, 0..) |p, i| ffs[i] = try parseFragFile(gpa, tio.io(), p);
+    const h = ffs[0];
+    for (ffs[1..]) |f| if (f.x != h.x or f.y != h.y or f.segw != h.segw or f.nb != h.nb or f.fo.mu_sum.len != h.fo.mu_sum.len)
+        die("fragment headers disagree (x/y/segw/nb/nax) — fragments from different runs?", .{});
+    std.mem.sort(FragFile, ffs, {}, struct {
+        fn lt(_: void, a: FragFile, b: FragFile) bool {
+            return a.t0 < b.t0;
+        }
+    }.lt);
+    // tiling proof: a hole = a lost task to re-issue, an overlap = a double-spend
+    var expect_t: usize = 0;
+    for (ffs) |f| {
+        if (f.t0 != expect_t) die("tiling broken at block {d}: next fragment covers [{d},{d})", .{ expect_t, f.t0, f.t1 });
+        expect_t = f.t1;
+    }
+    if (expect_t != h.nb) die("tiling incomplete: covered [0,{d}) of {d} blocks", .{ expect_t, h.nb });
+    const fos = try gpa.alloc(gourdon.FragOut, ffs.len);
+    for (ffs, 0..) |f, i| fos[i] = f.fo;
+    const omb = try gourdon.mergeFragments(gpa, h.fo.mu_sum.len, fos);
+    std.debug.print("merged {d} fragments, {d} blocks — computing A/Sigma + phi0 locally\n", .{ ffs.len, h.nb });
+
+    o.x = h.x; // for --check
+    const t0 = common.nowNs();
+    const r = try gourdon.piGourdonCfg(gpa, h.x, .{
+        .y = h.y,
+        .nthreads = o.threads,
+        .pins = pins,
+        .verbose = o.verbose,
+        .segw = h.segw,
+        .omb_in = omb,
+    });
+    const secs = @as(f64, @floatFromInt(common.nowNs() - t0)) / 1e9;
+    if (!o.time) {
+        std.debug.print("{d}\n", .{r.pi});
+    } else {
+        const ru = std.posix.getrusage(std.posix.rusage.SELF);
+        std.debug.print("{d}\n  {d:.3} s (merge-side)   {d} thread(s)   peakRSS {d} MB\n", .{ r.pi, secs, o.threads, @divTrunc(ru.maxrss, 1024) });
+    }
+    if (o.check) {
+        if (knownFor(o.x)) |w| {
+            if (r.pi == w) {
+                std.debug.print("  check: MATCH\n", .{});
+            } else {
+                std.debug.print("  check: MISMATCH — expected {d}\n", .{w});
+                std.process.exit(1);
+            }
+        } else {
+            std.debug.print("  check: no known value for this x\n", .{});
+        }
+    }
+}
+
 pub fn main(init: std.process.Init.Minimal) !void {
     const gpa = std.heap.page_allocator;
     var o = Opts{};
     var have_x = false;
+    var mfiles: [128][]const u8 = undefined;
+    var nmf: usize = 0;
 
     var it = std.process.Args.Iterator.init(init.args);
     _ = it.next(); // argv[0]
@@ -407,19 +571,30 @@ pub fn main(init: std.process.Init.Minimal) !void {
             o.verbose = true;
         } else if (std.mem.eql(u8, a, "--u128")) {
             o.u128 = true;
+        } else if (std.mem.eql(u8, a, "--blocks")) {
+            o.blocks = eat(&it, &eq_val, "--blocks");
+        } else if (std.mem.eql(u8, a, "--emit")) {
+            o.emit = eat(&it, &eq_val, "--emit");
+        } else if (std.mem.eql(u8, a, "--merge")) {
+            o.merge = true;
         } else if (std.mem.eql(u8, a, "--check")) {
             o.check = true;
         } else if (std.mem.eql(u8, a, "--no-time")) {
             o.time = false;
         } else if (a.len > 0 and a[0] == '-') {
             die("unknown option '{s}' (try --help)", .{a});
+        } else if (o.merge) {
+            // after --merge, positionals are fragment files
+            if (nmf == mfiles.len) die("--merge: too many files", .{});
+            mfiles[nmf] = a;
+            nmf += 1;
         } else {
             if (have_x) die("more than one x given ('{s}')", .{a});
             o.x = parseX(a) catch die("cannot parse x from '{s}'", .{a});
             have_x = true;
         }
     }
-    if (!o.calibrate and !have_x) {
+    if (!o.calibrate and !have_x and !o.merge) {
         std.debug.print("{s}", .{usage});
         std.process.exit(2);
     }
@@ -454,6 +629,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return;
     }
 
+    if (o.merge) {
+        if (o.blocks != null or o.emit != null) die("--merge excludes --blocks/--emit", .{});
+        if (have_x) die("--merge takes fragment files, not x (x comes from the headers)", .{});
+        try runMerge(gpa, &o, pins, mfiles[0..nmf]);
+        return;
+    }
+
     // a prior calibration's fit, unless --alpha/--y override it
     if (o.alpha == null and o.y == null) if (o.fit_a) |fa| {
         o.alpha = std.math.clamp(fa + o.fit_b.? * @log(@as(f64, @floatFromInt(o.x))), 1.6, 64.0);
@@ -477,6 +659,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     if (o.u128 and o.algo != .gourdon) die("--u128 is gourdon-only", .{});
     if (o.u128 and o.x <= 10_000) die("--u128 needs x > 10^4 (below that the direct oracle answers)", .{});
+
+    if (o.blocks != null or o.emit != null) {
+        if (o.blocks == null or o.emit == null) die("--blocks and --emit go together", .{});
+        if (o.algo != .gourdon) die("--blocks is gourdon-only", .{});
+        try runEmit(gpa, &o, pins, y);
+        return;
+    }
 
     const t0 = common.nowNs();
     const gcfg: gourdon.Config = .{

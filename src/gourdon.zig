@@ -1917,7 +1917,7 @@ pub const FragOut = struct {
     total_full: i64, // Σ per-block full totals (advances that scalar)
     mu_sum: []i64, // Σ blk_mu per stage (multiplies the incoming prefix vector)
     total_sum: []i64, // Σ blk_total per stage (advances the prefix vector)
-    fn deinit(self: *const FragOut, gpa: std.mem.Allocator) void {
+    pub fn deinit(self: *const FragOut, gpa: std.mem.Allocator) void {
         gpa.free(self.mu_sum);
         gpa.free(self.total_sum);
     }
