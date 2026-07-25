@@ -467,20 +467,26 @@ fn runMerge(gpa: std.mem.Allocator, o: *Opts, pins: ?[]const u32, files: []const
     const ffs = try gpa.alloc(FragFile, files.len);
     for (files, 0..) |p, i| ffs[i] = try parseFragFile(gpa, tio.io(), p);
     const h = ffs[0];
-    for (ffs[1..]) |f| if (f.x != h.x or f.y != h.y or f.segw != h.segw or f.nb != h.nb or f.fo.mu_sum.len != h.fo.mu_sum.len)
-        die("fragment headers disagree (x/y/segw/nb/nax) — fragments from different runs?", .{});
+    for (ffs[1..]) |f| if (f.x != h.x or f.y != h.y or f.segw != h.segw or f.fo.mu_sum.len != h.fo.mu_sum.len)
+        die("fragment headers disagree (x/y/segw/nax) — fragments from different runs?", .{});
+    // Fragments may live on DIFFERENT grids (nb): block t of grid nb starts at
+    // segment floor(t*nseg/nb), so equal fractions t/nb = equal seam positions.
+    // Sort and tile by the exact fraction via u128 cross-multiplication.
     std.mem.sort(FragFile, ffs, {}, struct {
         fn lt(_: void, a: FragFile, b: FragFile) bool {
-            return a.t0 < b.t0;
+            return @as(u128, a.t0) * @as(u128, b.nb) < @as(u128, b.t0) * @as(u128, a.nb);
         }
     }.lt);
     // tiling proof: a hole = a lost task to re-issue, an overlap = a double-spend
-    var expect_t: usize = 0;
+    var et: u128 = 0; // expected start, as the fraction et_num with denominator et_den
+    var et_den: u128 = 1;
     for (ffs) |f| {
-        if (f.t0 != expect_t) die("tiling broken at block {d}: next fragment covers [{d},{d})", .{ expect_t, f.t0, f.t1 });
-        expect_t = f.t1;
+        if (@as(u128, f.t0) * et_den != et * @as(u128, f.nb))
+            die("tiling broken at fraction {d}/{d}: next fragment starts {d}/{d}", .{ et, et_den, f.t0, f.nb });
+        et = f.t1;
+        et_den = f.nb;
     }
-    if (expect_t != h.nb) die("tiling incomplete: covered [0,{d}) of {d} blocks", .{ expect_t, h.nb });
+    if (et != et_den) die("tiling incomplete: ends at {d}/{d} of the sweep", .{ et, et_den });
     const fos = try gpa.alloc(gourdon.FragOut, ffs.len);
     for (ffs, 0..) |f, i| fos[i] = f.fo;
     const omb = try gourdon.mergeFragments(gpa, h.fo.mu_sum.len, fos);
