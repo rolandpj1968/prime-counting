@@ -34,6 +34,7 @@ const Opts = struct {
     fit_b: ?f64 = null,
     u128: bool = false,
     blocks: ?[]const u8 = null,
+    asig: ?[]const u8 = null,
     emit: ?[]const u8 = null,
     merge: bool = false,
 };
@@ -67,9 +68,13 @@ const usage =
     \\      --blocks <a:b/N>   distributed task: sweep omega+B blocks [a,b) of the
     \\                         global N-grid only (with --emit; freeze y via
     \\                         --y/--alpha/--alpha-fit so all tasks agree)
+    \\      --asig <a:b/M>     distributed task: A/Sigma units [a,b) of the grid of
+    \\                         M p-chunks + the v-windows (with --emit)
     \\      --emit <file>      write the task's fragment to <file>
-    \\      --merge <files..>  merge fragment files (must tile [0,N) with matching
-    \\                         headers), compute A/Sigma/phi0 here, print pi
+    \\      --merge <files..>  merge fragment files (omega+B fragments must tile
+    \\                         their grid; A/Sigma fragments theirs — if present,
+    \\                         the A/Sigma phase is skipped), compute the rest
+    \\                         here, print pi
     \\  -h, --help             this text
     \\
     \\gourdon: all options. lmo: --y/--alpha serial only, --pin parallel only, u128 ok.
@@ -399,7 +404,36 @@ fn runEmit(gpa: std.mem.Allocator, o: *const Opts, pins: ?[]const u32, y: ?u64) 
     std.debug.print("fragment [{d},{d})/{d}  nax {d}  -> {s} ({d} bytes)  {d:.3} s\n", .{ ba, bb, bn, nax, o.emit.?, off, secs });
 }
 
+/// Distributed A/Σ task: units [a,b) of the (M chunks + windows) grid, raw sums.
+fn runEmitAsig(gpa: std.mem.Allocator, o: *const Opts, pins: ?[]const u32, y: ?u64) !void {
+    const spec = o.asig.?;
+    const colon = std.mem.indexOfScalar(u8, spec, ':') orelse die("--asig wants a:b/M", .{});
+    const slash = std.mem.indexOfScalar(u8, spec, '/') orelse die("--asig wants a:b/M", .{});
+    if (slash < colon) die("--asig wants a:b/M", .{});
+    const ua = std.fmt.parseInt(usize, spec[0..colon], 10) catch die("--asig: bad a", .{});
+    const ub = std.fmt.parseInt(usize, spec[colon + 1 .. slash], 10) catch die("--asig: bad b", .{});
+    const um = std.fmt.parseInt(usize, spec[slash + 1 ..], 10) catch die("--asig: bad M", .{});
+    if (ua >= ub or um == 0) die("--asig: need a < b, M > 0", .{});
+    const t0 = common.nowNs();
+    const fr = gourdon.piGourdonAsig(gpa, o.x, .{
+        .y = y,
+        .nthreads = o.threads,
+        .pins = pins,
+        .verbose = o.verbose,
+        .segw = o.segw,
+    }, um, ua, ub) catch |e| die("asig task failed: {s}", .{@errorName(e)});
+    const secs = @as(f64, @floatFromInt(common.nowNs() - t0)) / 1e9;
+    var buf: [2048]u8 = undefined;
+    const out = std.fmt.bufPrint(&buf, "piasig 1\nx {d}\ny {d}\nsegw {d}\nnchunk {d}\nnunits {d}\nt0 {d}\nt1 {d}\nA {d}\nsig4 {d}\nsig5 {d}\nsig6 {d}\nend\n", .{ o.x, fr.y, fr.segw, um, fr.nunits, ua, ub, fr.part.A, fr.part.sig4, fr.part.sig5, fr.part.sig6 }) catch unreachable;
+    var tio = std.Io.Threaded.init(gpa, .{});
+    defer tio.deinit();
+    std.Io.Dir.cwd().writeFile(tio.io(), .{ .sub_path = o.emit.?, .data = out }) catch |e| die("cannot write '{s}': {s}", .{ o.emit.?, @errorName(e) });
+    std.debug.print("asig fragment [{d},{d}) of T={d} (M={d}) -> {s}  {d:.3} s\n", .{ ua, ub, fr.nunits, um, o.emit.?, secs });
+}
+
 const FragFile = struct { x: u128, y: u64, segw: usize, nb: usize, t0: usize, t1: usize, fo: gourdon.FragOut };
+const AsigFile = struct { x: u128, y: u64, segw: usize, nchunk: usize, nunits: usize, t0: usize, t1: usize, part: gourdon.Partial };
+const AnyFrag = union(enum) { om: FragFile, asig: AsigFile };
 
 fn expectKw(itk: anytype, want: []const u8, path: []const u8) void {
     const tok = itk.next() orelse die("'{s}': truncated (wanted {s})", .{ path, want });
@@ -410,11 +444,39 @@ fn expectNum(comptime T: type, itk: anytype, path: []const u8) T {
     return std.fmt.parseInt(T, tok, 10) catch die("'{s}': bad number '{s}'", .{ path, tok });
 }
 
-fn parseFragFile(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !FragFile {
+fn parseFragFile(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !AnyFrag {
     const data = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 26)) catch |e| die("cannot read '{s}': {s}", .{ path, @errorName(e) });
     defer gpa.free(data);
     var itk = std.mem.tokenizeAny(u8, data, " \n\r\t");
-    expectKw(&itk, "pifrag", path);
+    const kind = itk.next() orelse die("'{s}': empty", .{path});
+    if (std.mem.eql(u8, kind, "piasig")) {
+        expectKw(&itk, "1", path);
+        expectKw(&itk, "x", path);
+        const x = expectNum(u128, &itk, path);
+        expectKw(&itk, "y", path);
+        const y = expectNum(u64, &itk, path);
+        expectKw(&itk, "segw", path);
+        const segw = expectNum(usize, &itk, path);
+        expectKw(&itk, "nchunk", path);
+        const nchunk = expectNum(usize, &itk, path);
+        expectKw(&itk, "nunits", path);
+        const nunits = expectNum(usize, &itk, path);
+        expectKw(&itk, "t0", path);
+        const t0 = expectNum(usize, &itk, path);
+        expectKw(&itk, "t1", path);
+        const t1 = expectNum(usize, &itk, path);
+        expectKw(&itk, "A", path);
+        const A = expectNum(i128, &itk, path);
+        expectKw(&itk, "sig4", path);
+        const s4 = expectNum(i128, &itk, path);
+        expectKw(&itk, "sig5", path);
+        const s5 = expectNum(i128, &itk, path);
+        expectKw(&itk, "sig6", path);
+        const s6 = expectNum(i128, &itk, path);
+        expectKw(&itk, "end", path);
+        return .{ .asig = .{ .x = x, .y = y, .segw = segw, .nchunk = nchunk, .nunits = nunits, .t0 = t0, .t1 = t1, .part = .{ .A = A, .sig4 = s4, .sig5 = s5, .sig6 = s6 } } };
+    }
+    if (!std.mem.eql(u8, kind, "pifrag")) die("'{s}': unknown fragment type '{s}'", .{ path, kind });
     expectKw(&itk, "1", path);
     expectKw(&itk, "x", path);
     const x = expectNum(u128, &itk, path);
@@ -448,14 +510,14 @@ fn parseFragFile(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !FragFile
     errdefer gpa.free(ts);
     for (ts) |*v| v.* = expectNum(i64, &itk, path);
     expectKw(&itk, "end", path);
-    return .{ .x = x, .y = y, .segw = segw, .nb = nb, .t0 = t0, .t1 = t1, .fo = .{
+    return .{ .om = .{ .x = x, .y = y, .segw = segw, .nb = nb, .t0 = t0, .t1 = t1, .fo = .{
         .omega = omega,
         .b = b,
         .bcount = bcount,
         .total_full = total_full,
         .mu_sum = mu,
         .total_sum = ts,
-    } };
+    } } };
 }
 
 /// Merge fragments that tile [0, nb): validate headers, prove the tiling,
@@ -464,11 +526,54 @@ fn runMerge(gpa: std.mem.Allocator, o: *Opts, pins: ?[]const u32, files: []const
     if (files.len == 0) die("--merge needs fragment files", .{});
     var tio = std.Io.Threaded.init(gpa, .{});
     defer tio.deinit();
-    const ffs = try gpa.alloc(FragFile, files.len);
-    for (files, 0..) |p, i| ffs[i] = try parseFragFile(gpa, tio.io(), p);
+    var ffs_buf = try gpa.alloc(FragFile, files.len);
+    var afs_buf = try gpa.alloc(AsigFile, files.len);
+    var nom: usize = 0;
+    var nas: usize = 0;
+    for (files) |p| switch (try parseFragFile(gpa, tio.io(), p)) {
+        .om => |f| {
+            ffs_buf[nom] = f;
+            nom += 1;
+        },
+        .asig => |f| {
+            afs_buf[nas] = f;
+            nas += 1;
+        },
+    };
+    if (nom == 0) die("--merge needs omega+B fragments (none found)", .{});
+    const ffs = ffs_buf[0..nom];
+    const afs = afs_buf[0..nas];
     const h = ffs[0];
     for (ffs[1..]) |f| if (f.x != h.x or f.y != h.y or f.segw != h.segw or f.fo.mu_sum.len != h.fo.mu_sum.len)
         die("fragment headers disagree (x/y/segw/nax) — fragments from different runs?", .{});
+    // A/Σ fragments (optional): same run constants, one shared unit grid,
+    // integer tiling of [0, nunits), raw sums added — post-processing happens
+    // once, inside the pipeline via asig_in.
+    var asig_sum: ?gourdon.Partial = null;
+    if (nas > 0) {
+        const ah = afs[0];
+        for (afs) |f| if (f.x != h.x or f.y != h.y or f.segw != h.segw or f.nchunk != ah.nchunk or f.nunits != ah.nunits)
+            die("asig fragment headers disagree (x/y/segw/nchunk/nunits)", .{});
+        std.mem.sort(AsigFile, afs, {}, struct {
+            fn lt(_: void, va: AsigFile, vb: AsigFile) bool {
+                return va.t0 < vb.t0;
+            }
+        }.lt);
+        var expu: usize = 0;
+        for (afs) |f| {
+            if (f.t0 != expu) die("asig tiling broken at unit {d}: next fragment covers [{d},{d})", .{ expu, f.t0, f.t1 });
+            expu = f.t1;
+        }
+        if (expu != ah.nunits) die("asig tiling incomplete: covered [0,{d}) of {d} units", .{ expu, ah.nunits });
+        var acc = gourdon.Partial{};
+        for (afs) |f| {
+            acc.A += f.part.A;
+            acc.sig4 += f.part.sig4;
+            acc.sig5 += f.part.sig5;
+            acc.sig6 += f.part.sig6;
+        }
+        asig_sum = acc;
+    }
     // Fragments may live on DIFFERENT grids (nb): block t of grid nb starts at
     // segment floor(t*nseg/nb), so equal fractions t/nb = equal seam positions.
     // Sort and tile by the exact fraction via u128 cross-multiplication.
@@ -490,7 +595,7 @@ fn runMerge(gpa: std.mem.Allocator, o: *Opts, pins: ?[]const u32, files: []const
     const fos = try gpa.alloc(gourdon.FragOut, ffs.len);
     for (ffs, 0..) |f, i| fos[i] = f.fo;
     const omb = try gourdon.mergeFragments(gpa, h.fo.mu_sum.len, fos);
-    std.debug.print("merged {d} fragments, {d} blocks — computing A/Sigma + phi0 locally\n", .{ ffs.len, h.nb });
+    std.debug.print("merged {d} omega+B fragments, {d} blocks{s}\n", .{ ffs.len, h.nb, if (asig_sum != null) " + distributed A/Sigma — only scalars/phi0 local" else " — computing A/Sigma + phi0 locally" });
 
     o.x = h.x; // for --check
     const t0 = common.nowNs();
@@ -501,6 +606,7 @@ fn runMerge(gpa: std.mem.Allocator, o: *Opts, pins: ?[]const u32, files: []const
         .verbose = o.verbose,
         .segw = h.segw,
         .omb_in = omb,
+        .asig_in = asig_sum,
     });
     const secs = @as(f64, @floatFromInt(common.nowNs() - t0)) / 1e9;
     if (!o.time) {
@@ -579,6 +685,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
             o.u128 = true;
         } else if (std.mem.eql(u8, a, "--blocks")) {
             o.blocks = eat(&it, &eq_val, "--blocks");
+        } else if (std.mem.eql(u8, a, "--asig")) {
+            o.asig = eat(&it, &eq_val, "--asig");
         } else if (std.mem.eql(u8, a, "--emit")) {
             o.emit = eat(&it, &eq_val, "--emit");
         } else if (std.mem.eql(u8, a, "--merge")) {
@@ -666,10 +774,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
     if (o.u128 and o.algo != .gourdon) die("--u128 is gourdon-only", .{});
     if (o.u128 and o.x <= 10_000) die("--u128 needs x > 10^4 (below that the direct oracle answers)", .{});
 
-    if (o.blocks != null or o.emit != null) {
-        if (o.blocks == null or o.emit == null) die("--blocks and --emit go together", .{});
-        if (o.algo != .gourdon) die("--blocks is gourdon-only", .{});
-        try runEmit(gpa, &o, pins, y);
+    if (o.blocks != null or o.asig != null or o.emit != null) {
+        if (o.emit == null) die("--blocks/--asig need --emit", .{});
+        if ((o.blocks == null) == (o.asig == null)) die("--emit needs exactly one of --blocks or --asig", .{});
+        if (o.algo != .gourdon) die("distributed tasks are gourdon-only", .{});
+        if (o.blocks != null) try runEmit(gpa, &o, pins, y) else try runEmitAsig(gpa, &o, pins, y);
         return;
     }
 
