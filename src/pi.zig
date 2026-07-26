@@ -421,7 +421,7 @@ fn runPlan(gpa: std.mem.Allocator, o: *const Opts, y: ?u64) !void {
     // task (--y/--segw), so plan-time alpha choices freeze into one integer and
     // agents never re-derive anything from fit constants. Plans are piped
     // artifacts -> stdout (everything else in this tool talks on stderr).
-    var buf = try gpa.alloc(u8, 8192);
+    var buf = try gpa.alloc(u8, 32768);
     defer gpa.free(buf);
     var off: usize = 0;
     off += (std.fmt.bufPrint(buf[off..], "# piplan 1  (asig T={d})\nX {d}\nY {d}\nSEGW {d}\n", .{ T, o.x, g.y, g.segw }) catch unreachable).len;
@@ -432,16 +432,31 @@ fn runPlan(gpa: std.mem.Allocator, o: *const Opts, y: ?u64) !void {
         off += (std.fmt.bufPrint(buf[off..], "B.{d}:{d}/{d}\n", .{ lo, hi, G }) catch unreachable).len;
         lo = hi;
     }
-    // fold intervals: [1, NB) in 12 near-equal cuts
-    const nfold: usize = 12;
+    // fold intervals: [1, NB) — granularity scales with x (target ~2 h/task
+    // at 4 threads; refined cost-weighting is future work)
+    const big = o.x >= 100_000_000_000_000_000_000_000; // >= 1e23
+    const nfold: usize = if (big) 64 else 12;
     var prev: usize = 1;
     for (1..nfold + 1) |k| {
         const cut = 1 + (k * (NB - 1)) / nfold;
         if (cut > prev) off += (std.fmt.bufPrint(buf[off..], "B.{d}:{d}/{d}\n", .{ prev, cut, NB }) catch unreachable).len;
         prev = cut;
     }
-    // A/Sigma: front-loaded chunk splits + window tail
-    off += (std.fmt.bufPrint(buf[off..], "A.0:8/64\nA.8:16/64\nA.16:32/64\nA.32:64/64\nA.64:{d}/64\n", .{T}) catch unreachable).len;
+    // A/Sigma: chunk splits + window tail, likewise x-scaled
+    if (big) {
+        var ck: usize = 0;
+        while (ck < 64) : (ck += 4)
+            off += (std.fmt.bufPrint(buf[off..], "A.{d}:{d}/64\n", .{ ck, ck + 4 }) catch unreachable).len;
+        const wq = (T - 64) / 4;
+        var wlo: usize = 64;
+        for (0..4) |wk| {
+            const whi = if (wk == 3) T else wlo + wq;
+            off += (std.fmt.bufPrint(buf[off..], "A.{d}:{d}/64\n", .{ wlo, whi }) catch unreachable).len;
+            wlo = whi;
+        }
+    } else {
+        off += (std.fmt.bufPrint(buf[off..], "A.0:8/64\nA.8:16/64\nA.16:32/64\nA.32:64/64\nA.64:{d}/64\n", .{T}) catch unreachable).len;
+    }
     var tio = std.Io.Threaded.init(gpa, .{});
     defer tio.deinit();
     std.Io.File.stdout().writeStreamingAll(tio.io(), buf[0..off]) catch |e| die("stdout: {s}", .{@errorName(e)});
