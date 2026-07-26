@@ -2445,6 +2445,23 @@ fn piGourdonFragmentV(comptime X: type, gpa: std.mem.Allocator, x: X, cfg: Confi
     return .{ .y = y, .segw = segw, .frag = fo };
 }
 
+/// Cheap plan geometry (no sieve build): everything a fleet plan needs to cut
+/// task intervals. The binary is the single source of grid truth.
+pub const PlanGeom = struct { y: u64, segw: usize, nwin: usize };
+
+pub fn planGeometry(x: u128, cfg: Config) !PlanGeom {
+    if (x <= DIRECT_MAX) return error.XTooSmallToFragment;
+    const segw: usize = cfg.segw orelse SWEEP_SEGW;
+    if (segw < 960 or segw % 960 != 0 or segw > (1 << 21)) return error.BadSegw;
+    if (x <= std.math.maxInt(u64)) {
+        const xv: u64 = @intCast(x);
+        const y = cfg.y orelse chooseY(u64, xv);
+        return .{ .y = y, .segw = segw, .nwin = asigNwin(isqrtG(u64, xv), y, segw) };
+    }
+    const y = cfg.y orelse chooseY(u128, x);
+    return .{ .y = y, .segw = segw, .nwin = asigNwin(isqrtG(u128, x), y, segw) };
+}
+
 /// One distributed A/Σ task: units [u0, u1) of the (nchunk + nwin)-unit grid.
 /// Returns RAW partials (post-processing happens at the merge) + the header
 /// fields the merge validates. nunits is the full grid size T for tiling.

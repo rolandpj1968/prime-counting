@@ -37,6 +37,7 @@ const Opts = struct {
     asig: ?[]const u8 = null,
     emit: ?[]const u8 = null,
     merge: bool = false,
+    plan: bool = false,
 };
 
 const usage =
@@ -71,6 +72,8 @@ const usage =
     \\      --asig <a:b/M>     distributed task: A/Sigma units [a,b) of the grid of
     \\                         M p-chunks + the v-windows (with --emit)
     \\      --emit <file>      write the task's fragment to <file>
+    \\      --plan             print the fleet task-spec list for x (grid truth
+    \\                         lives in the binary; feed to fleet.sh)
     \\      --merge <files..>  merge fragment files (omega+B fragments must tile
     \\                         their grid; A/Sigma fragments theirs — if present,
     \\                         the A/Sigma phase is skipped), compute the rest
@@ -404,6 +407,46 @@ fn runEmit(gpa: std.mem.Allocator, o: *const Opts, pins: ?[]const u32, y: ?u64) 
     std.debug.print("fragment [{d},{d})/{d}  nax {d}  -> {s} ({d} bytes)  {d:.3} s\n", .{ ba, bb, bn, nax, o.emit.?, off, secs });
 }
 
+/// Emit a fleet plan: task specs (kind.a:b/N lines) cut from the real grid
+/// geometry. The controller (fleet.sh) is pure transport; all grid knowledge
+/// lives here. Grids: omega+B bottom = geometric ladder on the 4096x-finer
+/// grid (dissolves the leaf-dense region), fold = [1,304) split evenly;
+/// A/Sigma = 64 chunks (front-loaded splits) + the window tail.
+fn runPlan(gpa: std.mem.Allocator, o: *const Opts, y: ?u64) !void {
+    const g = gourdon.planGeometry(o.x, .{ .y = y, .segw = o.segw }) catch |e| die("plan failed: {s}", .{@errorName(e)});
+    const NB: usize = 304;
+    const G: usize = NB * 4096;
+    const T: usize = 64 + g.nwin;
+    // Parameter contract: the controller passes Y and SEGW verbatim to every
+    // task (--y/--segw), so plan-time alpha choices freeze into one integer and
+    // agents never re-derive anything from fit constants. Plans are piped
+    // artifacts -> stdout (everything else in this tool talks on stderr).
+    var buf = try gpa.alloc(u8, 8192);
+    defer gpa.free(buf);
+    var off: usize = 0;
+    off += (std.fmt.bufPrint(buf[off..], "# piplan 1  (asig T={d})\nX {d}\nY {d}\nSEGW {d}\n", .{ T, o.x, g.y, g.segw }) catch unreachable).len;
+    // geometric bottom ladder: 13 rungs of block 0
+    var lo: usize = 0;
+    var hi: usize = 1;
+    while (hi <= 4096) : (hi *= 2) {
+        off += (std.fmt.bufPrint(buf[off..], "B.{d}:{d}/{d}\n", .{ lo, hi, G }) catch unreachable).len;
+        lo = hi;
+    }
+    // fold intervals: [1, NB) in 12 near-equal cuts
+    const nfold: usize = 12;
+    var prev: usize = 1;
+    for (1..nfold + 1) |k| {
+        const cut = 1 + (k * (NB - 1)) / nfold;
+        if (cut > prev) off += (std.fmt.bufPrint(buf[off..], "B.{d}:{d}/{d}\n", .{ prev, cut, NB }) catch unreachable).len;
+        prev = cut;
+    }
+    // A/Sigma: front-loaded chunk splits + window tail
+    off += (std.fmt.bufPrint(buf[off..], "A.0:8/64\nA.8:16/64\nA.16:32/64\nA.32:64/64\nA.64:{d}/64\n", .{T}) catch unreachable).len;
+    var tio = std.Io.Threaded.init(gpa, .{});
+    defer tio.deinit();
+    std.Io.File.stdout().writeStreamingAll(tio.io(), buf[0..off]) catch |e| die("stdout: {s}", .{@errorName(e)});
+}
+
 /// Distributed A/Σ task: units [a,b) of the (M chunks + windows) grid, raw sums.
 fn runEmitAsig(gpa: std.mem.Allocator, o: *const Opts, pins: ?[]const u32, y: ?u64) !void {
     const spec = o.asig.?;
@@ -687,6 +730,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
             o.blocks = eat(&it, &eq_val, "--blocks");
         } else if (std.mem.eql(u8, a, "--asig")) {
             o.asig = eat(&it, &eq_val, "--asig");
+        } else if (std.mem.eql(u8, a, "--plan")) {
+            o.plan = true;
         } else if (std.mem.eql(u8, a, "--emit")) {
             o.emit = eat(&it, &eq_val, "--emit");
         } else if (std.mem.eql(u8, a, "--merge")) {
@@ -774,6 +819,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
     if (o.u128 and o.algo != .gourdon) die("--u128 is gourdon-only", .{});
     if (o.u128 and o.x <= 10_000) die("--u128 needs x > 10^4 (below that the direct oracle answers)", .{});
 
+    if (o.plan) {
+        try runPlan(gpa, &o, y);
+        return;
+    }
     if (o.blocks != null or o.asig != null or o.emit != null) {
         if (o.emit == null) die("--blocks/--asig need --emit", .{});
         if ((o.blocks == null) == (o.asig == null)) die("--emit needs exactly one of --blocks or --asig", .{});
