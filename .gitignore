@@ -8,6 +8,9 @@ zig-out/
 # Copyrighted reference papers — kept locally, not redistributed
 /literature/
 
+# playground
+/play/
+
 # Editor cruft (Emacs autosave/lock/backup)
 \#*\#
 .\#*
