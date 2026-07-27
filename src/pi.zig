@@ -442,17 +442,25 @@ fn runPlan(gpa: std.mem.Allocator, o: *const Opts, y: ?u64) !void {
         if (cut > prev) off += (std.fmt.bufPrint(buf[off..], "B.{d}:{d}/{d}\n", .{ prev, cut, NB }) catch unreachable).len;
         prev = cut;
     }
-    // A/Sigma: chunk splits + window tail, likewise x-scaled
+    // A/Sigma: BOTH species are hyperbolically front-loaded (small-p chunks,
+    // near-y windows), so both get geometric ladders — the same medicine as
+    // block 0. M widens to 1024 at big x so the chunk ladder bites finely.
     if (big) {
-        var ck: usize = 0;
-        while (ck < 64) : (ck += 4)
-            off += (std.fmt.bufPrint(buf[off..], "A.{d}:{d}/64\n", .{ ck, ck + 4 }) catch unreachable).len;
-        const wq = (T - 64) / 4;
-        var wlo: usize = 64;
-        for (0..4) |wk| {
-            const whi = if (wk == 3) T else wlo + wq;
-            off += (std.fmt.bufPrint(buf[off..], "A.{d}:{d}/64\n", .{ wlo, whi }) catch unreachable).len;
+        const M: usize = 1024;
+        const TB: usize = M + g.nwin;
+        var clo: usize = 0;
+        var chi: usize = 1;
+        while (chi <= M) : (chi *= 2) {
+            off += (std.fmt.bufPrint(buf[off..], "A.{d}:{d}/{d}\n", .{ clo, chi, M }) catch unreachable).len;
+            clo = chi;
+        }
+        var wlo: usize = M;
+        var w: usize = 1;
+        while (wlo < TB) {
+            const whi = @min(wlo + w, TB);
+            off += (std.fmt.bufPrint(buf[off..], "A.{d}:{d}/{d}\n", .{ wlo, whi, M }) catch unreachable).len;
             wlo = whi;
+            w *= 2;
         }
     } else {
         off += (std.fmt.bufPrint(buf[off..], "A.0:8/64\nA.8:16/64\nA.16:32/64\nA.32:64/64\nA.64:{d}/64\n", .{T}) catch unreachable).len;
