@@ -13,7 +13,7 @@ export PATH="$HOME/.local/bin:$PATH"
 
 PLAN=${1:?usage: fleet.sh <planfile> <workdir>}
 WORK=${2:?usage: fleet.sh <planfile> <workdir>}
-AMI=${AMI:-ami-0f775444fea347a52}
+AMI=${AMI:-ami-0fd23c7420775ce6c}
 SG=${SG:-sg-00229d4999c53c8b3}
 KEY=${KEY:-prime-count}
 TYPE=${TYPE:-c8g.xlarge}
