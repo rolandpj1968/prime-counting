@@ -931,6 +931,68 @@ turned the growth drift from conjecture into measurement:
   at 92–94% self with udivmod 5–7% and no hot chain-follow — the post-vecfix
   signature holds at 5× the 10²² segment count.
 
+## The fleet: distributing the decomposition
+
+π(x) = A − B + ω + φ₀ + Σ splits across machines along two seams, one of them
+requiring a small theorem and the other requiring nothing at all.
+
+**The ω+B seam (the theorem).** The block sweep is prefix-coupled: each block's
+D-leaf corrections multiply the per-stage φ-totals of every block before it, and
+B's queries ride a running scalar. But every correction is *affine in the entry
+prefix* — Σ_t P_before(t)·μ(t) = P_entry·Σμ + Σ P_within(t)·μ(t) — so a
+contiguous block interval's entire coupling to the rest of the computation is
+two π(x*)-length vectors (Σμ, Σφ-totals per stage) and two scalars. A fragment
+is that coupling surface plus the interval's own partial sums: ~1 MB at 10²⁴,
+computed anywhere, in any order, by any machine. The merge carry-walks fragments
+in sweep order — structurally the same loop as the in-process stitch with
+fragments as super-blocks — and reproduces the monolithic ω and B bit-for-bit.
+Fragments may live on different block grids: block t of grid nb starts at
+segment ⌊t·nseg/nb⌋, so tiles line up exactly when their t/nb fractions chain,
+verified by u128 cross-multiplication. That freedom is what lets the leaf-dense
+bottom be cut into a geometric ladder on a 4096×-finer grid while the fold above
+uses coarse uniform intervals.
+
+**The A/Σ seam (no theorem).** A and Σ₄/₅/₆ are pure sums over p-chunks and
+v-windows, so a fragment is ~200 bytes of raw partials over any interval of a
+unified unit grid; the ×π(y) and sign fixups are applied exactly once at
+assembly. The scalars and φ₀ (all O(y) or oracle lookups) stay merge-side.
+
+**The tiling proof is the integrity model.** The merge sorts each family and
+requires its fragments to tile [0, 1) exactly: a hole names the lost task to
+re-issue, an overlap is a rejected double-spend, and mixed-run fragments are
+refused by header (x, y, segw — with y frozen at plan time, so α choices
+travel as one integer rather than as constants agents might re-derive
+differently). A distributed run is therefore *better* audited than a local one:
+transport errors are structurally detectable, and `--check` referees the
+arithmetic against the published values.
+
+**Operationally**: `pi <x> --plan` emits the parameter contract and task list
+(the binary is the single source of grid truth); `fleet.sh` is ~100 lines of
+pure transport — launch task agents under a vCPU cap, collect fragments,
+terminate, merge. Agents are stateless and anonymous; the fragment files plus
+instance tags are the only campaign state, so the controller can be killed and
+rerun at any point.
+
+**What the campaigns measured** (each run found the next design flaw, as proof
+runs should):
+
+- *Block 0 is a single-threaded monster*: the leaf floor sits at
+  v = x/(x*·y), and everything leaf-shaped piles up hyperbolically just above
+  it — as a monolithic block at 10²³ it ran 5.4 h single-core with ~17 h
+  remaining; split into a 13-rung geometric ladder it fell in 44 min of fleet
+  time. The per-segment cost there is dominated by ~10⁵ alive-but-idle sparse
+  stages re-checking their overshoot each segment — the vnext cache, measured
+  dead globally and reverted, resurrected as the dominant *regional* term.
+  Verdicts are scale- and region-indexed.
+- *Every phase is front-loaded in its natural coordinate*: small-p chunks and
+  near-y windows are hyperbolic just like low blocks (at 10²⁴, the equal-width
+  A-chunk [0,4) ran ~7 h while its siblings took minutes). All plan cuts must
+  be geometric; none may be linear.
+- *Per-agent setup scales as √x*: at 10²⁴ each agent spends ~2 h building
+  tables (bpi's boundary sweep dominates) before touching its assignment —
+  ~20% of the campaign duplicated 97 times. Fix queued: ship bpi as a 30 MB
+  plan artifact and batch multiple intervals per agent boot.
+
 ## Verification
 
 - **Differential**: ω against a naive φ recursion, and B against an independent
@@ -942,7 +1004,7 @@ turned the growth drift from conjecture into measurement:
 - **π oracle**: count() *and* prevPrime() against an explicit prime list at every
   v ≤ 3×10⁶. The oracle answers every π query in the terms, so a wheel-indexing
   off-by-one would silently skew π(x) rather than crash.
-- **Known values**: exact at every π(10ⁿ), 10¹³ → 10²³.
+- **Known values**: exact at every π(10ⁿ), 10¹³ → 10²⁴ (10²¹–10²⁴ also via distributed fleet runs).
 - **u128 path**: X = u128 must agree with X = u64 on x < 2⁶⁴ — *and* see the φ₀ bug
   above for why that check alone was not sufficient.
 - **Parallel**: piGourdonPar must equal piGourdon exactly; the bucket ring's

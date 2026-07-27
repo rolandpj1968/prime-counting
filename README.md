@@ -13,8 +13,9 @@ compute it, in increasing sophistication and decreasing intuition:
 - **Combinatorial** — Legendre → Meissel → Lehmer → Lagarias–Miller–Odlyzko →
   Deléglise–Rivat → Gourdon. Sub-linear (≈ O(N^(2/3))): counts π(N) *without
   listing the primes*, via a partial-sieve identity π(N) = φ(N,a) + a − 1 − P₂(N,a).
-  This is how records reach 10³⁰. **Built here through the LMO/DR line and then
-  Gourdon's decomposition** — π(10²³) in 18.5 h on six laptop cores.
+  This is how records reach 10³⁰. **Built here through the LMO/DR line, then
+  Gourdon's decomposition, then a distributed fleet of it** — π(10²⁴)
+  overnight on ~30 cloud instances for ~$50.
 - **Analytic** — Lagarias–Odlyzko. O(N^(1/2+ε)) by contour-integrating ζ(s).
   Asymptotically best, but high-precision-arithmetic constants leave it
   practically dominated; its real use is independent verification.
@@ -27,7 +28,7 @@ combinatorial method is the intellectual object; the machine is a multiplier.
 Complete through **Gourdon's decomposition**, parallel, with the LMO/Deléglise–Rivat
 line beneath it as reference and correctness oracle, and the full straight-sieving
 characterization beneath that. Everything below is exact and verified against every
-known value 10 → 10²³ (plus exhaustively over [0, 5000]). Presented most-advanced first.
+known value 10 → 10²⁴ (plus exhaustively over [0, 5000]). Presented most-advanced first.
 
 All timings on one quiet laptop: **AVX2 (no AVX-512), L1d 32 KiB / L2 512 KiB /
 L3 16 MiB, 28 GiB RAM** (6-core Ryzen 5 6600H), `zig 0.16 build-exe -O ReleaseFast
@@ -56,6 +57,17 @@ on this laptop — measured, not assumed. The 10²³ row is inherently heat-soak
 no 18-hour run is a cool-start run. Profiles of the top rows show the
 sieve's kill loop — `bt`/`btr` — as the hottest instructions, i.e. the machine
 spends its time on the algorithm, not on stalls.)
+
+**The fleet ladder** — the same decomposition distributed over AWS Graviton
+instances (`pi <x> --plan` + `fleet.sh`; see COMBINATORIAL for the fragment
+algebra). Wall-clock and out-of-pocket cost, verified against the known values:
+
+| x | π(x) | fleet wall | cost | note |
+|---|------|---:|---:|---|
+| 10²¹ | 21,127,269,486,018,731,928 | 30 min | ~$1 | two-command proving run |
+| 10²² | 201,467,286,689,315,906,290 | 72 min | ~$3 | beats the laptop record 3.2× |
+| 10²³ | 1,925,320,391,606,803,968,923 | ~10 h | ~$12 | first campaign (finds every design flaw) |
+| 10²⁴ | 18,435,599,767,349,200,867,866 | ~12 h | ~$50 | **new ceiling** — never run on the laptop (~4 days there) |
 **Memory now scales as O(x^(1/3))**, not O(√x): the largest resident structures
 are the y-sized leaf table and prime list. 10²⁴ needs ~4 GB (was ~40 GB) — the
 memory wall is gone, leaving runtime (~4 days at 10²⁴ on this laptop) as the
