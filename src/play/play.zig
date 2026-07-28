@@ -8,7 +8,7 @@ const rs = @import("rs");
 //     std.debug.print("Hello world!\n", .{});
 // }
 
-pub const Counters = struct { n: u64 = 0, it: u64 = 0, x0: u64 = 0, a0: u64 = 0, one: u64 = 0, pi: u64 = 0, ch: u64 = 0, lt_pxp: u64 = 0 };
+pub const Counters = struct { n: u64 = 0, it: u64 = 0, x0: u64 = 0, a0: u64 = 0, a1: u64 = 0, a2: u64 = 0, one: u64 = 0, pi: u64 = 0, ch: u64 = 0, lt_pxp: u64 = 0, l: u64 = 0, b: u64 = 0, la: u64 = 0 };
 
 fn phi_simple(x: u64, a: u64, primes: []const u64, pis: []const u64, c: *Counters) u64 {
     c.n += 1;
@@ -333,9 +333,20 @@ fn phi_linear_all(x: u64, a: u64, primes: []const u64, pis: []const u64, c: *Cou
         c.x0 += 1;
         return 0;
     }
+
     if (a == 0) {
         c.a0 += 1;
         return x;
+    }
+
+    if (a == 1) {
+        c.a1 += 1;
+        return x - x / 2;
+    }
+
+    if (a == 2) {
+        c.a2 += 1;
+        return x - x / 2 - x / 3 + x / 6;
     }
 
     const p_a = primes[a - 1];
@@ -347,9 +358,16 @@ fn phi_linear_all(x: u64, a: u64, primes: []const u64, pis: []const u64, c: *Cou
     }
 
     // TODO <= ??
-    if (x < p_a * p_a and x < pis.len) {
+    if (x <= p_a * p_a and x < pis.len) {
         const pi_x = pis[x];
         return 1 + pi_x - a;
+    }
+
+    if (x <= primes.len) {
+        c.l += 1;
+        c.la += a;
+    } else {
+        c.b += 1;
     }
 
     var phi = x;
@@ -451,4 +469,9 @@ pub fn main(init: std.process.Init) !void {
     // std.debug.print("phi({d:>6}, {d:>2}) = {d:>6} / [{any}]\n", .{ x, y, phi_x_y, c });
 
     //std.debug.print("phi({}, {}) = {}\n", .{ x, y, phi_x_y });
+
+    if (x == y * y) {
+        std.debug.print("\n", .{});
+        std.debug.print("pi({} = {})\n", .{ x, phi_x_y + primes.len - 1 });
+    }
 }
