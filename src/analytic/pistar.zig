@@ -1,22 +1,29 @@
-//! Rung 3+: an integer pi(x) from the zeros, via Riemann's pi* formula —
-//! parallel, with a segmented window (no resident window array).
+//! Rung 4+: an integer pi(x) from the zeros, via Riemann's pi* formula —
+//! parallel, segmented window, f128 aggregates, and a pluggable KERNEL seam.
 //!
 //!   pi*(x) = sum_{p^m<=x} 1/m
 //!          = li(x) - sum_rho li(x^rho) - ln 2 + integral_x^inf dt/(t(t^2-1)ln t)
 //!
-//! smoothed with Galway's Gaussian pair (Platt eq 3.3). Each zero's term:
-//!   F(rho) = e^(l^2 rho^2/2) x^rho [ S/(rho L) - l^2/L^2 ],
-//! S = sum_{k<=13} k!/(rho L)^k (|rho L| >= 195 at x >= 1e6 => ~1e-25), and
-//! -l^2/L^2 is the first-order kernel correction in its cancelled form. Pole
-//! term li(x) + l^2 x(L-1)/(2L^2); trivial-zero integral (~1/(2x^2 L)) dropped.
-//! Sharp pi* = zero sum + sum_window (1/m)(chi - phi) over an exactly sieved
-//! window; Moebius with exact tiny pi*(x^(1/m)) gives pi(x); round and check.
+//! A kernel is the Mellin pair that smooths the sharp count: a prime-side
+//! weight phi(n) (sharp step outside its window) and the matching zero-side
+//! per-zero term. Comptime duck-typed interface:
+//!
+//!   init(x, T, c) K       — freeze all kernel parameters
+//!   .lo, .hi: u64         — prime-side window support (phi = 1 below, 0 above)
+//!   phi(n) f64            — smoothed weight, called only for n in (lo, hi]
+//!   zeroTerm(g) f64       — full contribution of the conjugate zero pair at
+//!                            gamma = g to the smoothed pi* (Kahan-added)
+//!   cutoff(g) bool        — true when this zero and all above are negligible
+//!   poleCorr() f64        — kernel correction to the li(x) pole term
+//!
+//! Kernels: gaussian (Galway/Platt, the proven baseline), with logan (FKBJ
+//! band-limited: exact zero-sum truncation) and beurling-selberg
+//! (majorant/minorant sandwich: certified bounds) planned — see
+//! literature/buthe-*.pdf and docs/ANALYTIC.md.
 //!
 //! Parallel geometry mirrors the eventual distribution seam:
-//!  - zero sum: static contiguous zero ranges, one Kahan per worker (a zero
-//!    range is an additive fragment; the table streams);
-//!  - window: atomic dispenser over fixed-width segments, each sieved in a
-//!    per-worker strip (a segment is an additive fragment; needs no zeros).
+//!  - zero sum: static contiguous zero ranges, one Kahan per worker;
+//!  - window: atomic dispenser over fixed-width segments, per-worker strips.
 //! Memory is O(nt * SEGW + pi(sqrt(hi))) regardless of window length.
 
 const std = @import("std");
@@ -63,13 +70,8 @@ const C = struct {
     }
 };
 
-/// Ei(t) for real t > 0 via the convergent series gamma + ln t + sum t^k/(k k!)
-/// (all terms positive -- no cancellation). In f128: the f64 version's
-/// eps*e^L/L error (~0.03 at x = 1e15) was the dominant systematic, and even
-/// ln(x) in f64 injects x/L * 4e-15 (~0.1 at 1e15). One call per run, so the
-/// softfloat cost is nanoseconds.
 /// ln in f128 built from correctly-rounded arithmetic only: Zig's @log on
-/// f128 is not 113-bit accurate (compiler-rt), and dEi/dL = x/L amplifies
+/// f128 is silently 53-bit (compiler_rt stub), and dEi/dL = x/L amplifies
 /// ln(x) error by ~3e13 at x = 1e15. Exact power-of-two reduction + atanh
 /// series (z <= 0.2 after reduction, ~26 terms to 1e-40).
 const LN2_128: f128 = 0.69314718055994530941723212145817657;
@@ -91,6 +93,9 @@ fn ln128(v0: f128) f128 {
     return 2.0 * sum + k * LN2_128;
 }
 
+/// Ei(t) for real t > 0 via the convergent series gamma + ln t + sum t^k/(k k!)
+/// (all terms positive -- no cancellation). f128 throughout: the f64
+/// version's eps*e^L/L error (~0.03 at x = 1e15) was a dominant systematic.
 fn realEi(t: f128) f128 {
     const euler: f128 = 0.57721566490153286060651209008240243;
     var s: f128 = euler + ln128(t);
@@ -105,7 +110,6 @@ fn realEi(t: f128) f128 {
     return s;
 }
 
-const ERFC_CUT = 7.5; // erfc(7.5) ~ 4e-26: outside this, phi is exactly 0 or 1
 const SEGW: u64 = 1 << 24; // window segment width (16M integers per strip)
 
 /// floor(x^(1/m)) exactly, by float guess + integer correction.
@@ -177,26 +181,58 @@ const KNOWN = [_]struct { x: u64, pi: u64 }{
     .{ .x = 1_000_000_000_000_000_000, .pi = 24_739_954_287_740_860 },
 };
 
-const ZeroCtx = struct {
-    zeros: []const f64,
-    nt: usize,
-    sx: f64,
-    l2: f64,
-    theta_l: f64,
-    L: f64,
-    sums: []f64,
-};
+// ---------------------------------------------------------------------------
+// Kernels
+// ---------------------------------------------------------------------------
 
-fn zeroWorker(ctx: *ZeroCtx, wid: usize) void {
-    const n = ctx.zeros.len;
-    const chunk = (n + ctx.nt - 1) / ctx.nt;
-    const a = @min(wid * chunk, n);
-    const b = @min(a + chunk, n);
-    var k = Kahan{};
-    for (ctx.zeros[a..b]) |g| {
-        const damp = @exp(ctx.l2 * (0.25 - g * g) / 2.0);
-        if (damp < 1e-18) break; // gammas ascend within a range
-        const rl = C{ .re = 0.5 * ctx.L, .im = g * ctx.L };
+const ERFC_CUT = 7.5; // erfc(7.5) ~ 4e-26: outside this, phi is exactly 0 or 1
+
+/// Galway's Gaussian pair (Platt eq 3.3): phi_hat(s) = (x^s/s) e^(l^2 s^2/2),
+/// phi(t) = (1/2) erfc(log(t/x)/(sqrt(2) l)), lambda = c/T. Per-zero term:
+///   F(rho) = e^(l^2 rho^2/2) x^rho [ S/(rho L) - l^2/L^2 ],
+/// S = asymptotic li series sum k!/(rho L)^k, K = 13 (|rho L| >= 195 at
+/// x >= 1e6 => ~1e-25); -l^2/L^2 is the first-order kernel correction in its
+/// cancelled form. Pole correction l^2 x(L-1)/(2L^2); trivial-zero integral
+/// (~1/(2 x^2 L)) dropped.
+const Gaussian = struct {
+    xf: f64,
+    sx: f64,
+    L: f64,
+    lambda: f64,
+    l2: f64,
+    inv_s2l: f64,
+    theta_l: f64,
+    lo: u64,
+    hi: u64,
+
+    fn init(x: u64, T: f64, c: f64) Gaussian {
+        const xf: f64 = @floatFromInt(x);
+        const L = @log(xf);
+        const lambda = c / T;
+        const l2 = lambda * lambda;
+        const half_w = ERFC_CUT * std.math.sqrt2 * lambda;
+        return .{
+            .xf = xf,
+            .sx = @sqrt(xf),
+            .L = L,
+            .lambda = lambda,
+            .l2 = l2,
+            .inv_s2l = 1.0 / (std.math.sqrt2 * lambda),
+            .theta_l = L + l2 / 2.0,
+            .lo = @intFromFloat(xf * @exp(-half_w) - 2.0),
+            .hi = @intFromFloat(xf * @exp(half_w) + 2.0),
+        };
+    }
+
+    fn phi(k: *const Gaussian, n: u64) f64 {
+        // log(n/x) via log1p on the exact integer offset: no cancellation
+        const u = std.math.log1p((@as(f64, @floatFromInt(n)) - k.xf) / k.xf) * k.inv_s2l;
+        return 0.5 * erfc(u);
+    }
+
+    fn zeroTerm(k: *const Gaussian, g: f64) f64 {
+        const damp = @exp(k.l2 * (0.25 - g * g) / 2.0);
+        const rl = C{ .re = 0.5 * k.L, .im = g * k.L }; // rho L
         const irl = rl.inv();
         var S = C{ .re = 1, .im = 0 };
         var kk: f64 = 13;
@@ -205,112 +241,91 @@ fn zeroWorker(ctx: *ZeroCtx, wid: usize) void {
             S.re += 1;
         }
         var br = S.mul(irl); // S/(rho L)
-        br.re -= ctx.l2 / (ctx.L * ctx.L); // first-order kernel correction
-        const th = g * ctx.theta_l;
-        const e = C{ .re = ctx.sx * damp * @cos(th), .im = ctx.sx * damp * @sin(th) };
-        k.add(-2.0 * e.mul(br).re);
+        br.re -= k.l2 / (k.L * k.L); // first-order kernel correction
+        const th = g * k.theta_l;
+        const e = C{ .re = k.sx * damp * @cos(th), .im = k.sx * damp * @sin(th) };
+        return -2.0 * e.mul(br).re;
     }
-    ctx.sums[wid] = k.val();
-}
 
-const WinCtx = struct {
-    lo: u64, // window is (lo, hi]
-    hi: u64,
-    x: u64,
-    xf: f64,
-    inv_s2l: f64,
-    wsq: u64,
-    base: []const u64,
-    next: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
-    sums: []f64,
-    counts: []u64,
-    gpa: std.mem.Allocator,
+    fn cutoff(k: *const Gaussian, g: f64) bool {
+        return @exp(k.l2 * (0.25 - g * g) / 2.0) < 1e-18;
+    }
+
+    fn poleCorr(k: *const Gaussian) f64 {
+        return k.l2 * k.xf * (k.L - 1.0) / (2.0 * k.L * k.L);
+    }
 };
 
-fn winWorker(ctx: *WinCtx, wid: usize) void {
-    const seg = ctx.gpa.alloc(bool, SEGW) catch unreachable;
-    defer ctx.gpa.free(seg);
-    var k = Kahan{};
-    var cnt: u64 = 0;
-    while (true) {
-        const si = ctx.next.fetchAdd(1, .monotonic);
-        const s_lo = ctx.lo + 1 + si * SEGW;
-        if (s_lo > ctx.hi) break;
-        const s_hi = @min(s_lo + SEGW - 1, ctx.hi);
-        const len: usize = @intCast(s_hi - s_lo + 1);
-        @memset(seg[0..len], false);
-        for (ctx.base) |p| {
-            var q = ((s_lo + p - 1) / p) * p;
-            while (q <= s_hi) : (q += p) seg[@intCast(q - s_lo)] = true;
+// ---------------------------------------------------------------------------
+// Pipeline, generic over the kernel
+// ---------------------------------------------------------------------------
+
+fn run(comptime K: type, kern: *const K, x: u64, zeros: []const f64, nt: usize, gpa: std.mem.Allocator, t_start: u64, t_load: u64) !void {
+    const ZCtx = struct {
+        zeros: []const f64,
+        nt: usize,
+        kern: *const K,
+        sums: []f64,
+        fn work(ctx: *@This(), wid: usize) void {
+            const n = ctx.zeros.len;
+            const chunk = (n + ctx.nt - 1) / ctx.nt;
+            const a = @min(wid * chunk, n);
+            const b = @min(a + chunk, n);
+            var k = Kahan{};
+            for (ctx.zeros[a..b]) |g| {
+                if (ctx.kern.cutoff(g)) break; // gammas ascend within a range
+                k.add(ctx.kern.zeroTerm(g));
+            }
+            ctx.sums[wid] = k.val();
         }
-        for (seg[0..len], 0..) |comp, i| {
-            if (comp) continue;
-            const n = s_lo + i;
-            cnt += 1;
-            const chi: f64 = if (n <= ctx.x) 1.0 else 0.0;
-            const u = std.math.log1p((@as(f64, @floatFromInt(n)) - ctx.xf) / ctx.xf) * ctx.inv_s2l;
-            k.add(chi - 0.5 * erfc(u));
+    };
+    const WCtx = struct {
+        kern: *const K,
+        x: u64,
+        base: []const u64,
+        next: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+        sums: []f64,
+        counts: []u64,
+        gpa: std.mem.Allocator,
+        fn work(ctx: *@This(), wid: usize) void {
+            const seg = ctx.gpa.alloc(bool, SEGW) catch unreachable;
+            defer ctx.gpa.free(seg);
+            const lo = ctx.kern.lo;
+            const hi = ctx.kern.hi;
+            var k = Kahan{};
+            var cnt: u64 = 0;
+            while (true) {
+                const si = ctx.next.fetchAdd(1, .monotonic);
+                const s_lo = lo + 1 + si * SEGW;
+                if (s_lo > hi) break;
+                const s_hi = @min(s_lo + SEGW - 1, hi);
+                const len: usize = @intCast(s_hi - s_lo + 1);
+                @memset(seg[0..len], false);
+                for (ctx.base) |p| {
+                    var q = ((s_lo + p - 1) / p) * p;
+                    while (q <= s_hi) : (q += p) seg[@intCast(q - s_lo)] = true;
+                }
+                for (seg[0..len], 0..) |comp, i| {
+                    if (comp) continue;
+                    const n = s_lo + i;
+                    cnt += 1;
+                    const chi: f64 = if (n <= ctx.x) 1.0 else 0.0;
+                    k.add(chi - ctx.kern.phi(n));
+                }
+            }
+            ctx.sums[wid] = k.val();
+            ctx.counts[wid] = cnt;
         }
-    }
-    ctx.sums[wid] = k.val();
-    ctx.counts[wid] = cnt;
-}
-
-pub fn main(init: std.process.Init) !void {
-    var args = try init.minimal.args.iterateAllocator(init.gpa);
-    _ = args.skip();
-    const usage = "Usage: pistar <x> <zeros-file> [c: lambda = c/T, default 7.5] [-t nthreads]\n";
-    const x_str = args.next() orelse return std.debug.print(usage, .{});
-    const x = try std.fmt.parseInt(u64, x_str, 10);
-    const zpath = args.next() orelse return std.debug.print(usage, .{});
-    var cpar: f64 = 7.5;
-    var nt: usize = 6;
-    while (args.next()) |a| {
-        if (std.mem.eql(u8, a, "-t")) {
-            const v = args.next() orelse return std.debug.print(usage, .{});
-            nt = try std.fmt.parseInt(usize, v, 10);
-        } else {
-            cpar = try std.fmt.parseFloat(f64, a);
-        }
-    }
-
-    const gpa = std.heap.page_allocator;
-    const t_start = nowNs();
-
-    var tio = std.Io.Threaded.init(gpa, .{});
-    const data = try std.Io.Dir.cwd().readFileAlloc(tio.io(), zpath, gpa, .limited(1 << 33));
-    var zeros = try std.ArrayList(f64).initCapacity(gpa, 1 << 21);
-    defer zeros.deinit(gpa);
-    var lines = std.mem.tokenizeScalar(u8, data, '\n');
-    while (lines.next()) |line| {
-        const s = std.mem.trim(u8, line, " \t\r");
-        if (s.len == 0) continue;
-        try zeros.append(gpa, try std.fmt.parseFloat(f64, s));
-    }
-    gpa.free(data);
-    const t_load = nowNs();
-
-    const T = zeros.items[zeros.items.len - 1];
-    const lambda = cpar / T;
-    const l2 = lambda * lambda;
-    const xf: f64 = @floatFromInt(x);
-    const L = @log(xf);
-    const sx = @sqrt(xf);
-    const inv_s2l = 1.0 / (std.math.sqrt2 * lambda);
-    const half_w = ERFC_CUT * std.math.sqrt2 * lambda;
-    const lo: u64 = @intFromFloat(xf * @exp(-half_w) - 2.0);
-    const hi: u64 = @intFromFloat(xf * @exp(half_w) + 2.0);
-
-    std.debug.print("x = {d}  zeros = {d} (T = {d:.3})  lambda = {e:.4} (c = {d})  threads = {d}\n", .{ x, zeros.items.len, T, lambda, cpar, nt });
+    };
 
     // ---- zero sum: static zero-range fragments
     const zsums = try gpa.alloc(f64, nt);
     defer gpa.free(zsums);
-    var zctx = ZeroCtx{ .zeros = zeros.items, .nt = nt, .sx = sx, .l2 = l2, .theta_l = L + l2 / 2.0, .L = L, .sums = zsums };
+    var zctx = ZCtx{ .zeros = zeros, .nt = nt, .kern = kern, .sums = zsums };
     {
         const threads = try gpa.alloc(std.Thread, nt);
         defer gpa.free(threads);
-        for (threads, 0..) |*t, i| t.* = try std.Thread.spawn(.{}, zeroWorker, .{ &zctx, i });
+        for (threads, 0..) |*t, i| t.* = try std.Thread.spawn(.{}, ZCtx.work, .{ &zctx, i });
         for (threads) |t| t.join();
     }
     var zk = Kahan{};
@@ -322,26 +337,26 @@ pub fn main(init: std.process.Init) !void {
     // here down: at x = 1e15 the f64 ulp of the running ~3e13 totals is
     // already ~4e-3, and it reaches ~0.5 by 1e17.
     const li_x: f128 = realEi(ln128(@floatFromInt(x)));
-    const main_corr = l2 * xf * (L - 1.0) / (2.0 * L * L);
+    const pole_corr = kern.poleCorr();
     const ln2 = @log(2.0);
-    const pistar_smooth: f128 = li_x + @as(f128, main_corr) + @as(f128, zerosum) - @as(f128, ln2);
-    std.debug.print("li(x) = {d:.6}  kernel-corr = {d:.6}  zerosum = {d:.6}  -ln2\n", .{ @as(f64, @floatCast(li_x)), main_corr, zerosum });
+    const pistar_smooth: f128 = li_x + @as(f128, pole_corr) + @as(f128, zerosum) - @as(f128, ln2);
+    std.debug.print("li(x) = {d:.6}  kernel-corr = {d:.6}  zerosum = {d:.6}  -ln2\n", .{ @as(f64, @floatCast(li_x)), pole_corr, zerosum });
     std.debug.print("pi*_smooth(zeros) = {d:.6}   ({d:.1}s load, {d:.1}s zerosum)\n", .{ @as(f64, @floatCast(pistar_smooth)), @as(f64, @floatFromInt(t_load - t_start)) / 1e9, @as(f64, @floatFromInt(t_zeros - t_load)) / 1e9 });
 
     // ---- window: segmented, dispenser-parallel; (1/m)(chi - phi) corrections
-    const wsq = iroot(hi, 2);
-    std.debug.assert(wsq < lo); // base primes never lie inside the window
+    const wsq = iroot(kern.hi, 2);
+    std.debug.assert(wsq < kern.lo); // base primes never lie inside the window
     const base = try rs.basePrimes(gpa, wsq);
     defer gpa.free(base);
     const wsums = try gpa.alloc(f64, nt);
     defer gpa.free(wsums);
     const wcounts = try gpa.alloc(u64, nt);
     defer gpa.free(wcounts);
-    var wctx = WinCtx{ .lo = lo, .hi = hi, .x = x, .xf = xf, .inv_s2l = inv_s2l, .wsq = wsq, .base = base, .sums = wsums, .counts = wcounts, .gpa = gpa };
+    var wctx = WCtx{ .kern = kern, .x = x, .base = base, .sums = wsums, .counts = wcounts, .gpa = gpa };
     {
         const threads = try gpa.alloc(std.Thread, nt);
         defer gpa.free(threads);
-        for (threads, 0..) |*t, i| t.* = try std.Thread.spawn(.{}, winWorker, .{ &wctx, i });
+        for (threads, 0..) |*t, i| t.* = try std.Thread.spawn(.{}, WCtx.work, .{ &wctx, i });
         for (threads) |t| t.join();
     }
     var wk = Kahan{};
@@ -352,19 +367,18 @@ pub fn main(init: std.process.Init) !void {
     for (base) |p| {
         var pk: u64 = 1;
         var m: f64 = 0;
-        while (pk <= hi / p) {
+        while (pk <= kern.hi / p) {
             pk *= p;
             m += 1;
-            if (pk <= lo) continue;
+            if (pk <= kern.lo) continue;
             const chi: f64 = if (pk <= x) 1.0 else 0.0;
-            const u = std.math.log1p((@as(f64, @floatFromInt(pk)) - xf) / xf) * inv_s2l;
-            wk.add((chi - 0.5 * erfc(u)) / m);
+            wk.add((chi - kern.phi(pk)) / m);
         }
     }
     const wcorr = wk.val();
     const pistar_sharp: f128 = pistar_smooth + @as(f128, wcorr);
     const t_win = nowNs();
-    std.debug.print("window [{d}, {d}]: {d} ints, {d} primes  corr = {d:.6}   ({d:.1}s window)\n", .{ lo + 1, hi, hi - lo, wprimes, wcorr, @as(f64, @floatFromInt(t_win - t_zeros)) / 1e9 });
+    std.debug.print("window [{d}, {d}]: {d} ints, {d} primes  corr = {d:.6}   ({d:.1}s window)\n", .{ kern.lo + 1, kern.hi, kern.hi - kern.lo, wprimes, wcorr, @as(f64, @floatFromInt(t_win - t_zeros)) / 1e9 });
     std.debug.print("pi*_sharp = {d:.6}\n", .{@as(f64, @floatCast(pistar_sharp))});
 
     // ---- Moebius unwind with exact tiny pi*(x^(1/m)); the small terms sum
@@ -395,4 +409,53 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     std.debug.print("(no published reference in table)\n", .{});
+}
+
+pub fn main(init: std.process.Init) !void {
+    var args = try init.minimal.args.iterateAllocator(init.gpa);
+    _ = args.skip();
+    const usage = "Usage: pistar <x> <zeros-file> [c] [-t nthreads] [--kernel gaussian]\n";
+    const x_str = args.next() orelse return std.debug.print(usage, .{});
+    const x = try std.fmt.parseInt(u64, x_str, 10);
+    const zpath = args.next() orelse return std.debug.print(usage, .{});
+    var cpar: f64 = 7.5;
+    var nt: usize = 6;
+    var kname: []const u8 = "gaussian";
+    while (args.next()) |a| {
+        if (std.mem.eql(u8, a, "-t")) {
+            const v = args.next() orelse return std.debug.print(usage, .{});
+            nt = try std.fmt.parseInt(usize, v, 10);
+        } else if (std.mem.eql(u8, a, "--kernel")) {
+            kname = args.next() orelse return std.debug.print(usage, .{});
+        } else {
+            cpar = try std.fmt.parseFloat(f64, a);
+        }
+    }
+
+    const gpa = std.heap.page_allocator;
+    const t_start = nowNs();
+
+    var tio = std.Io.Threaded.init(gpa, .{});
+    const data = try std.Io.Dir.cwd().readFileAlloc(tio.io(), zpath, gpa, .limited(1 << 33));
+    var zeros = try std.ArrayList(f64).initCapacity(gpa, 1 << 21);
+    defer zeros.deinit(gpa);
+    var lines = std.mem.tokenizeScalar(u8, data, '\n');
+    while (lines.next()) |line| {
+        const s = std.mem.trim(u8, line, " \t\r");
+        if (s.len == 0) continue;
+        try zeros.append(gpa, try std.fmt.parseFloat(f64, s));
+    }
+    gpa.free(data);
+    const t_load = nowNs();
+
+    const T = zeros.items[zeros.items.len - 1];
+    std.debug.print("x = {d}  zeros = {d} (T = {d:.3})  kernel = {s} (c = {d})  threads = {d}\n", .{ x, zeros.items.len, T, kname, cpar, nt });
+
+    if (std.mem.eql(u8, kname, "gaussian")) {
+        const kern = Gaussian.init(x, T, cpar);
+        try run(Gaussian, &kern, x, zeros.items, nt, gpa, t_start, t_load);
+    } else {
+        std.debug.print("unknown kernel '{s}' (have: gaussian; logan and beurling-selberg planned)\n", .{kname});
+        std.process.exit(2);
+    }
 }
