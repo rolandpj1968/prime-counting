@@ -25,7 +25,15 @@ the first 10⁵ zeros (T ≈ 7.5×10⁴) and the first 2,001,052 zeros
 (T ≈ 1.13×10⁶), imaginary parts to **±4×10⁻⁹**.
 
 For later rungs: LMFDB carries Platt's ~1.038×10¹¹ zeros to height
-T ≈ 3.06×10¹⁰ at ±2⁻¹⁰² — rigorous and Turing-verified complete.
+T ≈ 3.06×10¹⁰ at ±2⁻¹⁰² — rigorous and Turing-verified complete. The bulk
+format is decoded and validated (`lmfdb2txt.py`): files `zeros_<t>.dat` at
+beta.lmfdb.org/riemann-zeta-zeros/, blocks of
+`[t0:f64][t1:f64][N(t0):u64][N(t1):u64]` + 13-byte zeros (u64+u32+u8 =
+104-bit **delta** to the previous zero in units 2⁻¹⁰¹; accumulate in exact
+integer arithmetic — a float cumulative sum random-walks ~10⁻⁶ over millions
+of zeros). Our first prefix: 4,826,908 zeros to T = 2,546,000 (~62 MB);
+the 2,001,052-zero overlap with Odlyzko agrees to worst 3.0×10⁻⁹, mutually
+validating both tables and both decoders.
 
 **Zero precision is not the binding constraint.** The sensitivity of the zero sum
 to a perturbation δγ is ~√x·ln x·δγ per zero; over the 2M-zero table the RMS
@@ -150,17 +158,41 @@ sieved window; then Möbius with *exact* tiny π*(x^(1/m)) from direct sieves:
 | 10¹⁰ | 455,052,511 | +3×10⁻⁶ | 0.5000 | 1.4×10⁶ | 0.3 s |
 | 10¹¹ | 4,118,054,813 | −1.5×10⁻⁵ | 0.5000 | 1.4×10⁷ | 0.5 s |
 | 10¹² | 37,607,912,018 | −4.6×10⁻⁵ | 0.5000 | 1.4×10⁸ | 1.8 s |
-| 10¹³ | 346,065,536,839 | **+0.071** | 0.4286 | 1.4×10⁹ | 16.9 s |
+| 10¹³ | 346,065,536,839 | −5×10⁻⁷ | 0.5000 | 1.4×10⁹ | 16.7 s |
+| 10¹⁴ | 3,204,941,750,802 | +3×10⁻³ | 0.4971 | 6.2×10⁹ (LMFDB prefix) | 83 s |
 
 **MATCH against the published value at every row.** Beyond 10⁹ no full-sieve
 referee exists — the zeros carry everything except the ~10⁻⁵-relative-width
-window. The margin column is the empirical error bound in action: flat 0.5000
-through 10¹², then the first real erosion at 10¹³, at +0.071 — almost exactly
-the budgeted √x·ln x·δγ noise from the tables' ±4×10⁻⁹ zeros (RMS ≈ 0.06
-there). The binding constraint of this rung is zero **precision**, not height,
-not f64: Platt's ±2⁻¹⁰² LMFDB zeros are the designed fix, with double-double
-accumulation due around the same scale. The window (∝ x at fixed T) is the
-other cost: 1.4×10⁹ integers sieved at 10¹³.
+window.
+
+### The 10¹³ bug: a margin-column success story
+
+The first run at 10¹³ showed error +0.0714 (margin 0.4286), which we
+initially — plausibly, wrongly — attributed to the Odlyzko tables' ±4×10⁻⁹
+zero precision (budgeted RMS ≈ 0.06 there). The margin column then earned its
+keep. Re-running with the LMFDB prefix — different table, different T,
+different λ, different window — reproduced the error to 10⁻⁴: **two
+independent zero tables agreeing on the same error means machinery, not
+noise** (and its λ-independence acquitted the kernel analytics wholesale,
+since the kernel corrections differed 5× between runs). A 45-digit reference
+acquitted li(x) (f64 off by only 1.7×10⁻⁴). The pipeline was then split at
+π*: computing exact π*(10¹³) = Σ π(x^(1/m))/m via `gourdon.zig` at every root
+matched the analytic π* to 2×10⁻⁵ — the entire zero side was *correct*, so
+the bug had to be in the Möbius unwind. It was: the hardcoded μ table stopped
+at m = 40, and 2⁴¹⁻⁴³ ≤ 10¹³ — three dropped terms summing to
+1/41 + 1/42 + 1/43 = **0.071456**. Observed error: +0.0714. Threshold
+behavior explained too: 2⁴¹ = 2.2×10¹², so 10¹² and below were clean. Fix:
+compute μ(m) by trial factorization to m ≤ 64. Margins after: 0.5000 at 10¹³
+(the Odlyzko run lands within 5×10⁻⁷ of the integer).
+
+Lessons banked: (1) the naive-f64 + 9-digit-zeros machinery is nowhere near
+its noise floor at 10¹³ — the real errors at 10¹⁴ are ~10⁻³; (2) margins
+catch bugs that MATCH alone would forgive at smaller x; (3) exact-π*-split is
+the right bisection knife for this pipeline, and `gourdon.zig` referees it at
+any x we can reach combinatorially. The current walls: the window bool array
+(6.2 GB at 10¹⁴, wants a bitset), and eventually phase precision γL in f64
+(the double-double rung, together with hi/lo zeros from the LMFDB 2⁻¹⁰¹
+format).
 
 ## The ladder ahead
 

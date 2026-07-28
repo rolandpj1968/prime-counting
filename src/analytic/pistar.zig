@@ -120,7 +120,21 @@ fn pistarExact(gpa: std.mem.Allocator, v: u64) !f64 {
     return k.val();
 }
 
-const MU = [_]i8{ 0, 1, -1, -1, 0, -1, 1, -1, 0, 0, 1, -1, 0, -1, 1, 1, 0, -1, 0, -1, 0, 1, 1, -1, 0, 0, 1, 0, 0, -1, -1, -1, 0, 1, 1, 1, 0, -1, 1, 1, 0 };
+/// mu(m) by trial factorization — m never exceeds log2(x) <= 64 here.
+fn mobius(m0: u32) i32 {
+    var m = m0;
+    var mu: i32 = 1;
+    var p: u32 = 2;
+    while (p * p <= m) : (p += 1) {
+        if (m % p == 0) {
+            m /= p;
+            if (m % p == 0) return 0;
+            mu = -mu;
+        }
+    }
+    if (m > 1) mu = -mu;
+    return mu;
+}
 
 const KNOWN = [_]struct { x: u64, pi: u64 }{
     .{ .x = 1_000_000, .pi = 78_498 },
@@ -131,6 +145,9 @@ const KNOWN = [_]struct { x: u64, pi: u64 }{
     .{ .x = 100_000_000_000, .pi = 4_118_054_813 },
     .{ .x = 1_000_000_000_000, .pi = 37_607_912_018 },
     .{ .x = 10_000_000_000_000, .pi = 346_065_536_839 },
+    .{ .x = 100_000_000_000_000, .pi = 3_204_941_750_802 },
+    .{ .x = 1_000_000_000_000_000, .pi = 29_844_570_422_669 },
+    .{ .x = 10_000_000_000_000_000, .pi = 279_238_341_033_925 },
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -247,12 +264,13 @@ pub fn main(init: std.process.Init) !void {
     var pk = Kahan{};
     pk.add(pistar_sharp);
     var m: u32 = 2;
-    while (m < MU.len) : (m += 1) {
-        if (MU[m] == 0) continue;
+    while (m <= 64) : (m += 1) {
+        const mu = mobius(m);
+        if (mu == 0) continue;
         const v = iroot(x, m);
         if (v < 2) break;
         const pse = try pistarExact(gpa, v);
-        const term = @as(f64, @floatFromInt(MU[m])) * pse / @as(f64, @floatFromInt(m));
+        const term = @as(f64, @floatFromInt(mu)) * pse / @as(f64, @floatFromInt(m));
         pk.add(term);
         std.debug.print("  m={d:<2} x^(1/m)={d:<8} mu/m*pi* = {d:.6}\n", .{ m, v, term });
     }
