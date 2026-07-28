@@ -24,3 +24,4 @@ zig-out/
 /pi-plan
 src/analytic/explicit
 src/play/play
+src/analytic/smooth

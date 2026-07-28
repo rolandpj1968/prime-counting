@@ -84,24 +84,53 @@ algebra, constants, and trivial-zero tail all certified. And f64 holds: at
 x = 10⁹ the phase γL reaches 2×10⁷ rad, whose argument-reduction error (~5×10⁻⁹)
 is still below the tables' own ±4×10⁻⁹.
 
+## Rung 2: Gaussian smoothing (`smooth.zig`)
+
+Kernel provenance, verified against the sources (both in `literature/`):
+Lagarias–Odlyzko 1987 leave the Mellin pair φ̂, φ "suitable" but unspecified;
+**Galway's thesis** (UIUC 2004) proposed the Gaussian pair
+φ̂(s) = (x^s/s)·e^(λ²s²/2), φ(t) = ½erfc(log(t/x)/(√2λ)) and showed it
+near-optimal by the uncertainty principle (the Gaussian is its own Fourier
+transform — fastest simultaneous decay in γ and in n); **Platt** (arXiv:
+1203.5712) implemented it rigorously for unconditional π(10²⁴). FKBJ used a
+different kernel family (compactly-supported Fourier transform), announced
+π(10²⁴) in 2010 *contingent on RH* — the kernel choice is a live fork, not a
+convention, and the conditionality lives in how the tail beyond the last zero
+is bounded. (Our β = ½ pair term is verified fact at tabulated heights, not
+hypothesis.)
+
+Applied to ψ, the transform is exact and simple: each pair term gains damping
+e^(λ²(¼−γ²)/2) *and a phase shift* θ = γ(L + λ²/2), and the x-term becomes
+x·e^(λ²/2) (a 0.02 correction at 10⁹ — not optional). Direct side: the same
+sieve referee, now summing Λ(n)·½erfc(log(n/x)/(√2λ)) — the weight differs
+from the sharp step only on a window of x·2√2·c·λ integers (λ = c/T, c = 7.5,
+so the dropped-tail factor is e^(−c²/2) ≈ 10⁻¹²). log(n/x) via `log1p` on the
+exact integer offset — no cancellation; erfc from libc.
+
+| x | zeros | naive err (rung 1) | smoothed err | window |
+|---|------:|-------------------:|-------------:|--------|
+| 10⁶ | 10⁵ | +3.2 | −3×10⁻⁷ | 2,128 ints, 152 primes |
+| 10⁸ | 2×10⁶ | +8.6 | **+9×10⁻⁶** | 14,053 ints, 776 primes |
+| 10⁹ | 2×10⁶ | +51.3 | **+5×10⁻⁵** | 140,490 ints, 6,763 primes |
+
+The Gibbs oscillation is annihilated: four to five orders below the ±0.5
+integer threshold, at the price of erfc-weighting a few thousand primes near x.
+The checkpoint tables show the mechanism — at N = 10⁶ (T = 6×10⁵) the error is
+already ~10⁻³; the final million zeros arrive pre-damped to ~10⁻⁴ amplitude.
+The λ knob works as the theory says: zero count needed ~ 8/λ, window width
+~ x·λ, product fixed — the uncertainty tradeoff made tangible.
+
 ## The ladder ahead
 
-1. **Smoothing** (next). A Gaussian kernel in log scale multiplies each zero term
-   by e^(−γ²h²/2): with bandwidth h ≈ 6/T the truncated tail is annihilated
-   rather than Gibbs-oscillated. The price: the smoothed ψ̃ differs from ψ on a
-   window of ~50·x/T integers around x, where Λ must be computed exactly by
-   sieving — ~4×10⁷ integers at x = 10¹² with the 2M-zero table. Same
-   referee, same harness: watch the error collapse from +51 to noise, then price
-   the window.
-2. **Unwind ψ → θ → π** (Möbius/partial summation — elementary bookkeeping,
+1. **Unwind ψ → θ → π** (Möbius/partial summation — elementary bookkeeping,
    verified at every rung against the combinatorial table).
-3. **Precision ladder.** f64 → f128 (native in Zig, softfloat) or Dekker
+2. **Precision ladder.** f64 → f128 (native in Zig, softfloat) or Dekker
    double-double when term counts × cancellation outgrow 53 bits.
-4. **Scale + distribute.** Zero-range partial sums are *purely additive*
+3. **Scale + distribute.** Zero-range partial sums are *purely additive*
    fragments — the fleet architecture (plan / controller / merge / tiling proof,
    see [COMBINATORIAL.md](COMBINATORIAL.md)) transfers verbatim. Bulk zeros from
    LMFDB/Platt.
-5. **Rigor last.** Ball arithmetic (midpoint + radius), *not* directed rounding —
+4. **Rigor last.** Ball arithmetic (midpoint + radius), *not* directed rounding —
    LLVM reorders float ops assuming round-to-nearest, so fesetround-style
    interval arithmetic is unreliable; balls need no rounding modes. Certified
    tail bounds close the argument.
