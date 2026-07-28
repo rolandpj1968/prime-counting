@@ -12,4 +12,4 @@ This file has been split by topic:
   (both DR headline optimisations; batching the counter bookkeeping), and why the
   parallel path is leaf-side bandwidth-bound.
 
-See [README.md](README.md) for framing and references.
+See [README.md](../README.md) for framing and references.

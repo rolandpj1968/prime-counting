@@ -4,7 +4,7 @@ Counting primes *without enumerating them*, via π(x) = φ(x,a) + a − 1 − P�
 a = π(y). Two implementations: `meissel.zig` (the classical recursion, baseline and
 correctness oracle) and `lmo.zig` (Lagarias–Miller–Odlyzko / Deléglise–Rivat, the
 2/3 exponent in Θ(x^(1/3)) memory). See [SIEVING.md](SIEVING.md) for the sieve
-foundation and [README.md](README.md) for framing.
+foundation and [README.md](../README.md) for framing.
 
 Machine: AVX2 (no AVX-512), L1d 32 KiB / L2 512 KiB / L3 16 MiB per core, 28 GiB RAM,
 single-threaded, `zig 0.16 -O ReleaseFast -mcpu=native`. Everything exact and verified

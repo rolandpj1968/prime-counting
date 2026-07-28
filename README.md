@@ -30,6 +30,10 @@ line beneath it as reference and correctness oracle, and the full straight-sievi
 characterization beneath that. Everything below is exact and verified against every
 known value 10 → 10²⁴ (plus exhaustively over [0, 5000]). Presented most-advanced first.
 
+A third arc is opening: the **analytic method** — π(x) from the zeros of ζ via the
+explicit formula, naive-first and refereed by the combinatorial ladder. Log in
+[ANALYTIC.md](docs/ANALYTIC.md).
+
 All timings on one quiet laptop: **AVX2 (no AVX-512), L1d 32 KiB / L2 512 KiB /
 L3 16 MiB, 28 GiB RAM** (6-core Ryzen 5 6600H), `zig 0.16 build-exe -O ReleaseFast
 -mcpu=native`, six threads pinned one per physical core (SMT siblings left idle).
@@ -153,7 +157,7 @@ How it earns the exponent and the footprint:
 - **mod-30 wheel fold** and P₂ **fused** onto the same counter (its primes sieved
   on the fly from x^(1/4) base primes, never stored — the last Θ(√x) term gone).
 
-The build was driven **empirically against the two source papers** ([COMBINATORIAL.md](COMBINATORIAL.md)
+The build was driven **empirically against the two source papers** ([COMBINATORIAL.md](docs/COMBINATORIAL.md)
 has the full log). The most interesting results were the negatives: both of
 Deléglise–Rivat's headline optimisations — the x^(1/4) sieve bound (§7) and leaf
 *clustering* (§6.5) — measured **net-negative here**, because each amortises a cost
@@ -205,7 +209,7 @@ which is ~6.5× below a = π(y) — a ~2× total-memory cut, deferred until it g
 
 ### What the optimisation log actually taught
 
-The full record is in [COMBINATORIAL.md](COMBINATORIAL.md); the negatives are the
+The full record is in [COMBINATORIAL.md](docs/COMBINATORIAL.md); the negatives are the
 useful part, and they share a cause.
 
 **Every win came from moving less memory. Every miss was an instruction count
@@ -256,7 +260,7 @@ single-threaded and ~0.7% in the six-thread ladder.
 
 ## Empirical highlights
 
-Full detail and tables in [SIEVING.md](SIEVING.md). Two sieving results stand out.
+Full detail and tables in [SIEVING.md](docs/SIEVING.md). Two sieving results stand out.
 
 ### Segmentation is about cache, and the cache is legible
 

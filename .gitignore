@@ -15,3 +15,12 @@ zig-out/
 \#*\#
 .\#*
 *~
+
+# Zeta-zero tables (Odlyzko; fetch per docs/ANALYTIC.md)
+/zeros/
+
+# More ad-hoc binaries
+/pi
+/pi-plan
+src/analytic/explicit
+src/play/play

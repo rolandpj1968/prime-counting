@@ -3,7 +3,7 @@
 Deep characterization of the Sieve of Eratosthenes (and Atkin) — the foundation the
 combinatorial π(x) rests on, and where the *machine* story lives. See
 [COMBINATORIAL.md](COMBINATORIAL.md) for the LMO/Deléglise–Rivat work and
-[README.md](README.md) for framing and references.
+[README.md](../README.md) for framing and references.
 
 Default benchmark: **N = 10⁹**, π(N) = 50,847,534. Best-of-3, sieve timed separately
 from count. Machine: AVX2 (no AVX-512), L1d 32 KiB / L2 512 KiB / L3 16 MiB per core,
