@@ -11,7 +11,7 @@
 //! Its own root/main, so it doesn't touch the main sieve build.
 
 const std = @import("std");
-const common = @import("common.zig");
+const common = @import("common");
 const wheel = @import("wheel.zig");
 const sieve = @import("sieve.zig");
 const store_bit_packed = @import("stores/bit_packed.zig");

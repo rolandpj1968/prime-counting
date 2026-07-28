@@ -8,7 +8,7 @@
 //! and washes the steps out.
 
 const std = @import("std");
-const common = @import("common.zig");
+const common = @import("common");
 const sieve = @import("sieve.zig");
 const wheel = @import("wheel.zig");
 const bucket_sieve = @import("bucket_sieve.zig");

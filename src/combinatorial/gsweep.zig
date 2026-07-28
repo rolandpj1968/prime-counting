@@ -1,5 +1,5 @@
 const std = @import("std");
-const common = @import("common.zig");
+const common = @import("common");
 const g = @import("gourdon.zig");
 
 /// π(10^n) ladder, n = 13..20, parallel. Known values: Gourdon 2001 / Oliveira e

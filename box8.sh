@@ -6,7 +6,7 @@
 # (t=1 skipped: 960.8/962.6 s established on two instances.)
 # Invocation, from the repo dir: git pull && bash box8.sh   (inside tmux)
 set -e
-zig build-exe -O ReleaseFast -mcpu=native src/pi.zig -femit-bin=./pi
+zig build-exe -O ReleaseFast -mcpu=native --dep common --dep rs -Mroot=src/combinatorial/pi.zig -Mcommon=src/common.zig -Mrs=src/rangesieve.zig -femit-bin=./pi
 
 for t in 2 4 8; do
   pins=$(seq -s, 0 $((t - 1)))

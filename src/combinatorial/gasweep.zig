@@ -1,5 +1,5 @@
 const std = @import("std");
-const common = @import("common.zig");
+const common = @import("common");
 const g = @import("gourdon.zig");
 
 /// α sweep: y = α·x^(1/3). chooseY hardcodes α = 4 and has never been swept, yet α

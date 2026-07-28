@@ -3,8 +3,8 @@
 //! 10^20, 10^21 need u128 x (past 2^64) and u128 pi (pi(10^21) > u64). Published
 //! values (Gourdon/Deleglise, in Oliveira e Silva 2006 Table IV) for the check.
 const std = @import("std");
-const common = @import("common.zig");
-const lmo = @import("lmo.zig");
+const common = @import("common");
+const lmo = @import("combinatorial/lmo.zig");
 
 fn maxrssMB() f64 {
     const ru = std.posix.getrusage(std.posix.rusage.SELF);

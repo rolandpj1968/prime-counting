@@ -1,5 +1,5 @@
 const std = @import("std");
-const common = @import("common.zig");
+const common = @import("common");
 const g = @import("gourdon.zig");
 
 pub fn main() !void {

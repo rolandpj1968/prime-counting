@@ -19,7 +19,7 @@
 //! x* = max(x^1/4, x/y²); primes 0-indexed; k=1. (computeB is kept only as B's ref.)
 
 const std = @import("std");
-const common = @import("common.zig");
+const common = @import("common");
 const lmo = @import("lmo.zig");
 
 var g_bmarks: u64 = 0; // INST-only: B sieve marks (composite bit-clears in answerPi)

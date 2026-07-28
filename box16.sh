@@ -2,7 +2,7 @@
 # 16-core Graviton characterization queue: scaling knee, alpha portrait, 1e20 rung.
 # Invocation, from the repo dir: git pull && bash box16.sh   (inside tmux)
 set -e
-zig build-exe -O ReleaseFast -mcpu=native src/pi.zig -femit-bin=./pi
+zig build-exe -O ReleaseFast -mcpu=native --dep common --dep rs -Mroot=src/combinatorial/pi.zig -Mcommon=src/common.zig -Mrs=src/rangesieve.zig -femit-bin=./pi
 
 # 1. Core-scaling sweep at 1e19 — where is Graviton's bandwidth knee?
 for t in 1 2 4 8 16; do

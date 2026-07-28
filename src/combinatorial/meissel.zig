@@ -18,8 +18,8 @@
 //! z = x^(2/3)/α and α becomes a real memory knob. See piWithY / the y-sweep.
 
 const std = @import("std");
-const common = @import("common.zig");
-const rs = @import("rangesieve.zig");
+const common = @import("common");
+const rs = @import("rs");
 
 /// floor(x^(1/3)).
 fn icbrt(x: u64) u64 {

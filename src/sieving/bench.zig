@@ -16,7 +16,7 @@
 //! families *inside* an impl's file — a different axis from this interface.
 
 const std = @import("std");
-const common = @import("common.zig");
+const common = @import("common");
 
 /// Turn a missing/mis-named decl into an early, readable compile error instead
 /// of a cryptic failure deep inside `run`. (Zig doesn't check the interface

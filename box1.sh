@@ -5,7 +5,7 @@
 # NOTE: rebuilds first (the pull that delivered this script also brought the src).
 # Invocation, from the repo dir: git pull && bash box1.sh   (inside tmux)
 set -e
-zig build-exe -O ReleaseFast -mcpu=native src/pi.zig -femit-bin=./pi
+zig build-exe -O ReleaseFast -mcpu=native --dep common --dep rs -Mroot=src/combinatorial/pi.zig -Mcommon=src/common.zig -Mrs=src/rangesieve.zig -femit-bin=./pi
 
 echo "=== calibrate t=1 ===" | tee ~/calib1.log
 ./pi --calibrate -t 1 --budget 900 2>&1 | tee -a ~/calib1.log

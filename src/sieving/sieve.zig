@@ -10,7 +10,7 @@
 //! the sanity check we designed (default-on; a partial/P_n source would skip it).
 
 const std = @import("std");
-const common = @import("common.zig");
+const common = @import("common");
 
 pub fn Sieve(comptime W: type, comptime Store: type, comptime seg_bytes: u64) type {
     return struct {

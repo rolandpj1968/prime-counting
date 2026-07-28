@@ -27,8 +27,8 @@
 //! v = x/(m·p_b) ≤ z because m·p_b > y — one sieve range serves them all.
 
 const std = @import("std");
-const common = @import("common.zig");
-const rs = @import("rangesieve.zig");
+const common = @import("common");
+const rs = @import("rs");
 
 fn icbrt(x: u64) u64 {
     return icbrtG(u64, x);

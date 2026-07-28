@@ -16,7 +16,7 @@
 //! for demo N (≤1e12 → ≤~1e6 segments); record N would need a circular window.
 
 const std = @import("std");
-const common = @import("common.zig");
+const common = @import("common");
 
 pub fn BucketSieve(comptime W: type, comptime Store: type, comptime seg_bytes: u64) type {
     return struct {

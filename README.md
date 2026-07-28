@@ -255,7 +255,7 @@ single-threaded and ~0.7% in the six-thread ladder.
 - **Phase timing at scale** to settle whether the growth-ratio drift past 10²⁰ is
   the oracle leaving cache or the serial phases (Amdahl). `piGourdonV` already laps
   each phase behind a `verbose` flag.
-- **A `build.zig`** with a bench step. The CLI (`src/pi.zig`) and the `Config`
+- **A `build.zig`** with a bench step. The CLI (`src/combinatorial/pi.zig`) and the `Config`
   refactor behind it are done — see Build & run.
 
 ## Empirical highlights
@@ -297,7 +297,7 @@ not against any table but against the prime number theorem itself.
 Zig **0.16**, hand-driven (no `build.zig` yet). Start here:
 
 ```
-zig build-exe -O ReleaseFast -mcpu=native src/pi.zig -femit-bin=./pi
+zig build-exe -O ReleaseFast -mcpu=native --dep common --dep rs -Mroot=src/combinatorial/pi.zig -Mcommon=src/common.zig -Mrs=src/rangesieve.zig -femit-bin=./pi
 ```
 
 `pi` is one binary for every implementation, with the tuning knobs exposed as
@@ -320,7 +320,9 @@ dropped, and `--check` exits non-zero on mismatch, so it scripts.
 ### Experiment drivers
 
 Alongside the CLI, each investigation has a standing driver — built the same way
-(`zig build-exe -O ReleaseFast -mcpu=native src/<file> -femit-bin=./<name>`), and
+(`zig build-exe -O ReleaseFast -mcpu=native --dep common --dep rs
+-Mroot=src/<arc>/<file> -Mcommon=src/common.zig -Mrs=src/rangesieve.zig
+-femit-bin=./<name>` — the shared primitives are named modules), and
 `-O ReleaseSafe` for a correctness pass with asserts and bounds live:
 
 | file | what it does |

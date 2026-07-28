@@ -1,5 +1,5 @@
 const std = @import("std");
-const common = @import("common.zig");
+const common = @import("common");
 const g = @import("gourdon.zig");
 
 /// π(10^21) and π(10^22), parallel. Long-running (hours) — prints each result as it

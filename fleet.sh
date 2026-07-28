@@ -45,7 +45,7 @@ set -e
 cd /home/ubuntu/prime-counting
 git fetch origin
 git checkout $HASH
-/home/ubuntu/.local/bin/zig build-exe -O ReleaseFast -mcpu=native src/pi.zig -femit-bin=./pi-task
+/home/ubuntu/.local/bin/zig build-exe -O ReleaseFast -mcpu=native --dep common --dep rs -Mroot=src/combinatorial/pi.zig -Mcommon=src/common.zig -Mrs=src/rangesieve.zig -femit-bin=./pi-task
 ./pi-task $X --y $Y --segw $SEGW $flag $iv --emit /home/ubuntu/frag.out -t 4 -v
 touch /home/ubuntu/DONE
 '

@@ -9,7 +9,7 @@
 //! Numbers accept 1e20, 10^20, 1_000_000 or plain digits.
 
 const std = @import("std");
-const common = @import("common.zig");
+const common = @import("common");
 const gourdon = @import("gourdon.zig");
 const lmo = @import("lmo.zig");
 const meissel = @import("meissel.zig");
