@@ -185,14 +185,60 @@ behavior explained too: 2⁴¹ = 2.2×10¹², so 10¹² and below were clean. Fi
 compute μ(m) by trial factorization to m ≤ 64. Margins after: 0.5000 at 10¹³
 (the Odlyzko run lands within 5×10⁻⁷ of the integer).
 
-Lessons banked: (1) the naive-f64 + 9-digit-zeros machinery is nowhere near
-its noise floor at 10¹³ — the real errors at 10¹⁴ are ~10⁻³; (2) margins
-catch bugs that MATCH alone would forgive at smaller x; (3) exact-π*-split is
-the right bisection knife for this pipeline, and `gourdon.zig` referees it at
-any x we can reach combinatorially. The current walls: the window bool array
-(6.2 GB at 10¹⁴, wants a bitset), and eventually phase precision γL in f64
-(the double-double rung, together with hi/lo zeros from the LMFDB 2⁻¹⁰¹
-format).
+Lessons banked: (1) margins catch bugs that MATCH alone would forgive at
+smaller x; (2) table-independence of an error is the tell for a shared-
+machinery systematic; (3) exact-π*-split is the right bisection knife, and
+`gourdon.zig` referees it at any x we can reach combinatorially.
+
+## Rung 4: parallel, segmented, f128 aggregates — to 10¹⁷ and beyond
+
+Three walls fell in one evening, each diagnosed by the same epistemics.
+
+**The window array is gone.** The window sum is a streaming reduction, so it
+segments: an atomic dispenser hands 16M-integer strips to workers, each
+sieved against shared base primes and folded into a per-worker Kahan.
+Memory is O(threads·strip + π(√x)) *regardless of x* — 10¹⁴ went from
+6.2 GB / 83 s to 151 MB / 24.9 s (t = 6), identical output. The parallel
+geometry deliberately mirrors the eventual distribution seam: zero ranges
+and window segments are both additive fragments (a future fragment is a
+(partial, error-radius) pair — the bounds ride the same seam as the work).
+
+**The f64 li(x) systematic.** At 10¹⁵ both zero tables agreed on err −0.027
+— the table-independence tell again. A 45-digit referee convicted li(x):
+ε·e^L/L series noise plus ln(x)-in-f64 argument error (x/L·4×10⁻¹⁵ ≈ 0.1
+at 10¹⁵), plus the f64 ulp of the ~3×10¹³ aggregates themselves (~4×10⁻³,
+reaching ±0.5 by ~10¹⁷ — a hard representation wall). Fix: Ei and all large
+aggregates in f128, rounded once at the end.
+
+**Zig's `@log(f128)` is silently 53-bit.** The first f128 attempt landed
+−0.034: `compiler_rt`'s `logq` is literally `return log(@floatCast(a))` — an
+f64 stub (as are `expq`/`exp2q`, with TODO comments; `sinq`/`cosq`/`tanq`
+are real 113-bit ports). Upstream archaeology: ziglang/zig#4026 ("implement
+all the math functions for all the floating point types") was closed in 2022
+against PR #11532 — a *reorg* whose own description says "functions with
+missing implementations call other functions and have TODO comments" — so
+the accuracy work lost its tracking issue and still ships stubbed in 0.16.
+Fix here: `ln128()` from correctly-rounded f128 *arithmetic* only (exact
+power-of-two reduction + atanh series, ln 2 as a 34-digit constant) — the
+softfloat ± × ÷ are trustworthy; the transcendentals are not.
+
+Results on the 251M-zero LMFDB table (T = 1.01×10⁸, converted with N(t)
+continuity validated block-by-block; one md5-canonical trailer block per
+some files skipped — decodes non-monotone, not zero data):
+
+| x | π(x) from zeros | err | margin | window | time (t=6) |
+|---|---|---:|---:|---|---:|
+| 10¹⁵ | 29,844,570,422,669 | +2.0×10⁻⁵ | 0.5000 | 1.6×10⁹ | 27 s |
+| 10¹⁶ | 279,238,341,033,925 | −2.5×10⁻⁵ | 0.5000 | 1.6×10¹⁰ | 94 s |
+| 10¹⁷ | 2,623,557,157,654,233 | −1.2×10⁻⁴ | 0.4999 | 1.6×10¹¹ | 747 s |
+
+**MATCH at every row.** The noise floor sits at ~10⁻⁴⁻⁵ (zero-sum f64
+texture); the window sieve is ≥97% of runtime and ∝ x — exactly the
+complexity law's prediction (T = 10⁸ balances at x ≈ T² = 10¹⁶), and
+exactly the side that distributes with ~zero data dependency. Remaining
+walls, in expected order: window cost (fleet-shaped), then f64 phase γL and
+text-f64 zeros (~γ·2⁻⁵² — the double-double phase + hi/lo zeros rung, with
+the LMFDB 2⁻¹⁰¹ format supplying the pairs natively).
 
 ## The ladder ahead
 
