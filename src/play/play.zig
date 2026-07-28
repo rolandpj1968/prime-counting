@@ -326,6 +326,55 @@ fn phi_linear_chop2_pi(x: u64, a: u64, primes: []const u64, pis: []const u64, c:
     return phi;
 }
 
+fn phi_linear_all(x: u64, a: u64, primes: []const u64, pis: []const u64, c: *Counters) u64 {
+    c.n += 1;
+
+    if (x == 0) {
+        c.x0 += 1;
+        return 0;
+    }
+    if (a == 0) {
+        c.a0 += 1;
+        return x;
+    }
+
+    const p_a = primes[a - 1];
+
+    if (x <= p_a) {
+        c.pi += 1;
+        c.one += 1;
+        return 1;
+    }
+
+    // TODO <= ??
+    if (x < p_a * p_a and x < pis.len) {
+        const pi_x = pis[x];
+        return 1 + pi_x - a;
+    }
+
+    var phi = x;
+
+    var b: u64 = 0;
+    var p_bm1: u64 = 1;
+    while (b < a) : (b += 1) {
+        const p_b = primes[b];
+
+        if (x <= p_bm1 * p_b) {
+            c.one += 1;
+            // x/p_b <= p_(b-1), so phi(x/p_b, b) = 1 - note that b index is off-by-one
+            //    ... and same holds for the rest of the indices up to a-1
+            return phi - (a - b);
+        }
+
+        c.it += 1;
+        phi -= phi_linear_all(x / p_b, b, primes, pis, c);
+
+        p_bm1 = p_b;
+    }
+
+    return phi;
+}
+
 fn pisToY(gpa: std.mem.Allocator, y: u64, primes: []u64) ![]u64 {
     const pis = try gpa.alloc(u64, y + 1);
     var a: u64 = 0;
@@ -386,7 +435,8 @@ pub fn main(init: std.process.Init) !void {
     //const phi_fn = phi_linear_chop_ltpa;
     //const phi_fn = phi_linear_chop2;
     //const phi_fn = phi_linear_chop2_ltpa;
-    const phi_fn = phi_linear_chop2_pi;
+    //const phi_fn = phi_linear_chop2_pi;
+    const phi_fn = phi_linear_all;
 
     const phi_x_y = phi_fn(x, a, primes, pis, &c);
 
