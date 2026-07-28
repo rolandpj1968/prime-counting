@@ -120,17 +120,58 @@ already ~10⁻³; the final million zeros arrive pre-damped to ~10⁻⁴ amplitu
 The λ knob works as the theory says: zero count needed ~ 8/λ, window width
 ~ x·λ, product fixed — the uncertainty tradeoff made tangible.
 
+## Rung 3: an integer π(x) from the zeros (`pistar.zig`)
+
+A one-point ψ(x) cannot yield π(x) (∫dψ/ln t needs the whole range), so this
+rung switches central object to Riemann's **π*(x) = Σ_{pᵐ≤x} 1/m**, from
+log ζ rather than ζ′/ζ (Platt eq. 3.1):
+
+```
+π*(x) = li(x) − Σ_ρ li(x^ρ) − ln 2 + ∫ₓ^∞ dt/(t(t²−1)ln t)
+```
+
+smoothed with the same Gaussian pair. The per-zero term becomes a li-type
+integral F(ρ) = ∫ x^z e^(λ²z²/2)/z dz along a horizontal path — evaluated as
+e^(λ²ρ²/2)·x^ρ·[S/(ρL) − λ²/L²], where S is the asymptotic li series
+Σ k!/(ρL)^k (|ρL| ≥ 195 everywhere here, so K = 13 terms reach ~10⁻²⁵), and
+−λ²/L² is the first-order kernel correction, written in its cancelled form
+(the naive (1 − λ²ρ²)·li form loses precision at the damped tail). The pole
+term gains λ²x(L−1)/(2L²) — 0.77 at 10¹², not optional. li(x) = Ei(ln x) by
+the convergent all-positive series; the trivial-zero integral (~1/(2x²L)) is
+dropped. Sharp π* = smoothed zero sum + Σ_window (1/m)(χ − φ) over an exactly
+sieved window; then Möbius with *exact* tiny π*(x^(1/m)) from direct sieves:
+π(x) = Σ_m (μ(m)/m)·π*(x^(1/m)). Round; report the margin; compare published.
+
+| x | π(x) from zeros | pre-round error | margin | window | time |
+|---|---|---:|---:|---|---:|
+| 10⁶ | 78,498 | ~10⁻⁴ | 0.5000 | 2.1×10³ ints | 0.0 s |
+| 10⁸ | 5,761,455 | ~10⁻⁶ | 0.5000 | 1.4×10⁴ | 0.4 s |
+| 10⁹ | 50,847,534 | +2×10⁻⁶ | 0.5000 | 1.4×10⁵ | 0.4 s |
+| 10¹⁰ | 455,052,511 | +3×10⁻⁶ | 0.5000 | 1.4×10⁶ | 0.3 s |
+| 10¹¹ | 4,118,054,813 | −1.5×10⁻⁵ | 0.5000 | 1.4×10⁷ | 0.5 s |
+| 10¹² | 37,607,912,018 | −4.6×10⁻⁵ | 0.5000 | 1.4×10⁸ | 1.8 s |
+| 10¹³ | 346,065,536,839 | **+0.071** | 0.4286 | 1.4×10⁹ | 16.9 s |
+
+**MATCH against the published value at every row.** Beyond 10⁹ no full-sieve
+referee exists — the zeros carry everything except the ~10⁻⁵-relative-width
+window. The margin column is the empirical error bound in action: flat 0.5000
+through 10¹², then the first real erosion at 10¹³, at +0.071 — almost exactly
+the budgeted √x·ln x·δγ noise from the tables' ±4×10⁻⁹ zeros (RMS ≈ 0.06
+there). The binding constraint of this rung is zero **precision**, not height,
+not f64: Platt's ±2⁻¹⁰² LMFDB zeros are the designed fix, with double-double
+accumulation due around the same scale. The window (∝ x at fixed T) is the
+other cost: 1.4×10⁹ integers sieved at 10¹³.
+
 ## The ladder ahead
 
-1. **Unwind ψ → θ → π** (Möbius/partial summation — elementary bookkeeping,
-   verified at every rung against the combinatorial table).
-2. **Precision ladder.** f64 → f128 (native in Zig, softfloat) or Dekker
-   double-double when term counts × cancellation outgrow 53 bits.
-3. **Scale + distribute.** Zero-range partial sums are *purely additive*
+1. **Precision.** LMFDB/Platt zeros (±2⁻¹⁰²) to kill the table noise;
+   f64 → f128 (native in Zig, softfloat) or Dekker double-double when term
+   counts × cancellation outgrow 53 bits.
+2. **Scale + distribute.** Zero-range partial sums are *purely additive*
    fragments — the fleet architecture (plan / controller / merge / tiling proof,
    see [COMBINATORIAL.md](COMBINATORIAL.md)) transfers verbatim. Bulk zeros from
    LMFDB/Platt.
-4. **Rigor last.** Ball arithmetic (midpoint + radius), *not* directed rounding —
+3. **Rigor last.** Ball arithmetic (midpoint + radius), *not* directed rounding —
    LLVM reorders float ops assuming round-to-nearest, so fesetround-style
    interval arithmetic is unreliable; balls need no rounding modes. Certified
    tail bounds close the argument.

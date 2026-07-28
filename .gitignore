@@ -25,3 +25,4 @@ zig-out/
 src/analytic/explicit
 src/play/play
 src/analytic/smooth
+src/analytic/pistar
