@@ -27,6 +27,7 @@ import struct
 import sys
 
 last = 0.0
+ncont = None  # N(t) continuity across blocks and files
 for fn in sys.argv[1:]:
     d = open(fn, 'rb').read()
     nb, = struct.unpack_from('<Q', d, 0)
@@ -34,6 +35,8 @@ for fn in sys.argv[1:]:
     for _ in range(nb):
         t0, t1 = struct.unpack_from('<dd', d, off)
         n0, n1 = struct.unpack_from('<QQ', d, off + 16)
+        assert ncont is None or n0 == ncont, (fn, n0, ncont)
+        ncont = n1
         off += 32
         G = 0
         for _ in range(n1 - n0):
@@ -44,5 +47,9 @@ for fn in sys.argv[1:]:
             assert g > last, (fn, g, last)
             last = g
             sys.stdout.write(f"{g:.15f}\n")
-    print(f"{fn}: done, last={last:.6f}", file=sys.stderr)
-    assert off == len(d), (fn, off, len(d))
+    # Some files carry trailing bytes beyond the advertised block count
+    # (md5-canonical; decodes as a non-monotone pseudo-block — not zero
+    # data). Honor the count, note and skip the trailer.
+    if off != len(d):
+        print(f"{fn}: NOTE skipping {len(d) - off} trailer bytes", file=sys.stderr)
+    print(f"{fn}: done, N={ncont}, last={last:.6f}", file=sys.stderr)

@@ -64,21 +64,45 @@ const C = struct {
 };
 
 /// Ei(t) for real t > 0 via the convergent series gamma + ln t + sum t^k/(k k!)
-/// (all terms positive -- no cancellation; ~120 terms at t = 30).
-fn realEi(t: f64) f64 {
-    const euler = 0.577215664901532861;
-    var k = Kahan{};
-    k.add(euler);
-    k.add(@log(t));
-    var p: f64 = 1;
-    var i: f64 = 1;
-    while (i < 200) : (i += 1) {
+/// (all terms positive -- no cancellation). In f128: the f64 version's
+/// eps*e^L/L error (~0.03 at x = 1e15) was the dominant systematic, and even
+/// ln(x) in f64 injects x/L * 4e-15 (~0.1 at 1e15). One call per run, so the
+/// softfloat cost is nanoseconds.
+/// ln in f128 built from correctly-rounded arithmetic only: Zig's @log on
+/// f128 is not 113-bit accurate (compiler-rt), and dEi/dL = x/L amplifies
+/// ln(x) error by ~3e13 at x = 1e15. Exact power-of-two reduction + atanh
+/// series (z <= 0.2 after reduction, ~26 terms to 1e-40).
+const LN2_128: f128 = 0.69314718055994530941723212145817657;
+fn ln128(v0: f128) f128 {
+    var v = v0;
+    var k: f128 = 0;
+    while (v > 1.5) : (k += 1) v *= 0.5;
+    while (v < 0.75) : (k -= 1) v *= 2.0;
+    const z = (v - 1.0) / (v + 1.0);
+    const z2 = z * z;
+    var sum: f128 = 0;
+    var term: f128 = z;
+    var n: f128 = 1;
+    while (n < 80) : (n += 2) {
+        sum += term / n;
+        if (term < 1e-40 and term > -1e-40) break;
+        term *= z2;
+    }
+    return 2.0 * sum + k * LN2_128;
+}
+
+fn realEi(t: f128) f128 {
+    const euler: f128 = 0.57721566490153286060651209008240243;
+    var s: f128 = euler + ln128(t);
+    var p: f128 = 1;
+    var i: f128 = 1;
+    while (i < 500) : (i += 1) {
         p *= t / i;
         const term = p / i;
-        k.add(term);
-        if (term < 1e-18 * @abs(k.val())) break;
+        s += term;
+        if (term < 1e-36 * s) break;
     }
-    return k.val();
+    return s;
 }
 
 const ERFC_CUT = 7.5; // erfc(7.5) ~ 4e-26: outside this, phi is exactly 0 or 1
@@ -149,6 +173,8 @@ const KNOWN = [_]struct { x: u64, pi: u64 }{
     .{ .x = 100_000_000_000_000, .pi = 3_204_941_750_802 },
     .{ .x = 1_000_000_000_000_000, .pi = 29_844_570_422_669 },
     .{ .x = 10_000_000_000_000_000, .pi = 279_238_341_033_925 },
+    .{ .x = 100_000_000_000_000_000, .pi = 2_623_557_157_654_233 },
+    .{ .x = 1_000_000_000_000_000_000, .pi = 24_739_954_287_740_860 },
 };
 
 const ZeroCtx = struct {
@@ -292,13 +318,15 @@ pub fn main(init: std.process.Init) !void {
     const zerosum = zk.val();
     const t_zeros = nowNs();
 
-    // ---- pole term (smoothed li(x)) and constants
-    const li_x = realEi(L);
+    // ---- pole term (smoothed li(x)) and constants — f128 aggregates from
+    // here down: at x = 1e15 the f64 ulp of the running ~3e13 totals is
+    // already ~4e-3, and it reaches ~0.5 by 1e17.
+    const li_x: f128 = realEi(ln128(@floatFromInt(x)));
     const main_corr = l2 * xf * (L - 1.0) / (2.0 * L * L);
     const ln2 = @log(2.0);
-    const pistar_smooth = li_x + main_corr + zerosum - ln2;
-    std.debug.print("li(x) = {d:.6}  kernel-corr = {d:.6}  zerosum = {d:.6}  -ln2\n", .{ li_x, main_corr, zerosum });
-    std.debug.print("pi*_smooth(zeros) = {d:.6}   ({d:.1}s load, {d:.1}s zerosum)\n", .{ pistar_smooth, @as(f64, @floatFromInt(t_load - t_start)) / 1e9, @as(f64, @floatFromInt(t_zeros - t_load)) / 1e9 });
+    const pistar_smooth: f128 = li_x + @as(f128, main_corr) + @as(f128, zerosum) - @as(f128, ln2);
+    std.debug.print("li(x) = {d:.6}  kernel-corr = {d:.6}  zerosum = {d:.6}  -ln2\n", .{ @as(f64, @floatCast(li_x)), main_corr, zerosum });
+    std.debug.print("pi*_smooth(zeros) = {d:.6}   ({d:.1}s load, {d:.1}s zerosum)\n", .{ @as(f64, @floatCast(pistar_smooth)), @as(f64, @floatFromInt(t_load - t_start)) / 1e9, @as(f64, @floatFromInt(t_zeros - t_load)) / 1e9 });
 
     // ---- window: segmented, dispenser-parallel; (1/m)(chi - phi) corrections
     const wsq = iroot(hi, 2);
@@ -334,14 +362,14 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     const wcorr = wk.val();
-    const pistar_sharp = pistar_smooth + wcorr;
+    const pistar_sharp: f128 = pistar_smooth + @as(f128, wcorr);
     const t_win = nowNs();
     std.debug.print("window [{d}, {d}]: {d} ints, {d} primes  corr = {d:.6}   ({d:.1}s window)\n", .{ lo + 1, hi, hi - lo, wprimes, wcorr, @as(f64, @floatFromInt(t_win - t_zeros)) / 1e9 });
-    std.debug.print("pi*_sharp = {d:.6}\n", .{pistar_sharp});
+    std.debug.print("pi*_sharp = {d:.6}\n", .{@as(f64, @floatCast(pistar_sharp))});
 
-    // ---- Moebius unwind with exact tiny pi*(x^(1/m))
+    // ---- Moebius unwind with exact tiny pi*(x^(1/m)); the small terms sum
+    // in f64 Kahan (magnitude ~1e5), the aggregate stays f128
     var pk = Kahan{};
-    pk.add(pistar_sharp);
     var m: u32 = 2;
     while (m <= 64) : (m += 1) {
         const mu = mobius(m);
@@ -353,12 +381,12 @@ pub fn main(init: std.process.Init) !void {
         pk.add(term);
         std.debug.print("  m={d:<2} x^(1/m)={d:<8} mu/m*pi* = {d:.6}\n", .{ m, v, term });
     }
-    const pi_real = pk.val();
+    const pi_real: f128 = pistar_sharp + @as(f128, pk.val());
     const pi_round: u64 = @intFromFloat(@round(pi_real));
-    const margin = @abs(pi_real - @round(pi_real));
+    const err: f64 = @floatCast(pi_real - @round(pi_real));
     const secs = @as(f64, @floatFromInt(nowNs() - t_start)) / 1e9;
 
-    std.debug.print("\npi(x) = {d:.6}  ->  {d}   (margin to half-integer: {d:.4})   {d:.1}s\n", .{ pi_real, pi_round, 0.5 - margin, secs });
+    std.debug.print("\npi(x) = {d}  err = {d:.6}  (margin to half-integer: {d:.4})   {d:.1}s\n", .{ pi_round, err, 0.5 - @abs(err), secs });
     for (KNOWN) |kv| {
         if (kv.x == x) {
             const ok = kv.pi == pi_round;
