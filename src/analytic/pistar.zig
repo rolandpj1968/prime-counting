@@ -256,6 +256,183 @@ const Gaussian = struct {
     }
 };
 
+/// Büthe's Logan-function kernel (arXiv:1410.7008, Thms 3.1 + 4.1) — the FKBJ
+/// band-limited family, third-generation version. Prime-side support is
+/// EXACTLY [x e^-eps, x e^eps] (eps = c/T); the zero side uses every zero in
+/// the table with weight l_c(eps*gamma), tail beyond T controlled by ~e^-c.
+/// Window cost ~ c/T vs the Gaussian's ~ c^2/T — the structural win.
+///
+///   l_c(t)   = (c/sinh c) sin(sqrt(t^2-c^2))/sqrt(t^2-c^2)   (sinh form |t|<c)
+///   eta_c(y) = (c/(2 sinh c)) I0(c sqrt(1-y^2)) on [-1,1]     (= l_c^hat)
+///   mu(t<0)  = -int_{-inf}^t eta_{c,eps};  mu(t>0) = -mu(-t);  nu = int mu
+///   Psi(rho) = lam^-1 (Ei1(rho L) + A (rho Ei2 - 2 rho^2 Ei3)(rho L)) l_c(eps g)
+///   pi*_{c,eps} = li(x) + A x/L^2 - sum* Psi - ln 2 + trivial + Theta(35 eps)
+///   pi*(x)      = pi*_{c,eps} - sum_window (1/m) M(p^m),
+///   M(t) = lam^-1 [ mu(u) + (1/log t - 1/2)(mu(u) log(t/x) - nu(u)) ], u = log(t/x)
+/// with lam = l_{c,eps}(i/2) = (c/sinh c) sinh(s)/s, s = sqrt(c^2 + eps^2/4),
+/// and A = -l''_{c,eps}(0)/2 = eps^2 (coth c / c - 1/c^2)/2.
+/// Seam mapping: phi(n) = chi(n<=x) + M(n), so (chi - phi) = -M as required.
+const GRID = 1 << 16; // eta/mu/nu cumulative-integral grid over [-1, 1]
+
+const LoganButhe = struct {
+    x: u64,
+    xf: f64,
+    sx: f64,
+    L: f64,
+    c: f64,
+    eps: f64,
+    lam: f64,
+    acorr: f64, // A_{c,eps}
+    lo: u64,
+    hi: u64,
+    mu_tab: []f64, // mu(eps*y) on y-grid [-1,0], GRID+1 points
+    nu_tab: []f64, // nu(eps*y) likewise
+
+    fn bessI0(z: f64) f64 {
+        var term: f64 = 1;
+        var sum: f64 = 1;
+        var n: f64 = 1;
+        while (n < 200) : (n += 1) {
+            term *= (z * z / 4.0) / (n * n);
+            sum += term;
+            if (term < 1e-17 * sum) break;
+        }
+        return sum;
+    }
+
+    /// l_c on the real line (even); sinh form below the crossover, sin above,
+    /// series at the removable singularity |t| ~ c.
+    fn ell(c: f64, t: f64) f64 {
+        const norm = c / std.math.sinh(c);
+        const w2 = t * t - c * c;
+        const aw = @sqrt(@abs(w2));
+        if (aw < 1e-3) return norm * (1.0 + w2 / 6.0 + w2 * w2 / 120.0);
+        return if (w2 < 0) norm * std.math.sinh(aw) / aw else norm * @sin(aw) / aw;
+    }
+
+    fn init(gpa: std.mem.Allocator, x: u64, T: f64, c: f64) !LoganButhe {
+        const xf: f64 = @floatFromInt(x);
+        const L = @log(xf);
+        const eps = c / T;
+        const s = @sqrt(c * c + eps * eps / 4.0);
+        const lam = (c / std.math.sinh(c)) * std.math.sinh(s) / s;
+        const acorr = eps * eps * (std.math.cosh(c) / std.math.sinh(c) / c - 1.0 / (c * c)) / 2.0;
+        // eta_c on [-1,1], cumulative trapezoid -> mu, then nu (in y-units;
+        // the eps dilation scales mu by 1 (density 1/eps times dy=eps) and nu
+        // by eps). mu(y) = -int_{-1}^{y} eta_c ; checked: mu(0-) -> -1/2.
+        const h = 2.0 / @as(f64, GRID);
+        const norm = c / (2.0 * std.math.sinh(c));
+        const mu_tab = try gpa.alloc(f64, GRID / 2 + 1);
+        const nu_tab = try gpa.alloc(f64, GRID / 2 + 1);
+        var acc: f64 = 0; // integral of eta from -1
+        var nacc: f64 = 0; // integral of mu (y-units)
+        var prev_eta: f64 = 0; // eta(-1) = norm * I0(0)... = norm; fixed below
+        var prev_mu: f64 = 0;
+        var gi: usize = 0;
+        while (gi <= GRID / 2) : (gi += 1) {
+            const y = -1.0 + @as(f64, @floatFromInt(gi)) * h;
+            const eta = norm * bessI0(c * @sqrt(@max(0.0, 1.0 - y * y)));
+            if (gi > 0) acc += 0.5 * (prev_eta + eta) * h;
+            const mu = -acc;
+            if (gi > 0) nacc += 0.5 * (prev_mu + mu) * h;
+            mu_tab[gi] = mu;
+            nu_tab[gi] = nacc * eps; // nu carries one eps dilation factor
+            prev_eta = eta;
+            prev_mu = mu;
+        }
+        return .{
+            .x = x,
+            .xf = xf,
+            .sx = @sqrt(xf),
+            .L = L,
+            .c = c,
+            .eps = eps,
+            .lam = lam,
+            .acorr = acorr,
+            .lo = @intFromFloat(xf * @exp(-eps) - 2.0),
+            .hi = @intFromFloat(xf * @exp(eps) + 2.0),
+            .mu_tab = mu_tab,
+            .nu_tab = nu_tab,
+        };
+    }
+
+    fn lookup(tab: []const f64, y_neg: f64) f64 {
+        // y_neg in [-1, 0]; linear interp on the half-grid
+        const f = (y_neg + 1.0) * @as(f64, GRID) / 2.0;
+        const idx: usize = @intFromFloat(@min(f, @as(f64, GRID / 2) - 1e-9));
+        const fr = f - @as(f64, @floatFromInt(idx));
+        return tab[idx] * (1.0 - fr) + tab[idx + 1] * fr;
+    }
+
+    /// M_{x,c,eps}(n) per Thm 3.1; odd reflection handles n > x.
+    fn bigM(k: *const LoganButhe, n: u64) f64 {
+        const u = std.math.log1p((@as(f64, @floatFromInt(n)) - k.xf) / k.xf); // log(n/x)
+        const y = u / k.eps; // in [-1, 1]
+        var mu: f64 = undefined;
+        var nu: f64 = undefined;
+        if (y < 0) {
+            mu = lookup(k.mu_tab, y);
+            nu = lookup(k.nu_tab, y);
+        } else {
+            // mu odd => int_0^t mu = nu(-t) - nu(0) => nu is EVEN
+            mu = -lookup(k.mu_tab, -y);
+            nu = lookup(k.nu_tab, -y);
+        }
+        const logn = k.L + u;
+        return (mu + (1.0 / logn - 0.5) * (mu * u - nu)) / k.lam;
+    }
+
+    fn phi(k: *const LoganButhe, n: u64) f64 {
+        const chi: f64 = if (n <= k.x) 1.0 else 0.0;
+        return chi + k.bigM(n);
+    }
+
+    /// -2 Re Psi(rho) for the conjugate pair at gamma = g.
+    fn zeroTerm(k: *const LoganButhe, g: f64) f64 {
+        const w = ell(k.c, k.eps * g);
+        if (w == 0.0) return 0.0;
+        const rl = C{ .re = 0.5 * k.L, .im = g * k.L }; // rho L
+        const irl = rl.inv();
+        // Ei_k(rl) ~ e^rl / rl^k * sum_j (k+j-1)!/(k-1)! / rl^j  — Horner
+        var s1 = C{ .re = 1, .im = 0 };
+        var s2 = C{ .re = 1, .im = 0 };
+        var s3 = C{ .re = 1, .im = 0 };
+        var j: f64 = 13;
+        while (j >= 1) : (j -= 1) {
+            s1 = irl.scale(j).mul(s1);
+            s1.re += 1;
+            s2 = irl.scale(j + 1.0).mul(s2);
+            s2.re += 1;
+            s3 = irl.scale(j + 2.0).mul(s3);
+            s3.re += 1;
+        }
+        // Ei1 = e^rl/rl * s1; rho Ei2 = e^rl * rho/rl^2 * s2 = e^rl/(L^2 rho) s2...
+        // assemble B = s1/rl + A (rho s2/rl^2 - 2 rho^2 s3/rl^3), all over e^rl
+        const rho = C{ .re = 0.5, .im = g };
+        const irl2 = irl.mul(irl);
+        var b2 = rho.mul(irl2).mul(s2);
+        const b3 = rho.mul(rho).mul(irl2).mul(irl).mul(s3);
+        b2.re -= 2.0 * b3.re;
+        b2.im -= 2.0 * b3.im;
+        var B = s1.mul(irl);
+        B.re += k.acorr * b2.re;
+        B.im += k.acorr * b2.im;
+        // e^rl = sqrt(x) e^(i g L)
+        const e = C{ .re = k.sx * @cos(g * k.L), .im = k.sx * @sin(g * k.L) };
+        return -2.0 * (w / k.lam) * e.mul(B).re;
+    }
+
+    fn cutoff(k: *const LoganButhe, g: f64) bool {
+        _ = k;
+        _ = g;
+        return false; // every tabulated zero contributes; tail is ~e^-c by design
+    }
+
+    fn poleCorr(k: *const LoganButhe) f64 {
+        return k.acorr * k.xf / (k.L * k.L);
+    }
+};
+
 // ---------------------------------------------------------------------------
 // Pipeline, generic over the kernel
 // ---------------------------------------------------------------------------
@@ -419,6 +596,7 @@ pub fn main(init: std.process.Init) !void {
     const x = try std.fmt.parseInt(u64, x_str, 10);
     const zpath = args.next() orelse return std.debug.print(usage, .{});
     var cpar: f64 = 7.5;
+    var cset = false;
     var nt: usize = 6;
     var kname: []const u8 = "gaussian";
     while (args.next()) |a| {
@@ -429,6 +607,7 @@ pub fn main(init: std.process.Init) !void {
             kname = args.next() orelse return std.debug.print(usage, .{});
         } else {
             cpar = try std.fmt.parseFloat(f64, a);
+            cset = true;
         }
     }
 
@@ -454,8 +633,15 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, kname, "gaussian")) {
         const kern = Gaussian.init(x, T, cpar);
         try run(Gaussian, &kern, x, zeros.items, nt, gpa, t_start, t_load);
+    } else if (std.mem.eql(u8, kname, "logan")) {
+        // tail ~ sqrt(x) polylog e^-c: c must track (1/2) ln x (linear price
+        // vs the Gaussian's quadratic — the structural win)
+        const cl = if (cset) cpar else 0.5 * @log(@as(f64, @floatFromInt(x))) + 9.0;
+        const kern = try LoganButhe.init(gpa, x, T, cl);
+        std.debug.print("logan: c = {d:.2}  eps = {e:.4}  lam = {d:.6}\n", .{ cl, kern.eps, kern.lam });
+        try run(LoganButhe, &kern, x, zeros.items, nt, gpa, t_start, t_load);
     } else {
-        std.debug.print("unknown kernel '{s}' (have: gaussian; logan and beurling-selberg planned)\n", .{kname});
+        std.debug.print("unknown kernel '{s}' (have: gaussian, logan; beurling-selberg planned)\n", .{kname});
         std.process.exit(2);
     }
 }
