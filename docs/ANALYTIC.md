@@ -241,6 +241,33 @@ walls, in expected order: window cost (fleet-shaped), then f64 phase γL and
 text-f64 zeros (~γ·2⁻⁵² — the double-double phase + hi/lo zeros rung, with
 the LMFDB 2⁻¹⁰¹ format supplying the pairs natively).
 
+## Rung 5: the kernel seam, and Gaussian vs Logan measured
+
+The Mellin pair is now a comptime plug (`init / lo,hi / phi / zeroTerm /
+cutoff / poleCorr`), and plug #2 is **Büthe's Logan-function kernel**
+(arXiv:1410.7008, Thms 3.1 + 4.1) — the FKBJ band-limited line. Structure:
+the prime-side window is *exactly* [xe^(−ε), xe^(ε)] (ε = c/T; the
+convolution bump is a compactly-supported Bessel I₀, its μ/ν integrals
+tabulated once per run), while the zero side uses every tabulated zero with
+weight ℓ_c(εγ) and per-zero Ei₁/Ei₂/Ei₃ asymptotic series; the tail beyond T
+is ~e^(−c), so c tracks ½ln x + O(loglog) — a **linear** price where the
+Gaussian pays **quadratically** (window ∝ c/T vs ∝ c²/T).
+
+Head-to-head on the 251M-zero table, both kernels MATCHing published π(x):
+
+| x | kernel | window ints | window time | total |
+|---|---|---:|---:|---:|
+| 10¹⁶ | Gaussian (c=7.5) | 1.57×10¹⁰ | 68.8 s | 93.8 s |
+| 10¹⁶ | Logan (c=27.4) | 5.4×10⁹ | 23.6 s | 51.1 s |
+
+**~3× narrower window at equal table and accuracy — Büthe's efficiency claim
+([4]) confirmed empirically.** 10¹³ drops to 1.2 s; projected 10¹⁸ ~45 min
+(was 2.17 h). The shared 16 s text-parse of the zeros table is now a visible
+overhead (binary format queued). Next plugs: Beurling–Selberg
+majorant/minorant sandwich (certified interval output — rigor's kernel), and
+the Slepian/prolate experiment (the true extremal for fixed-T concentration;
+apparently unexplored for π(x)).
+
 ## The ladder ahead
 
 1. **Precision.** LMFDB/Platt zeros (±2⁻¹⁰²) to kill the table noise;
