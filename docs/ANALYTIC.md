@@ -231,6 +231,7 @@ some files skipped — decodes non-monotone, not zero data):
 | 10¹⁵ | 29,844,570,422,669 | +2.0×10⁻⁵ | 0.5000 | 1.6×10⁹ | 27 s |
 | 10¹⁶ | 279,238,341,033,925 | −2.5×10⁻⁵ | 0.5000 | 1.6×10¹⁰ | 94 s |
 | 10¹⁷ | 2,623,557,157,654,233 | −1.2×10⁻⁴ | 0.4999 | 1.6×10¹¹ | 747 s |
+| 10¹⁸ | 24,739,954,287,740,860 | +5.8×10⁻⁴ | 0.4994 | 1.6×10¹² | 2.17 h |
 
 **MATCH at every row.** The noise floor sits at ~10⁻⁴⁻⁵ (zero-sum f64
 texture); the window sieve is ≥97% of runtime and ∝ x — exactly the
