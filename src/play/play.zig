@@ -8,7 +8,7 @@ const rs = @import("rs");
 //     std.debug.print("Hello world!\n", .{});
 // }
 
-pub const Counters = struct { n: u64 = 0, it: u64 = 0, x0: u64 = 0, a0: u64 = 0, a1: u64 = 0, a2: u64 = 0, one: u64 = 0, pi: u64 = 0, ch: u64 = 0, lt_pxp: u64 = 0, l: u64 = 0, b: u64 = 0, la: u64 = 0 };
+pub const Counters = struct { n: u64 = 0, it: u64 = 0, x0: u64 = 0, a0: u64 = 0, a1: u64 = 0, a2: u64 = 0, a3: u64 = 0, a4: u64 = 0, one: u64 = 0, pi: u64 = 0, ch: u64 = 0, lt_pxp: u64 = 0, l: u64 = 0, b: u64 = 0, la: u64 = 0 };
 
 fn phi_simple(x: u64, a: u64, primes: []const u64, pis: []const u64, c: *Counters) u64 {
     c.n += 1;
@@ -326,6 +326,55 @@ fn phi_linear_chop2_pi(x: u64, a: u64, primes: []const u64, pis: []const u64, c:
     return phi;
 }
 
+fn phi_a0(x: u64) u64 {
+    return x;
+}
+
+fn phi_a1(x: u64) u64 {
+    return phi_a0(x) - phi_a0(x / 2);
+}
+
+fn phi_a2(x: u64) u64 {
+    return phi_a1(x) - phi_a1(x / 3);
+}
+
+fn phi_a3(x: u64) u64 {
+    return phi_a2(x) - phi_a2(x / 5);
+}
+
+fn phi_a4(x: u64) u64 {
+    return phi_a3(x) - phi_a3(x / 7);
+}
+
+fn phi_tiny_a(x: u64, a: u64, c: *Counters) u64 {
+    if (a == 0) {
+        c.a0 += 1;
+        return phi_a0(x);
+    }
+
+    if (a == 1) {
+        c.a1 += 1;
+        return phi_a1(x);
+    }
+
+    if (a == 2) {
+        c.a2 += 1;
+        return phi_a2(x);
+    }
+
+    if (a == 3) {
+        c.a3 += 1;
+        return phi_a3(x);
+    }
+
+    if (a == 4) {
+        c.a4 += 1;
+        return phi_a4(x);
+    }
+
+    return 999_999_999_999;
+}
+
 fn phi_linear_all(x: u64, a: u64, primes: []const u64, pis: []const u64, c: *Counters) u64 {
     c.n += 1;
 
@@ -334,19 +383,31 @@ fn phi_linear_all(x: u64, a: u64, primes: []const u64, pis: []const u64, c: *Cou
         return 0;
     }
 
+    if (a <= 4) return phi_tiny_a(x, a, c);
+
     if (a == 0) {
         c.a0 += 1;
-        return x;
+        return phi_a0(x);
     }
 
     if (a == 1) {
         c.a1 += 1;
-        return x - x / 2;
+        return phi_a1(x);
     }
 
     if (a == 2) {
         c.a2 += 1;
-        return x - x / 2 - x / 3 + x / 6;
+        return phi_a2(x);
+    }
+
+    if (a == 3) {
+        c.a3 += 1;
+        return phi_a3(x);
+    }
+
+    if (a == 4) {
+        c.a4 += 1;
+        return phi_a4(x);
     }
 
     const p_a = primes[a - 1];
@@ -357,7 +418,6 @@ fn phi_linear_all(x: u64, a: u64, primes: []const u64, pis: []const u64, c: *Cou
         return 1;
     }
 
-    // TODO <= ??
     if (x <= p_a * p_a and x < pis.len) {
         const pi_x = pis[x];
         return 1 + pi_x - a;
@@ -372,20 +432,21 @@ fn phi_linear_all(x: u64, a: u64, primes: []const u64, pis: []const u64, c: *Cou
 
     var phi = x;
 
-    var b: u64 = 0;
+    var b: u64 = 1;
     var p_bm1: u64 = 1;
-    while (b < a) : (b += 1) {
-        const p_b = primes[b];
+
+    while (b <= a) : (b += 1) {
+        const p_b = primes[b - 1];
 
         if (x <= p_bm1 * p_b) {
             c.one += 1;
-            // x/p_b <= p_(b-1), so phi(x/p_b, b) = 1 - note that b index is off-by-one
-            //    ... and same holds for the rest of the indices up to a-1
-            return phi - (a - b);
+            // x/p_b <= p_(b-1), so phi(x/p_b, b-1) = 1
+            //    ... and same holds for the rest of the indices up to a
+            return phi - (a - (b - 1));
         }
 
         c.it += 1;
-        phi -= phi_linear_all(x / p_b, b, primes, pis, c);
+        phi -= phi_linear_all(x / p_b, b - 1, primes, pis, c);
 
         p_bm1 = p_b;
     }
