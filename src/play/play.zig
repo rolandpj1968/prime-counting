@@ -9,7 +9,7 @@ const rs = @import("rs");
 //     std.debug.print("Hello world!\n", .{});
 // }
 
-pub const Counters = struct { n: u64 = 0, it: u64 = 0, x0: u64 = 0, a0: u64 = 0, a1: u64 = 0, a2: u64 = 0, a3: u64 = 0, a4: u64 = 0, one: u64 = 0, pi: u64 = 0, ch: u64 = 0, lt_pxp: u64 = 0, l: u64 = 0, b: u64 = 0, la: u64 = 0 };
+pub const Counters = struct { n: u64 = 0, it: u64 = 0, x0: u64 = 0, ta: u64 = 0, one: u64 = 0, pi: u64 = 0, ch: u64 = 0, lt_pxp: u64 = 0, l: u64 = 0, b: u64 = 0, la: u64 = 0 };
 
 fn phi_simple(x: u64, a: u64, primes: []const u64, pis: []const u64, c: *Counters) u64 {
     c.n += 1;
@@ -327,8 +327,6 @@ fn phi_linear_chop2_pi(x: u64, a: u64, primes: []const u64, pis: []const u64, c:
     return phi;
 }
 
-const EXPLICIT_PRIMES = [_]u64{ 2, 3, 5, 7 };
-
 fn explicit_prime(comptime a: u64) u64 {
     return switch (a) {
         1 => 2,
@@ -337,12 +335,6 @@ fn explicit_prime(comptime a: u64) u64 {
         4 => 7,
         else => unreachable,
     };
-}
-
-fn phi_explicit_a_array(x: u64, comptime a: u64) u64 {
-    if (a == 0) return x;
-
-    return phi_explicit_a(x, a - 1) - phi_explicit_a(x / EXPLICIT_PRIMES[a], a - 1);
 }
 
 fn phi_explicit_a(x: u64, comptime a: u64) u64 {
@@ -372,29 +364,11 @@ fn phi_a4(x: u64) u64 {
 }
 
 fn phi_tiny_a(x: u64, a: u64, c: *Counters) u64 {
-    if (a == 0) {
-        c.a0 += 1;
-        return phi_a0(x);
-    }
+    c.ta += 1;
 
-    if (a == 1) {
-        c.a1 += 1;
-        return phi_a1(x);
-    }
-
-    if (a == 2) {
-        c.a2 += 1;
-        return phi_a2(x);
-    }
-
-    if (a == 3) {
-        c.a3 += 1;
-        return phi_a3(x);
-    }
-
-    if (a == 4) {
-        c.a4 += 1;
-        return phi_a4(x);
+    inline for (0..5) |explicit_a| {
+        if (a == explicit_a)
+            return phi_explicit_a(x, explicit_a);
     }
 
     unreachable;
@@ -410,30 +384,30 @@ fn phi_linear_all(x: u64, a: u64, primes: []const u64, pis: []const u64, c: *Cou
 
     if (a <= 4) return phi_tiny_a(x, a, c);
 
-    if (a == 0) {
-        c.a0 += 1;
-        return phi_a0(x);
-    }
+    // if (a == 0) {
+    //     c.a0 += 1;
+    //     return phi_a0(x);
+    // }
 
-    if (a == 1) {
-        c.a1 += 1;
-        return phi_a1(x);
-    }
+    // if (a == 1) {
+    //     c.a1 += 1;
+    //     return phi_a1(x);
+    // }
 
-    if (a == 2) {
-        c.a2 += 1;
-        return phi_a2(x);
-    }
+    // if (a == 2) {
+    //     c.a2 += 1;
+    //     return phi_a2(x);
+    // }
 
-    if (a == 3) {
-        c.a3 += 1;
-        return phi_a3(x);
-    }
+    // if (a == 3) {
+    //     c.a3 += 1;
+    //     return phi_a3(x);
+    // }
 
-    if (a == 4) {
-        c.a4 += 1;
-        return phi_a4(x);
-    }
+    // if (a == 4) {
+    //     c.a4 += 1;
+    //     return phi_a4(x);
+    // }
 
     const p_a = primes[a - 1];
 
