@@ -327,12 +327,15 @@ fn phi_linear_chop2_pi(x: u64, a: u64, primes: []const u64, pis: []const u64, c:
     return phi;
 }
 
+const MAX_SMALL_A = 5;
+
 fn explicit_prime(comptime a: u64) u64 {
     return switch (a) {
         1 => 2,
         2 => 3,
         3 => 5,
         4 => 7,
+        5 => 11,
         else => unreachable,
     };
 }
@@ -343,30 +346,10 @@ fn phi_explicit_a(x: u64, comptime a: u64) u64 {
     return phi_explicit_a(x, a - 1) - phi_explicit_a(x / explicit_prime(a), a - 1);
 }
 
-fn phi_a0(x: u64) u64 {
-    return phi_explicit_a(x, 0);
-}
-
-fn phi_a1(x: u64) u64 {
-    return phi_explicit_a(x, 1);
-}
-
-fn phi_a2(x: u64) u64 {
-    return phi_a1(x) - phi_a1(x / 3);
-}
-
-fn phi_a3(x: u64) u64 {
-    return phi_a2(x) - phi_a2(x / 5);
-}
-
-fn phi_a4(x: u64) u64 {
-    return phi_a3(x) - phi_a3(x / 7);
-}
-
 fn phi_tiny_a(x: u64, a: u64, c: *Counters) u64 {
     c.ta += 1;
 
-    inline for (0..5) |explicit_a| {
+    inline for (0..(MAX_SMALL_A + 1)) |explicit_a| {
         if (a == explicit_a)
             return phi_explicit_a(x, explicit_a);
     }
@@ -382,32 +365,7 @@ fn phi_linear_all(x: u64, a: u64, primes: []const u64, pis: []const u64, c: *Cou
         return 0;
     }
 
-    if (a <= 4) return phi_tiny_a(x, a, c);
-
-    // if (a == 0) {
-    //     c.a0 += 1;
-    //     return phi_a0(x);
-    // }
-
-    // if (a == 1) {
-    //     c.a1 += 1;
-    //     return phi_a1(x);
-    // }
-
-    // if (a == 2) {
-    //     c.a2 += 1;
-    //     return phi_a2(x);
-    // }
-
-    // if (a == 3) {
-    //     c.a3 += 1;
-    //     return phi_a3(x);
-    // }
-
-    // if (a == 4) {
-    //     c.a4 += 1;
-    //     return phi_a4(x);
-    // }
+    if (a <= MAX_SMALL_A) return phi_tiny_a(x, a, c);
 
     const p_a = primes[a - 1];
 
