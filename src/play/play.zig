@@ -1,6 +1,7 @@
 //! RPJ playground
 
 const std = @import("std");
+const assert = std.debug.assert;
 // zig run --dep rs -Mroot=play.zig -Mrs=../rangesieve.zig
 const rs = @import("rs");
 
@@ -326,12 +327,36 @@ fn phi_linear_chop2_pi(x: u64, a: u64, primes: []const u64, pis: []const u64, c:
     return phi;
 }
 
+const EXPLICIT_PRIMES = [_]u64{ 2, 3, 5, 7 };
+
+fn explicit_prime(comptime a: u64) u64 {
+    return switch (a) {
+        1 => 2,
+        2 => 3,
+        3 => 5,
+        4 => 7,
+        else => unreachable,
+    };
+}
+
+fn phi_explicit_a_array(x: u64, comptime a: u64) u64 {
+    if (a == 0) return x;
+
+    return phi_explicit_a(x, a - 1) - phi_explicit_a(x / EXPLICIT_PRIMES[a], a - 1);
+}
+
+fn phi_explicit_a(x: u64, comptime a: u64) u64 {
+    if (a == 0) return x;
+
+    return phi_explicit_a(x, a - 1) - phi_explicit_a(x / explicit_prime(a), a - 1);
+}
+
 fn phi_a0(x: u64) u64 {
-    return x;
+    return phi_explicit_a(x, 0);
 }
 
 fn phi_a1(x: u64) u64 {
-    return phi_a0(x) - phi_a0(x / 2);
+    return phi_explicit_a(x, 1);
 }
 
 fn phi_a2(x: u64) u64 {
@@ -372,7 +397,7 @@ fn phi_tiny_a(x: u64, a: u64, c: *Counters) u64 {
         return phi_a4(x);
     }
 
-    return 999_999_999_999;
+    unreachable;
 }
 
 fn phi_linear_all(x: u64, a: u64, primes: []const u64, pis: []const u64, c: *Counters) u64 {
