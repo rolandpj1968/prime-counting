@@ -268,6 +268,40 @@ majorant/minorant sandwich (certified interval output — rigor's kernel), and
 the Slepian/prolate experiment (the true extremal for fixed-T concentration;
 apparently unexplored for π(x)).
 
+### The 10¹⁷ bug: a prime hiding in a half-ulp
+
+Logan's first run at 10¹⁷ landed at **published − 1**, with the analytic
+residual a clean +6×10⁻⁵ — integer-exact wrongness, the signature of a
+counting bug, not an analytic one. The diagnosis chain, each step killing a
+hypothesis class:
+
+1. **Exact π\*(10¹⁷) referee** (combinatorial `pi` at every root, rational
+   arithmetic): π\* = …114.798822, so the smooth+window side was short by
+   exactly 1.000000 and the Möbius unwind was acquitted digit-for-digit.
+2. **c = 31 rerun**: same deficit at a different ε, window, and zero
+   weighting — kills tail/truncation and window-edge theories.
+3. **Post-seam Gaussian control at 10¹⁷**: MATCH — acquits the entire shared
+   pipeline (segmented sieve, χ, unwind, f128 aggregates). Logan-specific.
+4. **x-bisection** at 3, 5.5, 7.3, 8.6×10¹⁶: all MATCH. Not monotone in any
+   natural threshold (7.3×10¹⁶ > 2⁵⁶ already) — which was the tell.
+
+Cause: `bigM` selected its μ-branch by `sign(y)` (f64) while χ cuts on the
+integer `n <= x`. Above 2⁵³, every integer in (x − ulp/2, x] *rounds to
+y == 0* and took the μ(0⁺) = +½ branch — φ off by exactly 1/λ ≈ 1 for any
+**prime** in that band. The bands at all five MATCHing x's are prime-free;
+the band at 10¹⁷ contains exactly one prime, **99999999999999997** — the
+missing unit, found by Miller–Rabin, not by staring at the sieve. (The 10¹⁸
+band holds two primes; the pre-fix code would have been low by exactly 2.)
+The Gaussian is immune: its φ is continuous at u = 0, so the same rounding
+costs ~10⁻¹⁰. The fix is one line — branch on `n <= x`, same as χ.
+
+The lesson generalizes: **when a smoothed weight is split into a
+discontinuous-exact piece plus a smooth-float piece, both must cut on the
+same comparison** — any float-sign branch owns a half-ulp band of integers
+that the exact side assigns to the other shore. Third kill for the margin
+column: the error was invisible to MATCH at four nearby probe points and
+pinned to one prime by the fractional residue.
+
 ## The ladder ahead
 
 1. **Precision.** LMFDB/Platt zeros (±2⁻¹⁰²) to kill the table noise;

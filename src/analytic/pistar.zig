@@ -370,7 +370,10 @@ const LoganButhe = struct {
         const y = u / k.eps; // in [-1, 1]
         var mu: f64 = undefined;
         var nu: f64 = undefined;
-        if (y < 0) {
+        // Branch on the integer cut, not sign(y): above 2^53, n in
+        // (x - ulp/2, x] rounds to y == 0 and must still take the mu(0-)
+        // branch to agree with chi's n <= x — else phi jumps by 1/lam there.
+        if (n <= k.x) {
             mu = lookup(k.mu_tab, y);
             nu = lookup(k.nu_tab, y);
         } else {
