@@ -259,14 +259,67 @@ Head-to-head on the 251M-zero table, both kernels MATCHing published π(x):
 |---|---|---:|---:|---:|
 | 10¹⁶ | Gaussian (c=7.5) | 1.57×10¹⁰ | 68.8 s | 93.8 s |
 | 10¹⁶ | Logan (c=27.4) | 5.4×10⁹ | 23.6 s | 51.1 s |
+| 10¹⁷ | Gaussian (c=7.5) | 1.6×10¹¹ | — | 747 s |
+| 10¹⁷ | Logan (c=28.6) | 5.6×10¹⁰ | 253 s | 283 s |
+| 10¹⁸ | Gaussian (c=7.5) | 1.57×10¹² | — | 2.17 h |
+| 10¹⁸ | Logan (c=29.7) | 5.87×10¹¹ | 2990 s | **50.4 min** |
+
+(Gaussian 10¹⁷/10¹⁸ from the rung-4 runs; a post-seam Gaussian control at
+10¹⁷ re-MATCHed during the half-ulp hunt. Logan 10¹⁸: err +1.9×10⁻⁴,
+margin 0.4998.)
 
 **~3× narrower window at equal table and accuracy — Büthe's efficiency claim
-([4]) confirmed empirically.** 10¹³ drops to 1.2 s; projected 10¹⁸ ~45 min
-(was 2.17 h). The shared 16 s text-parse of the zeros table is now a visible
-overhead (binary format queued). Next plugs: Beurling–Selberg
-majorant/minorant sandwich (certified interval output — rigor's kernel), and
-the Slepian/prolate experiment (the true extremal for fixed-T concentration;
-apparently unexplored for π(x)).
+([4]) confirmed empirically, 10¹³ in 1.2 s up through 10¹⁸ in 50 min.** The
+shared 16 s text-parse of the zeros table is now a visible overhead (binary
+format queued).
+
+A literature sweep (2026-08-04) then corrected our history and sharpened the
+roadmap: **FKBJ used Logan's function from the start** — Büthe [4] states
+that Platt chose the Gaussian while *Franke chose Logan's function*, so the
+Gaussian/Logan A/B above *is* the Platt-vs-FKBJ fork, measured. Better:
+Logan's function is provably **extremal** for exactly the functional our
+truncation pays — it minimizes ∫_{|t|>c}|f(t)/t| dt over band-limited f
+(minimum 2·log((1+e⁻ᶜ)/(1−e⁻ᶜ))) — so the 3× is an optimality theorem
+showing up in the wall clock. Prolate/Slepian kernels: confirmed **unused**
+in explicit-formula prime counting (the only PSWF contact is the Connes
+school's Weil-positivity program — a different game); note PSWFs optimize
+L² concentration, a *different* functional than Logan's, so that experiment
+is exploratory, not a promised win. The analytic record remains Büthe's
+unconditional π(10²⁵) (zeros to 10¹¹, ~40k CPU-h) — the analytic lane has
+been quiet for a decade.
+
+### Certified radius: rigor as a printout, not a promise
+
+Büthe's bounding papers (1511.02032, 1410.7015) reveal that "rigor's
+kernel" is not a new kernel: it is the *same Logan kernel* plus inequality
+scaffolding (explicit tail bounds, explicit formula constants, a dilation
+trick that exists only because he never sieves). Since we sieve the window
+exactly, our form of it is a **certified radius around the point
+estimate**, now implemented for the Logan plug: R_tail (dropped zeros:
+ℓ-envelope — the c/sinh c normalisation *is* the e⁻ᶜ tail — against
+Rosser's explicit N(t) bound), R_series (Ei-asymptotic remainder at γ₁),
+R_window (μ/ν-table h² bounds × the exact sieved term count; grid 2¹⁶→2²⁰
+keeps this ~10⁻⁴ at 10¹⁵, ~0.12 at 10¹⁸). The output prints the
+decomposition **and its exclusions** — f64 rounding (pending the dd rung)
+and the Thm 4.1 Θ-constants (pending extraction) — because a bracket that
+doesn't state what it covers is theatre. Measured: R_analytic = 1.2×10⁻⁴
+at 10¹³, 2.0×10⁻⁴ at 10¹⁵ — the analytic terms certify the integer
+through 10¹⁸ on the current grid.
+
+The float-error path to closing the exclusion is running error analysis
+(IEEE 754 gives fl(a∘b) = (a∘b)(1+δ), |δ| ≤ 2⁻⁵³ — deterministic, so a
+sibling accumulator can carry a hard bound; Neumaier's theorem bounds
+compensated sums by 2u·Σ|xᵢ| independent of n). The crunch: a rigorous
+bound must assume phase errors add *coherently* — Σ 2√x·w·u ≈ 4 at 10¹⁷ —
+while the actual incoherent walk is ~3×10⁻⁴; luck is not a theorem. That
+is why dd phases (TwoProd γL + hi/lo zeros) precede rigor: they collapse
+the *worst-case* bound to ~10⁻⁸, making the provable meet the actual.
+Rigor is purchased in the arithmetic, then recorded by the analysis.
+
+Next kernel experiments: the Slepian/prolate plug (exploratory, above),
+and the open niche the sweep exposed — nobody has solved the
+Beurling–Selberg extremal problem in the 1/log-weighted norm that π*/li
+actually lives in.
 
 ### The 10¹⁷ bug: a prime hiding in a half-ulp
 
@@ -301,6 +354,10 @@ same comparison** — any float-sign branch owns a half-ulp band of integers
 that the exact side assigns to the other shore. Third kill for the margin
 column: the error was invisible to MATCH at four nearby probe points and
 pinned to one prime by the fractional residue.
+
+Post-fix: 10¹⁷ MATCH (err +6.2×10⁻⁵, 283 s) and 10¹⁸ MATCH (err
++1.9×10⁻⁴, 50.4 min) — the 10¹⁸ run exercising the fix on both of its
+band primes.
 
 ## The ladder ahead
 
