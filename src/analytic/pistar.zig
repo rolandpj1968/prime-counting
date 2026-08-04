@@ -110,7 +110,9 @@ fn realEi(t: f128) f128 {
     return s;
 }
 
-const SEGW: u64 = 1 << 24; // window segment width (16M integers per strip)
+const SEGW: u64 = 1 << 26; // window segment width (64M per strip: at 1e19 the base-prime
+// scan per segment costs pi(sqrt hi) ~ 1.5e8 visits — fewer, fatter segments
+// keep that overhead below the marking work itself
 
 /// floor(x^(1/m)) exactly, by float guess + integer correction.
 fn iroot(x: u64, m: u32) u64 {
@@ -179,6 +181,7 @@ const KNOWN = [_]struct { x: u64, pi: u64 }{
     .{ .x = 10_000_000_000_000_000, .pi = 279_238_341_033_925 },
     .{ .x = 100_000_000_000_000_000, .pi = 2_623_557_157_654_233 },
     .{ .x = 1_000_000_000_000_000_000, .pi = 24_739_954_287_740_860 },
+    .{ .x = 10_000_000_000_000_000_000, .pi = 234_057_667_276_344_607 },
 };
 
 // ---------------------------------------------------------------------------
@@ -305,7 +308,9 @@ const Gaussian = struct {
 /// Seam mapping: phi(n) = chi(n<=x) + M(n), so (chi - phi) = -M as required.
 /// GRID at 2^20 keeps the table h^2 error ~1e-11 per lookup so the certified
 /// window-error component stays ~1e-2 even at 1.5e9 window terms.
-const GRID = 1 << 20; // eta/mu/nu cumulative-integral grid over [-1, 1]
+const GRID = 1 << 22; // eta/mu/nu cumulative-integral grid over [-1, 1]:
+// h^2 table error is the leading shared floor suspect AND the leading
+// cert component; 2^22 puts R_window ~ 0.05 even at 1e19
 
 const LoganButhe = struct {
     x: u64,
@@ -977,6 +982,10 @@ fn run(comptime K: type, kern: *const K, x: u64, zeros: []const f64, zlo: []cons
         const r_series = kern.certSeries(zeros[0], @floatFromInt(zeros.len));
         const r_win = kern.certWindowPerTerm() * @as(f64, @floatFromInt(wprimes + npow));
         std.debug.print("cert: R_tail {e:.2}  R_series {e:.2}  R_window {e:.2}  => R_analytic {e:.2}\n", .{ r_tail, r_series, r_win, r_tail + r_series + r_win });
+        // the kernel-independent systematic measured in the 2026-08-04
+        // sweeps — real, reproducible, mechanism unknown, NOT in the radius
+        const floor_est = 4e-4 * @sqrt(@as(f64, @floatFromInt(x)) / 1e15) * @exp(-0.8 * (kern.c - 15.0));
+        std.debug.print("cert: shared-floor estimate {e:.2} (EMPIRICAL, unpriced — mechanism on worklist)\n", .{floor_est});
         std.debug.print("cert: EXCLUDED: f64 rounding (dd/ball rung), Thm 4.1 Theta-consts (TODO 1410.7008)\n", .{});
     }
     std.debug.print("window [{d}, {d}]: {d} ints, {d} primes  corr = {d:.6}   ({d:.1}s window)\n", .{ kern.lo + 1, kern.hi, kern.hi - kern.lo, wprimes, wcorr, @as(f64, @floatFromInt(t_win - t_zeros)) / 1e9 });
@@ -1075,14 +1084,18 @@ pub fn main(init: std.process.Init) !void {
         const kern = Gaussian.init(x, T, cpar);
         try run(Gaussian, &kern, x, zeros.items, zlos.items, nt, gpa, t_start, t_load);
     } else if (std.mem.eql(u8, kname, "logan")) {
-        // tail ~ sqrt(x) polylog e^-c: c must track (1/2) ln x (linear price
-        // vs the Gaussian's quadratic — the structural win)
-        const cl = if (cset) cpar else 0.5 * @log(@as(f64, @floatFromInt(x))) + 9.0;
+        // empirical tuning rule (2026-08-04 c-sweep, envelope < 0.05):
+        // tail e^{-1.25c} governs to ~1e16, the shared floor (0.625 ln x
+        // slope) above; old 0.5 ln x + 9 was ~2x conservative
+        const lx = @log(@as(f64, @floatFromInt(x)));
+        const cl = if (cset) cpar else @max(8.0, @max(0.4 * lx - 2.9, 0.625 * lx - 11.3));
         const kern = try LoganButhe.init(gpa, x, T, cl);
         std.debug.print("logan: c = {d:.2}  eps = {e:.4}  lam = {d:.6}\n", .{ cl, kern.eps, kern.lam });
         try run(LoganButhe, &kern, x, zeros.items, zlos.items, nt, gpa, t_start, t_load);
     } else if (std.mem.eql(u8, kname, "slepian")) {
-        const cl = if (cset) cpar else 0.5 * @log(@as(f64, @floatFromInt(x))) + 9.0;
+        // e^{-2.3c} tail never binds above 1e14 — the shared floor sets c
+        const lx = @log(@as(f64, @floatFromInt(x)));
+        const cl = if (cset) cpar else @max(8.0, 0.625 * lx - 11.3);
         const kern = try Slepian.init(gpa, x, T, cl);
         std.debug.print("slepian: c = {d:.2}  eps = {e:.4}  lam = {d:.6}  chi0 = {d:.4}  m2*2/eps^2 = {e:.4}\n", .{ cl, kern.eps, kern.lam, kern.chi0, kern.acorr * 2.0 / (kern.eps * kern.eps) });
         try run(Slepian, &kern, x, zeros.items, zlos.items, nt, gpa, t_start, t_load);
