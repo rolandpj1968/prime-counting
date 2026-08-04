@@ -9,7 +9,7 @@ const rs = @import("rs");
 //     std.debug.print("Hello world!\n", .{});
 // }
 
-pub const Counters = struct { n: u64 = 0, it: u64 = 0, x0: u64 = 0, ta: u64 = 0, one: u64 = 0, pi: u64 = 0, ch: u64 = 0, lt_pxp: u64 = 0, l: u64 = 0, b: u64 = 0, la: u64 = 0 };
+pub const Counters = struct { n: u64 = 0, it: u64 = 0, x0: u64 = 0, ta: u64 = 0, one: u64 = 0, ones: u64 = 0, pi: u64 = 0, hipi: u64 = 0, ch: u64 = 0, lt_pxp: u64 = 0, l: u64 = 0, b: u64 = 0, la: u64 = 0, ba: u64 = 0 };
 
 fn phi_simple(x: u64, a: u64, primes: []const u64, pis: []const u64, c: *Counters) u64 {
     c.n += 1;
@@ -19,7 +19,7 @@ fn phi_simple(x: u64, a: u64, primes: []const u64, pis: []const u64, c: *Counter
         return 0;
     }
     if (a == 0) {
-        c.a0 += 1;
+        //c.a0 += 1;
         return x;
     }
 
@@ -327,15 +327,20 @@ fn phi_linear_chop2_pi(x: u64, a: u64, primes: []const u64, pis: []const u64, c:
     return phi;
 }
 
-const MAX_SMALL_A = 5;
+const MAX_TINY_A = 4;
+const MAX_TINY_A_2 = 4;
 
 fn explicit_prime(comptime a: u64) u64 {
     return switch (a) {
+        // 0 => 1, // for p_(b-1) - not needed
         1 => 2,
         2 => 3,
         3 => 5,
         4 => 7,
         5 => 11,
+        6 => 13,
+        7 => 17,
+        8 => 19,
         else => unreachable,
     };
 }
@@ -346,10 +351,8 @@ fn phi_explicit_a(x: u64, comptime a: u64) u64 {
     return phi_explicit_a(x, a - 1) - phi_explicit_a(x / explicit_prime(a), a - 1);
 }
 
-fn phi_tiny_a(x: u64, a: u64, c: *Counters) u64 {
-    c.ta += 1;
-
-    inline for (0..(MAX_SMALL_A + 1)) |explicit_a| {
+fn phi_tiny_a(x: u64, a: u64) u64 {
+    inline for (0..(MAX_TINY_A + 1)) |explicit_a| {
         if (a == explicit_a)
             return phi_explicit_a(x, explicit_a);
     }
@@ -361,23 +364,34 @@ fn phi_linear_all(x: u64, a: u64, primes: []const u64, pis: []const u64, c: *Cou
     c.n += 1;
 
     if (x == 0) {
+        std.debug.print("                                                              x == 0 | a: {:>6}\n", .{a});
         c.x0 += 1;
         return 0;
     }
 
-    if (a <= MAX_SMALL_A) return phi_tiny_a(x, a, c);
+    if (a <= MAX_TINY_A) {
+        c.ta += 1;
+        return phi_tiny_a(x, a);
+    }
 
     const p_a = primes[a - 1];
 
     if (x <= p_a) {
-        c.pi += 1;
+        std.debug.print("                                                              ONE x: {:>12} | a: {:>6}\n", .{ x, a });
         c.one += 1;
         return 1;
     }
 
-    if (x <= p_a * p_a and x < pis.len) {
-        const pi_x = pis[x];
-        return 1 + pi_x - a;
+    if (x <= p_a * p_a) {
+        if (x < pis.len) {
+            c.pi += 1;
+            //std.debug.print("                                                              LO PI: x: {d:>12} | a: {d:>6} | p_a: {d:>6} | p_(a_1): {d:>6} | 10000/p_a(+1): {d:>6} | phi(x,a): {d:>6}\n", .{ x, a, p_a, primes[a], 10000 / primes[a], phi_simple(x, a, primes, pis, c) });
+            const pi_x = pis[x];
+            return 1 + pi_x - a;
+        } else {
+            c.hipi += 1;
+            //std.debug.print("                                                              HI PI: x: {d:>12} | a: {d:>6} | p_a: {d:>6} | p_(a_1): {d:>6} | 10000/p_a(+1): {d:>6} | phi(x,a): {d:>6}\n", .{ x, a, p_a, primes[a], 10000 / primes[a], phi_simple(x, a, primes, pis, c) });
+        }
     }
 
     if (x <= primes.len) {
@@ -385,20 +399,26 @@ fn phi_linear_all(x: u64, a: u64, primes: []const u64, pis: []const u64, c: *Cou
         c.la += a;
     } else {
         c.b += 1;
+        c.ba += a;
     }
 
     var phi = x;
 
-    var b: u64 = 1;
-    var p_bm1: u64 = 1;
+    inline for (1..(MAX_TINY_A_2 + 1)) |explicit_a| {
+        phi -= phi_explicit_a(x / explicit_prime(explicit_a), explicit_a - 1);
+    }
+
+    var b: u64 = MAX_TINY_A_2 + 1;
+    var p_bm1: u64 = explicit_prime(MAX_TINY_A_2);
 
     while (b <= a) : (b += 1) {
         const p_b = primes[b - 1];
 
-        if (x <= p_bm1 * p_b) {
-            c.one += 1;
+        //if (x <= p_bm1 * p_b) {
+        if (x / p_b <= p_bm1) {
+            c.ones += 1;
             // x/p_b <= p_(b-1), so phi(x/p_b, b-1) = 1
-            //    ... and same holds for the rest of the indices up to a
+            //    ... and same holds for the rest of the indices up to 'a'
             return phi - (a - (b - 1));
         }
 
@@ -478,10 +498,18 @@ pub fn main(init: std.process.Init) !void {
 
     const n_f: f64 = @floatFromInt(c.n);
     const x_f: f64 = @floatFromInt(x);
-    const ln_n = @log(n_f);
+    const ln_n: f64 = @log(n_f);
     const ln_x = @log(x_f);
 
     std.debug.print("x: {d:>12} | y: {d:>6} ------ nodes/x: {d:>7.4} ln: {d:5.3} ------- phi(x,y): {d:>12} | {any}\n", .{ x, y, n_f / x_f, ln_n / ln_x, phi_x_y, c });
+
+    const la_f: f64 = @floatFromInt(c.la);
+    const l_f: f64 = @floatFromInt(c.l);
+    std.debug.print("                                                    ------------------> la/l: {d:>5.3}\n", .{la_f / l_f});
+
+    const ba_f: f64 = @floatFromInt(c.ba);
+    const b_f: f64 = @floatFromInt(c.b);
+    std.debug.print("                                                    ------------------> ba/b: {d:>5.3}\n", .{ba_f / b_f});
 
     // std.debug.print("\n", .{});
     // std.debug.print("phi({d:>6}, {d:>2}) = {d:>6} / [{any}]\n", .{ x, y, phi_x_y, c });
