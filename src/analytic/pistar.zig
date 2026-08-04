@@ -561,6 +561,17 @@ const LoganButhe = struct {
         return nzeros * 2.0 * k.sx / (k.lam * g1 * k.L) * rel;
     }
 
+    /// Buthe Thm 4.1's Theta(35 eps) explicit-formula remainder, taken in
+    /// its decomposed form from Lemmas 4.3 (3.2 A/log x, the pole/li
+    /// comparison), 4.4 (440 eps^4/c^2, prime powers via Brun-Titchmarsh)
+    /// and 4.5 (34.9 eps, the w_infinity comparison — itself six explicit
+    /// pieces). Hypotheses: x > 30000, c >= 1, 0 < eps <= 0.01; asserted.
+    fn certTheta(k: *const LoganButhe) f64 {
+        std.debug.assert(k.x > 30000 and k.c >= 1.0 and k.eps <= 0.01);
+        const e2 = k.eps * k.eps;
+        return 34.9 * k.eps + 3.2 * k.acorr / k.L + 440.0 * e2 * e2 / (k.c * k.c);
+    }
+
     /// Per-window-term bound on the mu/nu table error (trapezoid drift
     /// h^2/12 * int|eta''| plus linear-interp h^2/8 * max|mu''|); the nu
     /// contribution carries the eps dilation and is negligible but kept.
@@ -862,6 +873,19 @@ const Slepian = struct {
         return nzeros * 2.0 * k.sx / (k.lam * g1 * k.L) * rel;
     }
 
+    /// Same FORM as Buthe Thm 4.1's Theta(35 eps), but his constants are
+    /// derived from Logan-specific bounds (Lemma 3.3 bounds
+    /// |phi_inf,c,eps - f1| using ell_c). The Weil-Barner argument carries
+    /// over to any even bump, so the O(eps) shape is right and the
+    /// constants are plausibly close — but they are NOT proven for psi_0.
+    /// Flagged as borrowed in the output; do not cite as certified.
+    const THETA_BORROWED = true;
+    fn certTheta(k: *const Slepian) f64 {
+        std.debug.assert(k.x > 30000 and k.c >= 1.0 and k.eps <= 0.01);
+        const e2 = k.eps * k.eps;
+        return 34.9 * k.eps + 3.2 * k.acorr / k.L + 440.0 * e2 * e2 / (k.c * k.c);
+    }
+
     fn certWindowPerTerm(k: *const Slepian) f64 {
         const h = 2.0 / @as(f64, GRID);
         const dmu = h * h * (k.tvpp / 12.0 + k.detamax / 8.0);
@@ -1043,12 +1067,15 @@ fn run(comptime K: type, kern: *const K, x: u64, zeros: []const f64, zlo: []cons
         const r_tail = kern.certTail(T);
         const r_series = kern.certSeries(zeros[0], @floatFromInt(zeros.len));
         const r_win = kern.certWindowPerTerm() * @as(f64, @floatFromInt(wprimes + npow));
-        std.debug.print("cert: R_tail {e:.2}  R_series {e:.2}  R_window {e:.2}  => R_analytic {e:.2}\n", .{ r_tail, r_series, r_win, r_tail + r_series + r_win });
+        const r_theta = kern.certTheta();
+        const borrowed = comptime @hasDecl(K, "THETA_BORROWED");
+        std.debug.print("cert: R_tail {e:.2}  R_series {e:.2}  R_window {e:.2}  R_theta {e:.2}{s}  => R_analytic {e:.2}\n", .{ r_tail, r_series, r_win, r_theta, if (borrowed) " (BORROWED)" else "", r_tail + r_series + r_win + r_theta });
         // the kernel-independent systematic measured in the 2026-08-04
         // sweeps — real, reproducible, mechanism unknown, NOT in the radius
         const floor_est = 4e-4 * @sqrt(@as(f64, @floatFromInt(x)) / 1e15) * @exp(-0.8 * (kern.c - 15.0));
         std.debug.print("cert: shared-floor estimate {e:.2} (EMPIRICAL, unpriced — mechanism on worklist)\n", .{floor_est});
-        std.debug.print("cert: EXCLUDED: f64 rounding (dd/ball rung), Thm 4.1 Theta-consts (TODO 1410.7008)\n", .{});
+        if (borrowed) std.debug.print("cert: NOTE R_theta constants are Buthe's, proven for the Logan bump only\n", .{});
+        std.debug.print("cert: EXCLUDED: f64 rounding (see float() line; dd/ball rung to fold in)\n", .{});
     }
     std.debug.print("window [{d}, {d}]: {d} ints, {d} primes  corr = {d:.6}   ({d:.1}s window)\n", .{ kern.lo + 1, kern.hi, kern.hi - kern.lo, wprimes, wcorr, @as(f64, @floatFromInt(t_win - t_zeros)) / 1e9 });
     std.debug.print("pi*_sharp = {d:.6}\n", .{@as(f64, @floatCast(pistar_sharp))});
