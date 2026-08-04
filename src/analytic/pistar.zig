@@ -114,22 +114,28 @@ const SEGW: u64 = 1 << 26; // window segment width (64M per strip: at 1e19 the b
 // scan per segment costs pi(sqrt hi) ~ 1.5e8 visits — fewer, fatter segments
 // keep that overhead below the marking work itself
 
-/// floor(x^(1/m)) exactly, by float guess + integer correction.
+/// floor(x^(1/m)) exactly, by float guess + integer correction. The old
+/// ipow saturated at 1<<63, "only compared against x" — true until x
+/// reached 1e19 > 2^63, when the saturation sat BELOW x and the upward
+/// correction spun forever (3.5h of v += 1 at the first 1e19 attempt,
+/// diagnosed by fan). powLe compares in u128 with early exit: total by
+/// construction, r stays <= x < 2^64 before every multiply.
 fn iroot(x: u64, m: u32) u64 {
     if (m == 1) return x;
     var v: u64 = @intFromFloat(std.math.pow(f64, @floatFromInt(x), 1.0 / @as(f64, @floatFromInt(m))));
-    while (ipow(v + 1, m) <= x) v += 1;
-    while (v > 1 and ipow(v, m) > x) v -= 1;
+    while (v < std.math.maxInt(u64) and powLe(v + 1, m, x)) v += 1;
+    while (v > 1 and !powLe(v, m, x)) v -= 1;
     return v;
 }
-fn ipow(v: u64, m: u32) u64 {
+/// v^m <= x, exact.
+fn powLe(v: u64, m: u32, x: u64) bool {
     var r: u128 = 1;
     var i: u32 = 0;
     while (i < m) : (i += 1) {
         r *= v;
-        if (r > 1 << 70) return 1 << 63; // saturate: only compared against x
+        if (r > x) return false;
     }
-    return @intCast(@min(r, 1 << 63));
+    return true;
 }
 
 /// Exact pi*(v) = sum_{p^k <= v} 1/k for small v, off a fresh sieve.
@@ -1114,8 +1120,8 @@ pub fn main(init: std.process.Init) !void {
         // the dd phase so gamma's own rounding stops being the noise floor
         const n = std.mem.bytesToValue(u64, data[8..16]);
         std.debug.assert(data.len >= 16 + 16 * n);
-        try zeros.ensureTotalCapacity(gpa, n);
-        try zlos.ensureTotalCapacity(gpa, n);
+        try zeros.ensureTotalCapacityPrecise(gpa, n);
+        try zlos.ensureTotalCapacityPrecise(gpa, n);
         var i: usize = 0;
         while (i < n) : (i += 1) {
             zeros.appendAssumeCapacity(std.mem.bytesToValue(f64, data[16 + 16 * i ..][0..8]));
