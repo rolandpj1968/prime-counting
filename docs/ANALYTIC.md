@@ -313,8 +313,29 @@ compensated sums by 2u·Σ|xᵢ| independent of n). The crunch: a rigorous
 bound must assume phase errors add *coherently* — Σ 2√x·w·u ≈ 4 at 10¹⁷ —
 while the actual incoherent walk is ~3×10⁻⁴; luck is not a theorem. That
 is why dd phases (TwoProd γL + hi/lo zeros) precede rigor: they collapse
-the *worst-case* bound to ~10⁻⁸, making the provable meet the actual.
+the *worst-case* bound to ~10⁻⁵, making the provable meet the actual.
 Rigor is purchased in the arithmetic, then recorded by the analysis.
+
+**Both landed same day (dd phases + binary zeros).** `lmfdb2bin.py` emits
+hi/lo f64 pairs from the exact 2⁻¹⁰¹ integers (γ = N/2¹⁰¹ exactly; hi =
+correctly-rounded f64, lo = correctly-rounded remainder — the pair holds γ
+to ~2⁻⁷⁹, leaving ~10¹⁵ headroom over need); `pistar` reads the 4 GB table
+by magic detection, and workers compute θ = γL mod 2π in double-double
+(TwoProd + dd reduction; Sterbenz-exact cancellation) with per-kernel dd
+phase coefficients from ln128. Measured: 10¹⁵ load 27.5→4.8 s, total
+44→11.5 s, residual +1.6×10⁻⁵ → **0.000000** (margin 0.5000); 10¹⁷
+residual +6.2×10⁻⁵ → **+4×10⁻⁶**, total 268 s. The phase-noise floor is
+gone from the margin budget; what remains is window-side f64 (~10⁻⁶
+scale) and the analytic radius.
+
+En route, the day's *third* float-seam bug: the window's ±2-integer
+cushion admits boundary integers with y outside [−1, 1], where `lookup`'s
+`@intFromFloat` on a negative index is UB in ReleaseFast — garbage reads
+that fired only when a boundary-belt integer happened to be prime
+(999787 at 10⁶ under the 2²⁰ grid). Fixed by clamping y to [−1, 1] in
+`bigM`, where the table is exactly 0 — the mathematically correct value on
+both shores. Same family as the half-ulp bug: exact-integer geometry and
+float geometry disagreeing about the edge of a set.
 
 Next kernel experiments: the Slepian/prolate plug (exploratory, above),
 and the open niche the sweep exposed — nobody has solved the

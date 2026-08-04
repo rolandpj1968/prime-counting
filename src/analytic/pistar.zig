@@ -185,6 +185,35 @@ const KNOWN = [_]struct { x: u64, pi: u64 }{
 // Kernels
 // ---------------------------------------------------------------------------
 
+// ---- double-double phase: theta = gamma * thetaCoeff mod 2pi.
+// gamma*L reaches ~4e9, so plain f64 leaves |dtheta| ~ gL*2^-53 ~ 4e-7 rad —
+// a coherent worst-case bound of whole UNITS on the zero sum. TwoProd plus
+// dd reduction brings |dtheta| to ~3e-16 rad absolute, collapsing that
+// bound to ~1e-5. Needs hi/lo zeros (.bin table) to also kill the
+// gamma-rounding half; with a text table the lo half is 0 and gamma's own
+// f64 rounding remains the noise floor.
+const TWO_PI_HI: f64 = 6.283185307179586; // fl(2pi)
+const TWO_PI_LO: f64 = 2.4492935982947064e-16; // 2pi - TWO_PI_HI
+
+fn twoProd(a: f64, b: f64) [2]f64 {
+    const p = a * b;
+    return .{ p, @mulAdd(f64, a, b, -p) };
+}
+
+fn ddPhase(g_hi: f64, g_lo: f64, c_hi: f64, c_lo: f64) f64 {
+    const p = twoProd(g_hi, c_hi);
+    const e = p[1] + (g_hi * c_lo + g_lo * c_hi);
+    const n = @round(p[0] / (2.0 * std.math.pi));
+    const q = twoProd(n, TWO_PI_HI);
+    // p[0] - q[0] is exact (Sterbenz); the small pieces then rank-order
+    return (p[0] - q[0]) - q[1] - n * TWO_PI_LO + e;
+}
+
+fn ddOfF128(v: f128) [2]f64 {
+    const hi: f64 = @floatCast(v);
+    return .{ hi, @floatCast(v - hi) };
+}
+
 const ERFC_CUT = 7.5; // erfc(7.5) ~ 4e-26: outside this, phi is exactly 0 or 1
 
 /// Galway's Gaussian pair (Platt eq 3.3): phi_hat(s) = (x^s/s) e^(l^2 s^2/2),
@@ -201,7 +230,8 @@ const Gaussian = struct {
     lambda: f64,
     l2: f64,
     inv_s2l: f64,
-    theta_l: f64,
+    tc_hi: f64, // dd phase coefficient L + l^2/2
+    tc_lo: f64,
     lo: u64,
     hi: u64,
 
@@ -211,6 +241,7 @@ const Gaussian = struct {
         const lambda = c / T;
         const l2 = lambda * lambda;
         const half_w = ERFC_CUT * std.math.sqrt2 * lambda;
+        const ldd = ddOfF128(ln128(@floatFromInt(x)));
         return .{
             .xf = xf,
             .sx = @sqrt(xf),
@@ -218,7 +249,8 @@ const Gaussian = struct {
             .lambda = lambda,
             .l2 = l2,
             .inv_s2l = 1.0 / (std.math.sqrt2 * lambda),
-            .theta_l = L + l2 / 2.0,
+            .tc_hi = ldd[0],
+            .tc_lo = ldd[1] + l2 / 2.0, // both ~1e-15-scale, safe to add
             .lo = @intFromFloat(xf * @exp(-half_w) - 2.0),
             .hi = @intFromFloat(xf * @exp(half_w) + 2.0),
         };
@@ -230,7 +262,7 @@ const Gaussian = struct {
         return 0.5 * erfc(u);
     }
 
-    fn zeroTerm(k: *const Gaussian, g: f64) f64 {
+    fn zeroTerm(k: *const Gaussian, g: f64, th: f64) f64 {
         const damp = @exp(k.l2 * (0.25 - g * g) / 2.0);
         const rl = C{ .re = 0.5 * k.L, .im = g * k.L }; // rho L
         const irl = rl.inv();
@@ -242,7 +274,6 @@ const Gaussian = struct {
         }
         var br = S.mul(irl); // S/(rho L)
         br.re -= k.l2 / (k.L * k.L); // first-order kernel correction
-        const th = g * k.theta_l;
         const e = C{ .re = k.sx * damp * @cos(th), .im = k.sx * damp * @sin(th) };
         return -2.0 * e.mul(br).re;
     }
@@ -285,6 +316,8 @@ const LoganButhe = struct {
     eps: f64,
     lam: f64,
     acorr: f64, // A_{c,eps}
+    tc_hi: f64, // dd phase coefficient L
+    tc_lo: f64,
     lo: u64,
     hi: u64,
     mu_tab: []f64, // mu(eps*y) on y-grid [-1,0], GRID+1 points
@@ -357,6 +390,7 @@ const LoganButhe = struct {
             prev_eta = eta;
             prev_mu = mu;
         }
+        const ldd = ddOfF128(ln128(@floatFromInt(x)));
         return .{
             .x = x,
             .xf = xf,
@@ -366,6 +400,8 @@ const LoganButhe = struct {
             .eps = eps,
             .lam = lam,
             .acorr = acorr,
+            .tc_hi = ldd[0],
+            .tc_lo = ldd[1],
             .lo = @intFromFloat(xf * @exp(-eps) - 2.0),
             .hi = @intFromFloat(xf * @exp(eps) + 2.0),
             .mu_tab = mu_tab,
@@ -387,7 +423,11 @@ const LoganButhe = struct {
     /// M_{x,c,eps}(n) per Thm 3.1; odd reflection handles n > x.
     fn bigM(k: *const LoganButhe, n: u64) f64 {
         const u = std.math.log1p((@as(f64, @floatFromInt(n)) - k.xf) / k.xf); // log(n/x)
-        const y = u / k.eps; // in [-1, 1]
+        // clamp: the lo/hi cushion admits a couple of integers just outside
+        // the exact support, where M = 0 — and where an unclamped y would
+        // hand lookup a NEGATIVE f (@intFromFloat to usize = UB, garbage
+        // index; it bit exactly when a boundary-belt integer was prime)
+        const y = @max(-1.0, @min(1.0, u / k.eps));
         var mu: f64 = undefined;
         var nu: f64 = undefined;
         // Branch on the integer cut, not sign(y): above 2^53, n in
@@ -411,7 +451,7 @@ const LoganButhe = struct {
     }
 
     /// -2 Re Psi(rho) for the conjugate pair at gamma = g.
-    fn zeroTerm(k: *const LoganButhe, g: f64) f64 {
+    fn zeroTerm(k: *const LoganButhe, g: f64, th: f64) f64 {
         const w = ell(k.c, k.eps * g);
         if (w == 0.0) return 0.0;
         const rl = C{ .re = 0.5 * k.L, .im = g * k.L }; // rho L
@@ -440,8 +480,8 @@ const LoganButhe = struct {
         var B = s1.mul(irl);
         B.re += k.acorr * b2.re;
         B.im += k.acorr * b2.im;
-        // e^rl = sqrt(x) e^(i g L)
-        const e = C{ .re = k.sx * @cos(g * k.L), .im = k.sx * @sin(g * k.L) };
+        // e^rl = sqrt(x) e^(i g L), phase dd-reduced by the caller
+        const e = C{ .re = k.sx * @cos(th), .im = k.sx * @sin(th) };
         return -2.0 * (w / k.lam) * e.mul(B).re;
     }
 
@@ -514,9 +554,10 @@ const LoganButhe = struct {
 // Pipeline, generic over the kernel
 // ---------------------------------------------------------------------------
 
-fn run(comptime K: type, kern: *const K, x: u64, zeros: []const f64, nt: usize, gpa: std.mem.Allocator, t_start: u64, t_load: u64) !void {
+fn run(comptime K: type, kern: *const K, x: u64, zeros: []const f64, zlo: []const f64, nt: usize, gpa: std.mem.Allocator, t_start: u64, t_load: u64) !void {
     const ZCtx = struct {
         zeros: []const f64,
+        zlo: []const f64,
         nt: usize,
         kern: *const K,
         sums: []f64,
@@ -526,9 +567,10 @@ fn run(comptime K: type, kern: *const K, x: u64, zeros: []const f64, nt: usize, 
             const a = @min(wid * chunk, n);
             const b = @min(a + chunk, n);
             var k = Kahan{};
-            for (ctx.zeros[a..b]) |g| {
+            for (ctx.zeros[a..b], ctx.zlo[a..b]) |g, gl| {
                 if (ctx.kern.cutoff(g)) break; // gammas ascend within a range
-                k.add(ctx.kern.zeroTerm(g));
+                const th = ddPhase(g, gl, ctx.kern.tc_hi, ctx.kern.tc_lo);
+                k.add(ctx.kern.zeroTerm(g, th));
             }
             ctx.sums[wid] = k.val();
         }
@@ -575,7 +617,7 @@ fn run(comptime K: type, kern: *const K, x: u64, zeros: []const f64, nt: usize, 
     // ---- zero sum: static zero-range fragments
     const zsums = try gpa.alloc(f64, nt);
     defer gpa.free(zsums);
-    var zctx = ZCtx{ .zeros = zeros, .nt = nt, .kern = kern, .sums = zsums };
+    var zctx = ZCtx{ .zeros = zeros, .zlo = zlo, .nt = nt, .kern = kern, .sums = zsums };
     {
         const threads = try gpa.alloc(std.Thread, nt);
         defer gpa.free(threads);
@@ -706,11 +748,28 @@ pub fn main(init: std.process.Init) !void {
     const data = try std.Io.Dir.cwd().readFileAlloc(tio.io(), zpath, gpa, .limited(1 << 33));
     var zeros = try std.ArrayList(f64).initCapacity(gpa, 1 << 21);
     defer zeros.deinit(gpa);
-    var lines = std.mem.tokenizeScalar(u8, data, '\n');
-    while (lines.next()) |line| {
-        const s = std.mem.trim(u8, line, " \t\r");
-        if (s.len == 0) continue;
-        try zeros.append(gpa, try std.fmt.parseFloat(f64, s));
+    var zlos = try std.ArrayList(f64).initCapacity(gpa, 1 << 21);
+    defer zlos.deinit(gpa);
+    if (data.len >= 16 and std.mem.eql(u8, data[0..8], "ZROSDD01")) {
+        // lmfdb2bin.py hi/lo pairs (little-endian, matches x86); lo feeds
+        // the dd phase so gamma's own rounding stops being the noise floor
+        const n = std.mem.bytesToValue(u64, data[8..16]);
+        std.debug.assert(data.len >= 16 + 16 * n);
+        try zeros.ensureTotalCapacity(gpa, n);
+        try zlos.ensureTotalCapacity(gpa, n);
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            zeros.appendAssumeCapacity(std.mem.bytesToValue(f64, data[16 + 16 * i ..][0..8]));
+            zlos.appendAssumeCapacity(std.mem.bytesToValue(f64, data[24 + 16 * i ..][0..8]));
+        }
+    } else {
+        var lines = std.mem.tokenizeScalar(u8, data, '\n');
+        while (lines.next()) |line| {
+            const s = std.mem.trim(u8, line, " \t\r");
+            if (s.len == 0) continue;
+            try zeros.append(gpa, try std.fmt.parseFloat(f64, s));
+        }
+        try zlos.appendNTimes(gpa, 0.0, zeros.items.len);
     }
     gpa.free(data);
     const t_load = nowNs();
@@ -720,14 +779,14 @@ pub fn main(init: std.process.Init) !void {
 
     if (std.mem.eql(u8, kname, "gaussian")) {
         const kern = Gaussian.init(x, T, cpar);
-        try run(Gaussian, &kern, x, zeros.items, nt, gpa, t_start, t_load);
+        try run(Gaussian, &kern, x, zeros.items, zlos.items, nt, gpa, t_start, t_load);
     } else if (std.mem.eql(u8, kname, "logan")) {
         // tail ~ sqrt(x) polylog e^-c: c must track (1/2) ln x (linear price
         // vs the Gaussian's quadratic — the structural win)
         const cl = if (cset) cpar else 0.5 * @log(@as(f64, @floatFromInt(x))) + 9.0;
         const kern = try LoganButhe.init(gpa, x, T, cl);
         std.debug.print("logan: c = {d:.2}  eps = {e:.4}  lam = {d:.6}\n", .{ cl, kern.eps, kern.lam });
-        try run(LoganButhe, &kern, x, zeros.items, nt, gpa, t_start, t_load);
+        try run(LoganButhe, &kern, x, zeros.items, zlos.items, nt, gpa, t_start, t_load);
     } else {
         std.debug.print("unknown kernel '{s}' (have: gaussian, logan; beurling-selberg planned)\n", .{kname});
         std.process.exit(2);
