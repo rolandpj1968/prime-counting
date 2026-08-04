@@ -272,7 +272,9 @@ const Gaussian = struct {
 /// with lam = l_{c,eps}(i/2) = (c/sinh c) sinh(s)/s, s = sqrt(c^2 + eps^2/4),
 /// and A = -l''_{c,eps}(0)/2 = eps^2 (coth c / c - 1/c^2)/2.
 /// Seam mapping: phi(n) = chi(n<=x) + M(n), so (chi - phi) = -M as required.
-const GRID = 1 << 16; // eta/mu/nu cumulative-integral grid over [-1, 1]
+/// GRID at 2^20 keeps the table h^2 error ~1e-11 per lookup so the certified
+/// window-error component stays ~1e-2 even at 1.5e9 window terms.
+const GRID = 1 << 20; // eta/mu/nu cumulative-integral grid over [-1, 1]
 
 const LoganButhe = struct {
     x: u64,
@@ -287,6 +289,10 @@ const LoganButhe = struct {
     hi: u64,
     mu_tab: []f64, // mu(eps*y) on y-grid [-1,0], GRID+1 points
     nu_tab: []f64, // nu(eps*y) likewise
+    // measured-in-init bounds for the certified radius (y-units, x1.2 safety):
+    etamax: f64, // max eta            (= max |mu'|, bounds nu'' for interp)
+    detamax: f64, // max |eta'|         (= max |mu''|, bounds mu interp error)
+    tvpp: f64, // total variation of eta' (~ int |eta''|, bounds trapezoid drift)
 
     fn bessI0(z: f64) f64 {
         var term: f64 = 1;
@@ -328,6 +334,10 @@ const LoganButhe = struct {
         var nacc: f64 = 0; // integral of mu (y-units)
         var prev_eta: f64 = 0; // eta(-1) = norm * I0(0)... = norm; fixed below
         var prev_mu: f64 = 0;
+        var etamax: f64 = 0;
+        var detamax: f64 = 0;
+        var tvpp: f64 = 0;
+        var prev_slope: f64 = 0;
         var gi: usize = 0;
         while (gi <= GRID / 2) : (gi += 1) {
             const y = -1.0 + @as(f64, @floatFromInt(gi)) * h;
@@ -337,6 +347,13 @@ const LoganButhe = struct {
             if (gi > 0) nacc += 0.5 * (prev_mu + mu) * h;
             mu_tab[gi] = mu;
             nu_tab[gi] = nacc * eps; // nu carries one eps dilation factor
+            etamax = @max(etamax, eta);
+            if (gi > 0) {
+                const slope = (eta - prev_eta) / h;
+                detamax = @max(detamax, @abs(slope));
+                if (gi > 1) tvpp += @abs(slope - prev_slope);
+                prev_slope = slope;
+            }
             prev_eta = eta;
             prev_mu = mu;
         }
@@ -353,6 +370,9 @@ const LoganButhe = struct {
             .hi = @intFromFloat(xf * @exp(eps) + 2.0),
             .mu_tab = mu_tab,
             .nu_tab = nu_tab,
+            .etamax = etamax * 1.2,
+            .detamax = detamax * 1.2,
+            .tvpp = tvpp * 1.2,
         };
     }
 
@@ -433,6 +453,60 @@ const LoganButhe = struct {
 
     fn poleCorr(k: *const LoganButhe) f64 {
         return k.acorr * k.xf / (k.L * k.L);
+    }
+
+    // ---- certified-radius components (analytic terms only; f64 rounding
+    // and the Thm 4.1 Theta-constants are EXCLUDED and said so in output —
+    // a bracket must state what it covers).
+
+    /// Bound on the dropped zeros gamma > T. Per conjugate pair:
+    /// |term| <= 2 sqrt(x) * 1.3/(lam*g*L) * env(eps*g), where beyond the
+    /// support crossover |l_c(t)| <= (c/sinh c)*min(1, 1/sqrt(t^2-c^2)) —
+    /// the sinh-normalisation IS the e^-c tail. Zero counting via the
+    /// Rosser bound |N(t) - M(t)| <= 0.137 ln t + 0.443 lnln t + 4.35.
+    fn certTail(k: *const LoganButhe, T: f64) f64 {
+        const norm = k.c / std.math.sinh(k.c);
+        const cf = 2.0 * k.sx * 1.3 / (k.lam * k.L);
+        const S = 20000;
+        const ds = 60.0 / @as(f64, S);
+        var acc: f64 = 0;
+        var prev: f64 = 0;
+        var i: usize = 0;
+        while (i <= S) : (i += 1) { // t = T e^s: integrand dies ~ e^-s
+            const t = T * @exp(@as(f64, @floatFromInt(i)) * ds);
+            const w2 = k.eps * k.eps * t * t - k.c * k.c;
+            const env = if (w2 <= 1.0) norm else norm / @sqrt(w2);
+            const dens = @log(t / (2.0 * std.math.pi)) / (2.0 * std.math.pi);
+            const g = cf * env / t * dens * t; // f(t) * dens * dt/ds
+            if (i > 0) acc += 0.5 * (prev + g) * ds;
+            prev = g;
+        }
+        // fluctuation term: f decreasing => |int f dQ| <~ (f(T) + int|f'|) Q
+        const qT = 0.137 * @log(T) + 0.443 * @log(@log(T)) + 4.35;
+        acc += 3.0 * qT * cf * norm / T;
+        return acc;
+    }
+
+    /// Coarse bound on the K=13 Ei asymptotic truncation: first omitted
+    /// term at the lowest zero (largest relative error), sector-cushioned
+    /// by 4|rho|, times the zero count. ~1e-10 territory; kept honest.
+    fn certSeries(k: *const LoganButhe, g1: f64, nzeros: f64) f64 {
+        const r1 = @sqrt(0.25 + g1 * g1) * k.L;
+        var fac: f64 = 1; // 16!/2! = product 3..16
+        var j: f64 = 3;
+        while (j <= 16) : (j += 1) fac *= j;
+        const rel = fac / std.math.pow(f64, r1, 14.0) * 4.0 * g1;
+        return nzeros * 2.0 * k.sx / (k.lam * g1 * k.L) * rel;
+    }
+
+    /// Per-window-term bound on the mu/nu table error (trapezoid drift
+    /// h^2/12 * int|eta''| plus linear-interp h^2/8 * max|mu''|); the nu
+    /// contribution carries the eps dilation and is negligible but kept.
+    fn certWindowPerTerm(k: *const LoganButhe) f64 {
+        const h = 2.0 / @as(f64, GRID);
+        const dmu = h * h * (k.tvpp / 12.0 + k.detamax / 8.0);
+        const dnu = k.eps * h * h * (2.0 * k.etamax / 12.0 + k.etamax / 8.0);
+        return (dmu * (1.0 + 0.5 * k.eps) + 0.5 * dnu) / k.lam;
     }
 };
 
@@ -544,6 +618,7 @@ fn run(comptime K: type, kern: *const K, x: u64, zeros: []const f64, nt: usize, 
     for (wsums) |s| wk.add(s);
     for (wcounts) |c| wprimes += c;
     // prime powers p^m (and base primes p) inside the window — serial, tiny
+    var npow: u64 = 0;
     for (base) |p| {
         var pk: u64 = 1;
         var m: f64 = 0;
@@ -553,11 +628,21 @@ fn run(comptime K: type, kern: *const K, x: u64, zeros: []const f64, nt: usize, 
             if (pk <= kern.lo) continue;
             const chi: f64 = if (pk <= x) 1.0 else 0.0;
             wk.add((chi - kern.phi(pk)) / m);
+            npow += 1;
         }
     }
     const wcorr = wk.val();
     const pistar_sharp: f128 = pistar_smooth + @as(f128, wcorr);
     const t_win = nowNs();
+    // certified-radius report (kernels that can price their own errors)
+    if (comptime @hasDecl(K, "certTail")) {
+        const T = zeros[zeros.len - 1];
+        const r_tail = kern.certTail(T);
+        const r_series = kern.certSeries(zeros[0], @floatFromInt(zeros.len));
+        const r_win = kern.certWindowPerTerm() * @as(f64, @floatFromInt(wprimes + npow));
+        std.debug.print("cert: R_tail {e:.2}  R_series {e:.2}  R_window {e:.2}  => R_analytic {e:.2}\n", .{ r_tail, r_series, r_win, r_tail + r_series + r_win });
+        std.debug.print("cert: EXCLUDED: f64 rounding (dd/ball rung), Thm 4.1 Theta-consts (TODO 1410.7008)\n", .{});
+    }
     std.debug.print("window [{d}, {d}]: {d} ints, {d} primes  corr = {d:.6}   ({d:.1}s window)\n", .{ kern.lo + 1, kern.hi, kern.hi - kern.lo, wprimes, wcorr, @as(f64, @floatFromInt(t_win - t_zeros)) / 1e9 });
     std.debug.print("pi*_sharp = {d:.6}\n", .{@as(f64, @floatCast(pistar_sharp))});
 
