@@ -281,6 +281,13 @@ const Gaussian = struct {
         return -2.0 * e.mul(br).re;
     }
 
+    /// Oscillation amplitude bound of this pair's term — the lever arm a
+    /// phase error acts on. Feeds the dual float-error books in run().
+    fn ampEnv(k: *const Gaussian, g: f64) f64 {
+        const damp = @exp(k.l2 * (0.25 - g * g) / 2.0);
+        return 2.4 * k.sx * damp / (g * k.L);
+    }
+
     fn cutoff(k: *const Gaussian, g: f64) bool {
         return @exp(k.l2 * (0.25 - g * g) / 2.0) < 1e-18;
     }
@@ -488,6 +495,10 @@ const LoganButhe = struct {
         // e^rl = sqrt(x) e^(i g L), phase dd-reduced by the caller
         const e = C{ .re = k.sx * @cos(th), .im = k.sx * @sin(th) };
         return -2.0 * (w / k.lam) * e.mul(B).re;
+    }
+
+    fn ampEnv(k: *const LoganButhe, g: f64) f64 {
+        return 2.4 * k.sx * @abs(ell(k.c, k.eps * g)) / (k.lam * g * k.L);
     }
 
     fn cutoff(k: *const LoganButhe, g: f64) bool {
@@ -811,6 +822,10 @@ const Slepian = struct {
         return -2.0 * (w / k.lam) * e.mul(B).re;
     }
 
+    fn ampEnv(k: *const Slepian, g: f64) f64 {
+        return 2.4 * k.sx * k.weight(k.eps * g) / (k.lam * g * k.L);
+    }
+
     fn cutoff(k: *const Slepian, g: f64) bool {
         _ = k;
         _ = g;
@@ -860,18 +875,35 @@ fn run(comptime K: type, kern: *const K, x: u64, zeros: []const f64, zlo: []cons
         nt: usize,
         kern: *const K,
         sums: []f64,
+        // dual float-error books: worst-case (coherent) vs stochastic-model
+        // (RMS, mean-zero independent). The ratio is the measured "sqrt(N)
+        // of sign-mixing" this run is implicitly relying on.
+        amp1: []f64, // sum |amp|
+        amp2: []f64, // sum amp^2
+        abst: []f64, // sum |term|
         fn work(ctx: *@This(), wid: usize) void {
             const n = ctx.zeros.len;
             const chunk = (n + ctx.nt - 1) / ctx.nt;
             const a = @min(wid * chunk, n);
             const b = @min(a + chunk, n);
             var k = Kahan{};
+            var a1: f64 = 0;
+            var a2: f64 = 0;
+            var at: f64 = 0;
             for (ctx.zeros[a..b], ctx.zlo[a..b]) |g, gl| {
                 if (ctx.kern.cutoff(g)) break; // gammas ascend within a range
                 const th = ddPhase(g, gl, ctx.kern.tc_hi, ctx.kern.tc_lo);
-                k.add(ctx.kern.zeroTerm(g, th));
+                const t = ctx.kern.zeroTerm(g, th);
+                k.add(t);
+                const amp = ctx.kern.ampEnv(g);
+                a1 += amp;
+                a2 += amp * amp;
+                at += @abs(t);
             }
             ctx.sums[wid] = k.val();
+            ctx.amp1[wid] = a1;
+            ctx.amp2[wid] = a2;
+            ctx.abst[wid] = at;
         }
     };
     const WCtx = struct {
@@ -916,7 +948,13 @@ fn run(comptime K: type, kern: *const K, x: u64, zeros: []const f64, zlo: []cons
     // ---- zero sum: static zero-range fragments
     const zsums = try gpa.alloc(f64, nt);
     defer gpa.free(zsums);
-    var zctx = ZCtx{ .zeros = zeros, .zlo = zlo, .nt = nt, .kern = kern, .sums = zsums };
+    const zamp1 = try gpa.alloc(f64, nt);
+    defer gpa.free(zamp1);
+    const zamp2 = try gpa.alloc(f64, nt);
+    defer gpa.free(zamp2);
+    const zabst = try gpa.alloc(f64, nt);
+    defer gpa.free(zabst);
+    var zctx = ZCtx{ .zeros = zeros, .zlo = zlo, .nt = nt, .kern = kern, .sums = zsums, .amp1 = zamp1, .amp2 = zamp2, .abst = zabst };
     {
         const threads = try gpa.alloc(std.Thread, nt);
         defer gpa.free(threads);
@@ -924,8 +962,26 @@ fn run(comptime K: type, kern: *const K, x: u64, zeros: []const f64, zlo: []cons
         for (threads) |t| t.join();
     }
     var zk = Kahan{};
+    var s_amp1: f64 = 0;
+    var s_amp2: f64 = 0;
+    var s_abst: f64 = 0;
     for (zsums) |s| zk.add(s);
+    for (zamp1) |s| s_amp1 += s;
+    for (zamp2) |s| s_amp2 += s;
+    for (zabst) |s| s_abst += s;
     const zerosum = zk.val();
+    // dual books: per-term error = amp * dtheta + |term| * ops*u, plus
+    // Neumaier 2u*sum|t|. Worst case adds moduli; the stochastic model
+    // (mean-zero independent, uniform-ish) adds variances. dtheta ~ 6u
+    // covers ddPhase's final adds + one ulp each for sin/cos (with a
+    // text table gamma's own rounding is NOT included — .bin is the
+    // instrument here). MODEL, not certificate, and labeled so.
+    const uu = 1.1102230246251565e-16;
+    const dtheta = 6.0 * uu;
+    const ops = 42.0 * uu;
+    const f_worst = dtheta * s_amp1 + ops * s_abst + 2.0 * uu * s_abst;
+    const f_rms = @sqrt(dtheta * dtheta * s_amp2 / 3.0 + ops * ops * s_abst * s_abst / @max(1.0, @as(f64, @floatFromInt(zeros.len))));
+    std.debug.print("float(zerosum): worst-case {e:.2} | stochastic-model rms {e:.2} | mixing-leverage {d:.0}x\n", .{ f_worst, f_rms, f_worst / @max(f_rms, 1e-300) });
     const t_zeros = nowNs();
 
     // ---- pole term (smoothed li(x)) and constants — f128 aggregates from
