@@ -342,6 +342,53 @@ and the open niche the sweep exposed — nobody has solved the
 Beurling–Selberg extremal problem in the 1/log-weighted norm that π*/li
 actually lives in.
 
+## Rung 6: the Slepian/prolate kernel — new territory, measured
+
+Plug #4 is the prolate spheroidal ψ₀ — per the survey, **never before used
+as an explicit-formula prime-counting kernel**. The framing that makes it
+an experiment rather than a lottery ticket: Logan provably minimizes the
+**L¹**-weighted truncation functional (worst-case signs on dropped zeros —
+the prover's kernel); ψ₀ maximizes **L²** concentration (λ₀ fraction of
+transform mass in band; leakage 1−λ₀ ~ e^(−2c) vs Logan's e^(−c) — the
+empiricist's kernel, if dropped-zero contributions add incoherently as
+they are observed to).
+
+Implementation collapsed beautifully. A pure-Python prototype
+(`prolate-proto.py`, no scipy) validated the Bouwkamp Legendre eigen-solve
+(ODE residual 2×10⁻⁹, coefficients decay to 10⁻⁵² by k=100), the
+self-transform property (ratio constant to quadrature noise), and — the
+license for the whole plug — **Büthe's A-coefficient equals the second
+moment of his bump to 1.7×10⁻¹⁶**, so the Thm 3.1/4.1 dressing is
+moment-generic and ψ₀ inherits it with its own m₂. The self-transform is
+also the implementation: η̂(t) = ψ₀(t/c)/ψ₀(0) *exactly* — the window bump
+and the zero-side weight are the same function; no Bessel sums, one
+ln-table, exp on lookup. The μ/ν/M/cert machinery carries over unchanged;
+certTail goes the L² way (Parseval out-of-band mass + Cauchy–Schwarz).
+
+First light: MATCH at 10⁶ on first execution; ladder MATCHes 10⁹, 10¹³,
+10¹⁵ (margins 0.5000, same runtime as Logan). Then the experiment — c-sweep
+at 10¹⁵ on the 251M-zero table, both kernels, since window ∝ c makes
+"smallest c that holds accuracy" the efficiency measurement:
+
+| c | Logan err | Slepian err | ratio |
+|---:|---:|---:|---:|
+| 8 | −0.352 | −0.104 | 3.4× |
+| 9 | −0.097 | −0.0073 | 13× |
+| 10 | −0.033 | −0.0042 | 8× |
+| 11 | −0.0102 | −0.00025 | 40× |
+| 12 | −0.0027 | +0.0008 | 3.4× |
+| 13–18 | shared floor ~10⁻⁴ → 10⁻⁵ | | ~1× |
+
+**Measured decay slopes: Logan ≈ e^(−1.25c), prolate ≈ e^(−2.3c) — the
+predicted 2:1, confirmed in the truncation-dominated regime** (10–40×
+error advantage at equal window). Both kernels then land on a *shared*
+error floor (~10⁻⁴ at c≈13 at 10¹⁵, ∝√x: −4.66×10⁻⁴ at 10¹⁶/c=14 where
+the two kernels agree to the printed digit) — kernel-independent
+machinery, suspected next-order dressing beyond m₂; on the worklist. The
+floor compresses the practical window win at loose targets to ~25%, and
+the sweep's blunt discovery is that the default c = ½ln x + 9 was ~2×
+conservative for both kernels: 10¹⁶ at tuned c=14 runs in 22 s vs 51 s.
+
 ### The 10¹⁷ bug: a prime hiding in a half-ulp
 
 Logan's first run at 10¹⁷ landed at **published − 1**, with the analytic

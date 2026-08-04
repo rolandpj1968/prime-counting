@@ -550,6 +550,300 @@ const LoganButhe = struct {
     }
 };
 
+/// Slepian/prolate kernel — the L2-extremal experiment. The bump is the
+/// zeroth prolate spheroidal wave function psi_0 on [-1,1] with bandwidth
+/// parameter c (Bouwkamp Legendre eigen-solve of
+/// ((1-y^2)u')' + (chi - c^2 y^2)u = 0, ground state, even chain).
+/// psi_0 maximizes the in-band fraction lambda_0 of its transform's L2
+/// mass; leakage 1-lambda_0 ~ e^{-2c} vs Logan's L1-extremal e^{-c} tail.
+/// Logan is the prover's kernel (worst-case signs on dropped zeros);
+/// this is the empiricist's (RMS signs). Same window support, same
+/// mu/nu/M dressing — Buthe's A-correction is the bump's second moment
+/// (verified numerically to 2e-16 against his closed form for Logan),
+/// so the Ei machinery is moment-generic and psi_0 inherits it.
+///
+/// Zero-side weight via the self-transform property (no Bessel sums):
+///   int psi_0(y) cos(c u y) dy = mu_0 psi_0(u)  =>  eta_hat(t) = psi_0(t/c)/psi_0(0)
+/// tabulated as ln psi_0 on [0,1] (positive ground state), exp on lookup.
+const Slepian = struct {
+    const KMAXE = 300; // even-chain length cap (k up to 598)
+
+    x: u64,
+    xf: f64,
+    sx: f64,
+    L: f64,
+    c: f64,
+    eps: f64,
+    lam: f64,
+    acorr: f64, // eps^2 m2(psi_0)/2
+    tc_hi: f64,
+    tc_lo: f64,
+    lo: u64,
+    hi: u64,
+    mu_tab: []f64,
+    nu_tab: []f64,
+    lnw_tab: []f64, // ln psi_0 on u-grid [0,1], GRID/2+1 points
+    etamax: f64,
+    detamax: f64,
+    tvpp: f64,
+    chi0: f64, // prolate ODE eigenvalue (diagnostic)
+    leak: f64, // coarse bound on 1 - lambda_0 (cert tail)
+    n0sq: f64, // (int psi_0)^2 with psi_0 L2-normalized
+
+    fn init(gpa: std.mem.Allocator, x: u64, T: f64, c: f64) !Slepian {
+        const xf: f64 = @floatFromInt(x);
+        const L = @log(xf);
+        const eps = c / T;
+
+        // ---- Bouwkamp: symmetric tridiagonal over even normalized-Legendre
+        // coefficients; ground state by Sturm bisection + inverse iteration
+        const ne: usize = @min(KMAXE, @as(usize, @intFromFloat(2.0 * c + 40.0)));
+        var diag: [KMAXE]f64 = undefined;
+        var off: [KMAXE]f64 = undefined; // off[i] couples entries i, i+1
+        for (0..ne) |i| {
+            const k: f64 = @floatFromInt(2 * i);
+            const bkk = if (i == 0) 1.0 / 3.0 else (2.0 * k * (k + 1.0) - 1.0) / ((2.0 * k + 3.0) * (2.0 * k - 1.0));
+            diag[i] = k * (k + 1.0) + c * c * bkk;
+            if (i + 1 < ne) {
+                off[i] = c * c * (k + 2.0) * (k + 1.0) / ((2.0 * k + 3.0) * @sqrt((2.0 * k + 1.0) * (2.0 * k + 5.0)));
+            }
+        }
+        var blo: f64 = 0.0;
+        var bhi: f64 = diag[0];
+        for (0..ne) |i| bhi = @max(bhi, diag[i] + 2.0 * (if (i + 1 < ne) off[i] else 0.0));
+        var it: usize = 0;
+        while (it < 200) : (it += 1) { // Sturm count of eigenvalues < mid
+            const mid = 0.5 * (blo + bhi);
+            var cnt: usize = 0;
+            var d = diag[0] - mid;
+            if (d < 0) cnt += 1;
+            for (1..ne) |i| {
+                const dd = if (d != 0) d else 1e-300;
+                d = diag[i] - mid - off[i - 1] * off[i - 1] / dd;
+                if (d < 0) cnt += 1;
+            }
+            if (cnt >= 1) bhi = mid else blo = mid;
+        }
+        const chi0 = 0.5 * (blo + bhi);
+        var a: [KMAXE]f64 = undefined;
+        var v: [KMAXE]f64 = undefined;
+        for (0..ne) |i| a[i] = 1.0 / @sqrt(@as(f64, @floatFromInt(ne)));
+        var round: usize = 0;
+        while (round < 4) : (round += 1) { // (A - chi I) w = a, Thomas
+            const sh = chi0 - 1e-9;
+            var cp: [KMAXE]f64 = undefined;
+            var dp: [KMAXE]f64 = undefined;
+            const b0 = diag[0] - sh;
+            cp[0] = off[0] / b0;
+            dp[0] = a[0] / b0;
+            for (1..ne) |i| {
+                const m = (diag[i] - sh) - off[i - 1] * cp[i - 1];
+                cp[i] = if (i + 1 < ne) off[i] / m else 0.0;
+                dp[i] = (a[i] - off[i - 1] * dp[i - 1]) / m;
+            }
+            v[ne - 1] = dp[ne - 1];
+            var ii = ne - 1;
+            while (ii > 0) : (ii -= 1) v[ii - 1] = dp[ii - 1] - cp[ii - 1] * v[ii];
+            var nrm: f64 = 0;
+            for (0..ne) |i| nrm += v[i] * v[i];
+            nrm = @sqrt(nrm);
+            for (0..ne) |i| a[i] = v[i] / nrm;
+        }
+        if (a[0] < 0) for (0..ne) |i| {
+            a[i] = -a[i];
+        };
+        const n0 = a[0] * @sqrt(2.0); // int psi_0 (only P_0 integrates)
+
+        // ---- tables: eta = psi_0/n0 on y in [-1,0] (even mirror), same
+        // trapezoid machinery as Logan, plus ln psi_0 on u = -y in [0,1],
+        // second moment m2 and lam = int eta cosh(eps y / 2) * 2
+        const h = 2.0 / @as(f64, GRID);
+        const mu_tab = try gpa.alloc(f64, GRID / 2 + 1);
+        const nu_tab = try gpa.alloc(f64, GRID / 2 + 1);
+        const lnw_tab = try gpa.alloc(f64, GRID / 2 + 1);
+        var acc: f64 = 0;
+        var nacc: f64 = 0;
+        var m2acc: f64 = 0;
+        var lamacc: f64 = 0;
+        var prev_eta: f64 = 0;
+        var prev_mu: f64 = 0;
+        var prev_y2e: f64 = 0;
+        var prev_che: f64 = 0;
+        var etamax: f64 = 0;
+        var detamax: f64 = 0;
+        var tvpp: f64 = 0;
+        var prev_slope: f64 = 0;
+        var gi: usize = 0;
+        while (gi <= GRID / 2) : (gi += 1) {
+            const y = -1.0 + @as(f64, @floatFromInt(gi)) * h;
+            // psi_0(y) = sum a_i sqrt(2i + 1/2) P_{2i}(y), upward recurrence
+            var p0: f64 = 1.0;
+            var p1: f64 = y;
+            var psi: f64 = a[0] * @sqrt(0.5);
+            var k: usize = 1;
+            while (k < 2 * ne) : (k += 1) {
+                const kf: f64 = @floatFromInt(k);
+                const p2 = ((2.0 * kf + 1.0) * y * p1 - kf * p0) / (kf + 1.0);
+                if ((k + 1) % 2 == 0 and (k + 1) / 2 < ne)
+                    psi += a[(k + 1) / 2] * @sqrt(@as(f64, @floatFromInt(k + 1)) + 0.5) * p2;
+                p0 = p1;
+                p1 = p2;
+            }
+            const eta = @max(psi, 1e-300) / n0;
+            lnw_tab[GRID / 2 - gi] = @log(@max(psi, 1e-300));
+            const y2e = y * y * eta;
+            const che = eta * std.math.cosh(eps * y / 2.0);
+            if (gi > 0) {
+                acc += 0.5 * (prev_eta + eta) * h;
+                m2acc += 0.5 * (prev_y2e + y2e) * h;
+                lamacc += 0.5 * (prev_che + che) * h;
+            }
+            const mu = -acc;
+            if (gi > 0) nacc += 0.5 * (prev_mu + mu) * h;
+            mu_tab[gi] = mu;
+            nu_tab[gi] = nacc * eps;
+            etamax = @max(etamax, eta);
+            if (gi > 0) {
+                const slope = (eta - prev_eta) / h;
+                detamax = @max(detamax, @abs(slope));
+                if (gi > 1) tvpp += @abs(slope - prev_slope);
+                prev_slope = slope;
+            }
+            prev_eta = eta;
+            prev_mu = mu;
+            prev_y2e = y2e;
+            prev_che = che;
+        }
+        const m2 = 2.0 * m2acc;
+        const lam = 2.0 * lamacc;
+        const ldd = ddOfF128(ln128(@floatFromInt(x)));
+        // coarse 1-lambda_0 bound: Fuchs-type asymptotic sqrt(c) e^{-2c}
+        // with a x1000 cushion (TODO: tighten from a verified constant)
+        const leak = 1000.0 * @sqrt(c) * @exp(-2.0 * c);
+        return .{
+            .x = x,
+            .xf = xf,
+            .sx = @sqrt(xf),
+            .L = L,
+            .c = c,
+            .eps = eps,
+            .lam = lam,
+            .acorr = eps * eps * m2 / 2.0,
+            .tc_hi = ldd[0],
+            .tc_lo = ldd[1],
+            .lo = @intFromFloat(xf * @exp(-eps) - 2.0),
+            .hi = @intFromFloat(xf * @exp(eps) + 2.0),
+            .mu_tab = mu_tab,
+            .nu_tab = nu_tab,
+            .lnw_tab = lnw_tab,
+            .etamax = etamax * 1.2,
+            .detamax = detamax * 1.2,
+            .tvpp = tvpp * 1.2,
+            .chi0 = chi0,
+            .leak = leak,
+            .n0sq = n0 * n0,
+        };
+    }
+
+    /// eta_hat(t) = psi_0(t/c)/psi_0(0) by self-transform; ln-interp.
+    fn weight(k: *const Slepian, t: f64) f64 {
+        const u = @max(0.0, @min(1.0, t / k.c));
+        const f = u * @as(f64, GRID) / 2.0;
+        const idx: usize = @intFromFloat(@min(f, @as(f64, GRID / 2) - 1e-9));
+        const fr = f - @as(f64, @floatFromInt(idx));
+        const lnw = k.lnw_tab[idx] * (1.0 - fr) + k.lnw_tab[idx + 1] * fr;
+        return @exp(lnw - k.lnw_tab[0]);
+    }
+
+    fn bigM(k: *const Slepian, n: u64) f64 {
+        const u = std.math.log1p((@as(f64, @floatFromInt(n)) - k.xf) / k.xf);
+        const y = @max(-1.0, @min(1.0, u / k.eps)); // clamp: see LoganButhe
+        var mu: f64 = undefined;
+        var nu: f64 = undefined;
+        if (n <= k.x) { // integer cut, not sign(y): see LoganButhe
+            mu = LoganButhe.lookup(k.mu_tab, y);
+            nu = LoganButhe.lookup(k.nu_tab, y);
+        } else {
+            mu = -LoganButhe.lookup(k.mu_tab, -y);
+            nu = LoganButhe.lookup(k.nu_tab, -y);
+        }
+        const logn = k.L + u;
+        return (mu + (1.0 / logn - 0.5) * (mu * u - nu)) / k.lam;
+    }
+
+    fn phi(k: *const Slepian, n: u64) f64 {
+        const chi: f64 = if (n <= k.x) 1.0 else 0.0;
+        return chi + k.bigM(n);
+    }
+
+    fn zeroTerm(k: *const Slepian, g: f64, th: f64) f64 {
+        const w = k.weight(k.eps * g);
+        if (w == 0.0) return 0.0;
+        const rl = C{ .re = 0.5 * k.L, .im = g * k.L };
+        const irl = rl.inv();
+        var s1 = C{ .re = 1, .im = 0 };
+        var s2 = C{ .re = 1, .im = 0 };
+        var s3 = C{ .re = 1, .im = 0 };
+        var j: f64 = 13;
+        while (j >= 1) : (j -= 1) {
+            s1 = irl.scale(j).mul(s1);
+            s1.re += 1;
+            s2 = irl.scale(j + 1.0).mul(s2);
+            s2.re += 1;
+            s3 = irl.scale(j + 2.0).mul(s3);
+            s3.re += 1;
+        }
+        const rho = C{ .re = 0.5, .im = g };
+        const irl2 = irl.mul(irl);
+        var b2 = rho.mul(irl2).mul(s2);
+        const b3 = rho.mul(rho).mul(irl2).mul(irl).mul(s3);
+        b2.re -= 2.0 * b3.re;
+        b2.im -= 2.0 * b3.im;
+        var B = s1.mul(irl);
+        B.re += k.acorr * b2.re;
+        B.im += k.acorr * b2.im;
+        const e = C{ .re = k.sx * @cos(th), .im = k.sx * @sin(th) };
+        return -2.0 * (w / k.lam) * e.mul(B).re;
+    }
+
+    fn cutoff(k: *const Slepian, g: f64) bool {
+        _ = k;
+        _ = g;
+        return false;
+    }
+
+    fn poleCorr(k: *const Slepian) f64 {
+        return k.acorr * k.xf / (k.L * k.L);
+    }
+
+    /// Dropped zeros gamma > T, bounded the L2 way: Parseval puts
+    /// 2 pi (1-lambda_0)/n0^2 of |eta_hat|^2 mass out of band; Cauchy-
+    /// Schwarz against the amplitude factor 2 sqrt(x) 1.3/(g L) whose
+    /// own L2 sum is computable. The natural bound for the L2 kernel.
+    fn certTail(k: *const Slepian, T: f64) f64 {
+        const dens = @log(T / (2.0 * std.math.pi)) / (2.0 * std.math.pi) * 1.5; // density cushion above T
+        const sum_w2 = dens / k.eps * std.math.pi * k.leak / k.n0sq;
+        const sum_b2 = dens / T; // int_T^inf t^-2 dens dt <= dens/T
+        return 2.0 * k.sx * 1.3 / (k.lam * k.L) * @sqrt(sum_w2) * @sqrt(sum_b2);
+    }
+
+    fn certSeries(k: *const Slepian, g1: f64, nzeros: f64) f64 {
+        const r1 = @sqrt(0.25 + g1 * g1) * k.L;
+        var fac: f64 = 1;
+        var j: f64 = 3;
+        while (j <= 16) : (j += 1) fac *= j;
+        const rel = fac / std.math.pow(f64, r1, 14.0) * 4.0 * g1;
+        return nzeros * 2.0 * k.sx / (k.lam * g1 * k.L) * rel;
+    }
+
+    fn certWindowPerTerm(k: *const Slepian) f64 {
+        const h = 2.0 / @as(f64, GRID);
+        const dmu = h * h * (k.tvpp / 12.0 + k.detamax / 8.0);
+        const dnu = k.eps * h * h * (2.0 * k.etamax / 12.0 + k.etamax / 8.0);
+        return (dmu * (1.0 + 0.5 * k.eps) + 0.5 * dnu) / k.lam;
+    }
+};
+
 // ---------------------------------------------------------------------------
 // Pipeline, generic over the kernel
 // ---------------------------------------------------------------------------
@@ -787,8 +1081,13 @@ pub fn main(init: std.process.Init) !void {
         const kern = try LoganButhe.init(gpa, x, T, cl);
         std.debug.print("logan: c = {d:.2}  eps = {e:.4}  lam = {d:.6}\n", .{ cl, kern.eps, kern.lam });
         try run(LoganButhe, &kern, x, zeros.items, zlos.items, nt, gpa, t_start, t_load);
+    } else if (std.mem.eql(u8, kname, "slepian")) {
+        const cl = if (cset) cpar else 0.5 * @log(@as(f64, @floatFromInt(x))) + 9.0;
+        const kern = try Slepian.init(gpa, x, T, cl);
+        std.debug.print("slepian: c = {d:.2}  eps = {e:.4}  lam = {d:.6}  chi0 = {d:.4}  m2*2/eps^2 = {e:.4}\n", .{ cl, kern.eps, kern.lam, kern.chi0, kern.acorr * 2.0 / (kern.eps * kern.eps) });
+        try run(Slepian, &kern, x, zeros.items, zlos.items, nt, gpa, t_start, t_load);
     } else {
-        std.debug.print("unknown kernel '{s}' (have: gaussian, logan; beurling-selberg planned)\n", .{kname});
+        std.debug.print("unknown kernel '{s}' (have: gaussian, logan, slepian)\n", .{kname});
         std.process.exit(2);
     }
 }
