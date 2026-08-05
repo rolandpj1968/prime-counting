@@ -338,6 +338,9 @@ const LoganButhe = struct {
     tc_lo: f64,
     lo: u64,
     hi: u64,
+    envM: f64, // sup_{u>c} |l_c(u)| u
+    tailI: f64, // int |l_c(u)|/u dens(u/eps) du — cert integrand, true weight
+    l1tail: f64, // int_c^inf |l_c(u)|/u du, two-sided: should equal 4 e^-c
     mu_tab: []f64, // mu(eps*y) on y-grid [-1,0], GRID+1 points
     nu_tab: []f64, // nu(eps*y) likewise
     // measured-in-init bounds for the certified radius (y-units, x1.2 safety):
@@ -409,6 +412,48 @@ const LoganButhe = struct {
             prev_mu = mu;
         }
         const ldd = ddOfF128(ln128(@floatFromInt(x)));
+        // ---- certified-tail integral from the TRUE weight (not its
+        // envelope: the envelope discards the oscillation zeros and is
+        // ~pi/2 loose). Same grid and cushions as Slepian's, so the two
+        // certified tails are like-for-like and extremality is testable.
+        var envM: f64 = 0;
+        var envTail: f64 = 0; // sup over the last octaves: the far-field envelope
+        var l1: f64 = 0;
+        var tailI: f64 = 0;
+        const du = std.math.pi / 256.0; // 8x finer: trapezoid on the concave |sin| arches undershot the exact L1 by 0.8% at pi/32
+        const dens = struct {
+            fn f(t: f64) f64 {
+                return @log(t / (2.0 * std.math.pi)) / (2.0 * std.math.pi);
+            }
+        }.f;
+        var prev_g: f64 = @abs(ell(c, c)) / c;
+        var prev_d: f64 = prev_g * dens(c / eps);
+        var u = c + du;
+        while (u <= 50.0 * c) : (u += du) {
+            const eh = @abs(ell(c, u));
+            envM = @max(envM, eh * u);
+            if (u >= 25.0 * c) envTail = @max(envTail, eh * u);
+            const g = eh / u;
+            const d = g * dens(u / eps);
+            l1 += 0.5 * (prev_g + g) * du;
+            tailI += 0.5 * (prev_d + d) * du;
+            prev_g = g;
+            prev_d = d;
+        }
+        // envM converges to |w(c)|c from below (the sup sits at the band
+        // edge); the 1.2 cushion covers the last ~2% and the sampling.
+        envM *= 1.2;
+        // beyond 50c: |w(u)| <= envM/u, so int_{50c}^inf |w|/u du <= envM/(50c).
+        // WITHOUT this the sampled integral sits 1.3% BELOW Logan's exact
+        // optimum — impossible for an upper bound, and the tell that the
+        // truncation, not the grid or the trig, was the deficit.
+        // the far-field envelope, sampled over [25c, 50c] where |w|u is
+        // already decreasing, bounds |w(u)|u for all u > 50c — 14x tighter
+        // than the near-band peak envM the remainder used before
+        const rem = 1.2 * envTail / (50.0 * c);
+        l1 += rem;
+        tailI += 2.0 * rem * dens(50.0 * c / eps);
+        tailI *= 1.2;
         return .{
             .x = x,
             .xf = xf,
@@ -422,6 +467,9 @@ const LoganButhe = struct {
             .tc_lo = ldd[1],
             .lo = @intFromFloat(xf * @exp(-eps) - 2.0),
             .hi = @intFromFloat(xf * @exp(eps) + 2.0),
+            .envM = envM,
+            .tailI = tailI,
+            .l1tail = 2.0 * l1,
             .mu_tab = mu_tab,
             .nu_tab = nu_tab,
             .etamax = etamax * 1.2,
@@ -527,26 +575,9 @@ const LoganButhe = struct {
     /// the sinh-normalisation IS the e^-c tail. Zero counting via the
     /// Rosser bound |N(t) - M(t)| <= 0.137 ln t + 0.443 lnln t + 4.35.
     fn certTail(k: *const LoganButhe, T: f64) f64 {
-        const norm = k.c / std.math.sinh(k.c);
         const cf = 2.0 * k.sx * 1.3 / (k.lam * k.L);
-        const S = 20000;
-        const ds = 60.0 / @as(f64, S);
-        var acc: f64 = 0;
-        var prev: f64 = 0;
-        var i: usize = 0;
-        while (i <= S) : (i += 1) { // t = T e^s: integrand dies ~ e^-s
-            const t = T * @exp(@as(f64, @floatFromInt(i)) * ds);
-            const w2 = k.eps * k.eps * t * t - k.c * k.c;
-            const env = if (w2 <= 1.0) norm else norm / @sqrt(w2);
-            const dens = @log(t / (2.0 * std.math.pi)) / (2.0 * std.math.pi);
-            const g = cf * env / t * dens * t; // f(t) * dens * dt/ds
-            if (i > 0) acc += 0.5 * (prev + g) * ds;
-            prev = g;
-        }
-        // fluctuation term: f decreasing => |int f dQ| <~ (f(T) + int|f'|) Q
         const qT = 0.137 * @log(T) + 0.443 * @log(@log(T)) + 4.35;
-        acc += 3.0 * qT * cf * norm / T;
-        return acc;
+        return cf * k.tailI + 3.0 * qT * cf * (k.envM / k.c) / T;
     }
 
     /// Coarse bound on the K=13 Ei asymptotic truncation: first omitted
@@ -620,8 +651,9 @@ const Slepian = struct {
     detamax: f64,
     tvpp: f64,
     chi0: f64, // prolate ODE eigenvalue (diagnostic)
-    leak: f64, // coarse bound on 1 - lambda_0 (cert tail)
-    n0sq: f64, // (int psi_0)^2 with psi_0 L2-normalized
+    envM: f64, // sup_{u>c} |eta_hat(u)| u — the L1 envelope constant
+    l1tail: f64, // int_c^inf |eta_hat(u)|/u du (vs Logan's proven 4 e^-c)
+    tailI: f64, // int_c^inf |eta_hat(u)|/u density(u/eps) du — cert integrand
 
     fn init(gpa: std.mem.Allocator, x: u64, T: f64, c: f64) !Slepian {
         const xf: f64 = @floatFromInt(x);
@@ -750,9 +782,50 @@ const Slepian = struct {
         const m2 = 2.0 * m2acc;
         const lam = 2.0 * lamacc;
         const ldd = ddOfF128(ln128(@floatFromInt(x)));
-        // coarse 1-lambda_0 bound: Fuchs-type asymptotic sqrt(c) e^{-2c}
-        // with a x1000 cushion (TODO: tighten from a verified constant)
-        const leak = 1000.0 * @sqrt(c) * @exp(-2.0 * c);
+        // ---- out-of-band envelope, the L1 way. Beyond the band the
+        // self-transform identity no longer holds, so use the exact
+        // Legendre-Bessel continuation. Sampled on a pi/32 grid (the
+        // oscillation period is 2pi) out to 50c: a SAMPLED sup, not a
+        // proven one — flagged in the output. This replaces a Parseval +
+        // Cauchy-Schwarz bound whose 1-lambda_0 ~ e^{-2c} input is below
+        // f64's ability to measure at all, and which therefore carried a
+        // 1000x ignorance cushion (= 32x after the square root).
+        const kmax: usize = 2 * (ne - 1);
+        const jb = try gpa.alloc(f64, kmax + 1);
+        defer gpa.free(jb);
+        var envM: f64 = 0;
+        var envTail: f64 = 0; // sup over the last octaves: the far-field envelope
+        var l1: f64 = 0;
+        var tailI: f64 = 0; // int |eta^(u)|/u * density(u/eps) du — the cert integrand
+        const du = std.math.pi / 256.0; // 8x finer: trapezoid on the concave |sin| arches undershot the exact L1 by 0.8% at pi/32
+        const dens = struct {
+            fn f(t: f64) f64 {
+                return @log(t / (2.0 * std.math.pi)) / (2.0 * std.math.pi);
+            }
+        }.f;
+        var prev_g: f64 = @abs(etaHat(a[0..ne], n0, c, jb)) / c;
+        var prev_d: f64 = prev_g * dens(c / eps);
+        var u = c + du;
+        while (u <= 50.0 * c) : (u += du) {
+            const eh = @abs(etaHat(a[0..ne], n0, u, jb));
+            envM = @max(envM, eh * u);
+            if (u >= 25.0 * c) envTail = @max(envTail, eh * u);
+            const g = eh / u;
+            const d = g * dens(u / eps);
+            l1 += 0.5 * (prev_g + g) * du;
+            tailI += 0.5 * (prev_d + d) * du;
+            prev_g = g;
+            prev_d = d;
+        }
+        envM *= 1.2;
+        // see LoganButhe.init
+        // the far-field envelope, sampled over [25c, 50c] where |w|u is
+        // already decreasing, bounds |w(u)|u for all u > 50c — 14x tighter
+        // than the near-band peak envM the remainder used before
+        const rem = 1.2 * envTail / (50.0 * c);
+        l1 += rem;
+        tailI += 2.0 * rem * dens(50.0 * c / eps);
+        tailI *= 1.2;
         return .{
             .x = x,
             .xf = xf,
@@ -773,9 +846,51 @@ const Slepian = struct {
             .detamax = detamax * 1.2,
             .tvpp = tvpp * 1.2,
             .chi0 = chi0,
-            .leak = leak,
-            .n0sq = n0 * n0,
+            .envM = envM,
+            .l1tail = 2.0 * l1, // both signs of u (Logan's constant is two-sided)
+            .tailI = tailI,
         };
+    }
+
+    /// j_k(t), k = 0..kmax, by downward (Miller) recurrence. Normalized on
+    /// whichever of the analytic j_0, j_1 is larger — they are pi/2 out of
+    /// phase, so this never divides by a near-zero.
+    fn sphBessel(kmax: usize, t: f64, out: []f64) void {
+        @memset(out, 0);
+        var m: usize = kmax + 25 + @as(usize, @intFromFloat(t));
+        var jp: f64 = 0;
+        var j: f64 = 1e-300;
+        while (m > 0) : (m -= 1) {
+            const kf: f64 = @floatFromInt(m);
+            const jm = (2.0 * kf + 1.0) / t * j - jp;
+            jp = j;
+            j = jm;
+            if (m - 1 <= kmax) out[m - 1] = j;
+            if (@abs(j) > 1e200) {
+                jp *= 1e-200;
+                j *= 1e-200;
+                for (out) |*v| v.* *= 1e-200;
+            }
+        }
+        const a0 = @sin(t) / t;
+        const a1 = @sin(t) / (t * t) - @cos(t) / t;
+        const scale = if (@abs(a0) >= @abs(a1)) a0 / out[0] else a1 / out[1];
+        for (out) |*v| v.* *= scale;
+    }
+
+    /// eta_hat(u) for ANY real u, from the exact continuation
+    ///   eta_hat(u) = (1/N0) sum_i a_i sqrt(2i+1/2) 2 (-1)^i j_{2i}(u),
+    /// since int_{-1}^{1} P_k(y) cos(uy) dy = 2 (-1)^{k/2} j_k(u) for even k.
+    /// Validated against direct quadrature in prolate-proto.py (1e-16).
+    fn etaHat(a: []const f64, n0: f64, u: f64, jb: []f64) f64 {
+        sphBessel(jb.len - 1, u, jb);
+        var s: f64 = 0;
+        for (a, 0..) |ai, i| {
+            const k = 2 * i;
+            const sgn: f64 = if (i % 2 == 0) 1.0 else -1.0;
+            s += ai * @sqrt(@as(f64, @floatFromInt(k)) + 0.5) * 2.0 * sgn * jb[k];
+        }
+        return s / n0;
     }
 
     /// eta_hat(t) = psi_0(t/c)/psi_0(0) by self-transform; ln-interp.
@@ -853,15 +968,19 @@ const Slepian = struct {
         return k.acorr * k.xf / (k.L * k.L);
     }
 
-    /// Dropped zeros gamma > T, bounded the L2 way: Parseval puts
-    /// 2 pi (1-lambda_0)/n0^2 of |eta_hat|^2 mass out of band; Cauchy-
-    /// Schwarz against the amplitude factor 2 sqrt(x) 1.3/(g L) whose
-    /// own L2 sum is computable. The natural bound for the L2 kernel.
+    /// Dropped zeros gamma > T, bounded the L1 way — structurally identical
+    /// to Logan's, with |eta_hat(u)| <= envM/u replacing his
+    /// (c/sinh c)/sqrt(u^2-c^2). Like-for-like, so the two certified tails
+    /// differ only through envM vs c/sinh c, and Logan's extremality
+    /// (he minimizes int_{|t|>c}|f(t)/t| dt) says he must win: if this
+    /// ever prints lower than Logan's, the implementation is wrong.
     fn certTail(k: *const Slepian, T: f64) f64 {
-        const dens = @log(T / (2.0 * std.math.pi)) / (2.0 * std.math.pi) * 1.5; // density cushion above T
-        const sum_w2 = dens / k.eps * std.math.pi * k.leak / k.n0sq;
-        const sum_b2 = dens / T; // int_T^inf t^-2 dens dt <= dens/T
-        return 2.0 * k.sx * 1.3 / (k.lam * k.L) * @sqrt(sum_w2) * @sqrt(sum_b2);
+        // substitute u = eps t: sum_{gamma>T} amp |w| <= cf * int_c^inf
+        // |eta^(u)|/u dens(u/eps) du, precomputed as tailI in init from the
+        // TRUE weight (not its envelope — that alone was 4.5x loose).
+        const cf = 2.0 * k.sx * 1.3 / (k.lam * k.L);
+        const qT = 0.137 * @log(T) + 0.443 * @log(@log(T)) + 4.35;
+        return cf * k.tailI + 3.0 * qT * cf * (k.envM / k.c) / T;
     }
 
     fn certSeries(k: *const Slepian, g1: f64, nzeros: f64) f64 {
@@ -1179,7 +1298,8 @@ pub fn main(init: std.process.Init) !void {
         const lx = @log(@as(f64, @floatFromInt(x)));
         const cl = if (cset) cpar else @max(8.0, @max(0.4 * lx - 2.9, 0.625 * lx - 11.3));
         const kern = try LoganButhe.init(gpa, x, T, cl);
-        std.debug.print("logan: c = {d:.2}  eps = {e:.4}  lam = {d:.6}\n", .{ cl, kern.eps, kern.lam });
+        const l1_opt = 2.0 * @log((1.0 + @exp(-cl)) / (1.0 - @exp(-cl)));
+        std.debug.print("logan: c = {d:.2}  eps = {e:.4}  lam = {d:.6}  L1tail = {e:.3} vs proven optimum {e:.3} ({d:.3}x)\n", .{ cl, kern.eps, kern.lam, kern.l1tail, l1_opt, kern.l1tail / l1_opt });
         try run(LoganButhe, &kern, x, zeros.items, zlos.items, nt, gpa, t_start, t_load);
     } else if (std.mem.eql(u8, kname, "slepian")) {
         // e^{-2.3c} tail never binds above 1e14 — the shared floor sets c
@@ -1187,6 +1307,9 @@ pub fn main(init: std.process.Init) !void {
         const cl = if (cset) cpar else @max(8.0, 0.625 * lx - 11.3);
         const kern = try Slepian.init(gpa, x, T, cl);
         std.debug.print("slepian: c = {d:.2}  eps = {e:.4}  lam = {d:.6}  chi0 = {d:.4}  m2*2/eps^2 = {e:.4}\n", .{ cl, kern.eps, kern.lam, kern.chi0, kern.acorr * 2.0 / (kern.eps * kern.eps) });
+        // like-for-like against Logan's proven optimum for the same functional
+        const l1_logan = 2.0 * @log((1.0 + @exp(-cl)) / (1.0 - @exp(-cl)));
+        std.debug.print("slepian: envM = {e:.3} (sampled sup |eta^(u)|u; logan c/sinh c = {e:.3})  L1tail = {e:.3} vs logan {e:.3} ({d:.2}x)\n", .{ kern.envM, cl / std.math.sinh(cl), kern.l1tail, l1_logan, kern.l1tail / l1_logan });
         try run(Slepian, &kern, x, zeros.items, zlos.items, nt, gpa, t_start, t_load);
     } else {
         std.debug.print("unknown kernel '{s}' (have: gaussian, logan, slepian)\n", .{kname});
