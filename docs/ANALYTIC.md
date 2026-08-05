@@ -379,6 +379,25 @@ at 10¹⁵ on the 251M-zero table, both kernels, since window ∝ c makes
 | 12 | −0.0027 | +0.0008 | 3.4× |
 | 13–18 | shared floor ~10⁻⁴ → 10⁻⁵ | | ~1× |
 
+### 10¹⁹, and the price of a certificate
+
+**π(10¹⁹) = 234,057,667,276,344,607 — MATCH**, prolate kernel, rule-chosen
+c = 16.04, residual +5.3×10⁻³, margin 0.4947, **5 h 14 m** on six cores:
+window 3,169,151,969,280 integers (72.4×10⁹ primes) through 64 MB strips,
+against 251M zeros. The c-rule was fitted at 10¹⁵–10¹⁷ and extrapolated a
+full power of ten unseen: predicted 1.7×10⁻², measured 5.3×10⁻³ — right
+order, conservative side. The dual float books read worst-case 1.05×10⁻⁵,
+model RMS 1.02×10⁻⁸, **mixing leverage 1035×** against 1022–1023×
+measured at 10¹⁵ on two different kernels — the incoherence hypothesis
+holding across four powers of ten and a kernel change. Pre-dd that
+certificate column would have read ~40; it reads 10⁻⁵.
+
+The honest gap: R_tail = 2.4×10³ at that c. The empirical rule optimises
+*measured* error, not certified radius — so the run is a MATCH, not a
+proof. The certified rule (below) wants c ≈ 22.3 at 10¹⁹, about 1.4× the
+window: **a certificate costs ~40% more compute, now a measured number
+rather than a guess.**
+
 **Measured decay slopes: Logan ≈ e^(−1.25c), prolate ≈ e^(−2.3c) — the
 predicted 2:1, confirmed in the truncation-dominated regime** (10–40×
 error advantage at equal window). Both kernels then land on a *shared*
