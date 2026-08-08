@@ -5,7 +5,7 @@ const assert = std.debug.assert;
 // zig run --dep rs -Mroot=play2.zig -Mrs=../rangesieve.zig
 const rs = @import("rs");
 
-pub const Counters = struct { n: u64 = 0, x0: u64 = 0, a0: u64 = 0, phi1: u64 = 0, pi: u64 = 0, pi_: u64 = 0, pi__: u64 = 0 };
+pub const Counters = struct { n: u64 = 0, x0: u64 = 0, a0: u64 = 0, phi1: u64 = 0, pi: u64 = 0, pi_: u64 = 0 };
 
 fn phi(x: u64, a: u64, primes: []const u64, c: *Counters) u64 {
     c.n += 1;
@@ -74,26 +74,69 @@ fn phi1pi(x: u64, a: u64, primes: []const u64, pis: []const u64, c: *Counters) u
         return 1;
     }
 
-    if (x <= p_a * p_a) {
-        if (x < pis.len) {
-            c.pi += 1;
-            const pi_x = pis[x];
-            return 1 + pi_x - a;
-        } else if (x != p_a * p_a) {
-            const sqrt_x = isqrt(x);
-            if (sqrt_x < pis.len) {
-                c.pi_ += 1;
-                const pi_sqrt_x = pis[sqrt_x];
-                assert(pi_sqrt_x < a);
-                const pi_x = phi1pi(x, pi_sqrt_x, primes, pis, c) - 1 + pi_sqrt_x;
-                return 1 + pi_x - a;
-            } else {
-                c.pi__ += 1;
-            }
-        }
+    // Could be tighter, but avoids infinite recursion
+    if (x < p_a * p_a) {
+        const pi_x = pi_by_phi1p1(x, primes, pis, c);
+        return 1 + pi_x - a;
     }
 
     return phi1pi(x, a - 1, primes, pis, c) - phi1pi(x / p_a, a - 1, primes, pis, c);
+}
+
+fn pi_by_phi1p1(x: u64, primes: []const u64, pis: []const u64, c: *Counters) u64 {
+    if (x < pis.len) {
+        c.pi += 1;
+        return pis[x];
+    }
+
+    c.pi_ += 1;
+    const sqrt_x = isqrt(x);
+    const pi_sqrt_x = pis[sqrt_x];
+    return phi1pi(x, pi_sqrt_x, primes, pis, c) - 1 + pi_sqrt_x;
+}
+
+fn phil(x: u64, a: u64, primes: []const u64, c: *Counters) u64 {
+    c.n += 1;
+
+    if (x == 0) {
+        c.x0 += 1;
+        return 0;
+    }
+    if (a == 0) {
+        c.a0 += 1;
+        return x;
+    }
+
+    var phi_val = x;
+
+    for (1..(a + 1)) |b| {
+        const p_b = primes[b];
+        phi_val -= phi(x / p_b, b - 1, primes, c);
+    }
+
+    return phi_val;
+}
+
+fn phil1(x: u64, a: u64, primes: []const u64, c: *Counters) u64 {
+    c.n += 1;
+
+    if (x == 0) {
+        c.x0 += 1;
+        return 0;
+    }
+    if (a == 0) {
+        c.a0 += 1;
+        return x;
+    }
+
+    var phi_val = x;
+
+    for (1..(a + 1)) |b| {
+        const p_b = primes[b];
+        phi_val -= phi(x / p_b, b - 1, primes, c);
+    }
+
+    return phi_val;
 }
 
 fn pisToY(gpa: std.mem.Allocator, y: u64, primes: []u64) ![]u64 {
@@ -149,6 +192,8 @@ pub fn main(init: std.process.Init) !void {
 
     // const phi_x_y = phi(x, a, primes, &c);
     // const phi_x_y = phi1(x, a, primes, &c);
+
+    // const phi_x_y = phil(x, a, primes, &c);
 
     const pis = try pisToY(gpa, y, primes);
     defer gpa.free(pis);
