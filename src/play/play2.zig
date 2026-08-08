@@ -220,7 +220,7 @@ pub fn main(init: std.process.Init) !void {
     // const phi_x_y = phi_simple(x, a, primes, pis, &tbl8Bit, &c);
     // const phi_x_y = phi(x, a, primes, &c);
     // const phi_x_y = phi_x0(x, a, primes, &c);
-    const phi_x_y = phi_a_min(x, a, 8, primes, &c);
+    const phi_x_y = phi_a_min(x, a, 16, primes, &c);
 
     const n_f: f64 = @floatFromInt(c.n);
     const x_f: f64 = @floatFromInt(x);
