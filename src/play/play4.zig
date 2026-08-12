@@ -55,6 +55,13 @@ fn phi(x: u64, a: u64, ctx: *const PhiContext) !u64 {
     //     return x - x / 2;
     // }
 
+    if (ctx.opt_memo) {
+        if (ctx.memo.get(xa)) |phi_val| {
+            ctx.c.memo += 1;
+            return phi_val;
+        }
+    }
+
     var b_max = a;
 
     var phi_val = x;
@@ -82,11 +89,6 @@ fn phi(x: u64, a: u64, ctx: *const PhiContext) !u64 {
                     return try phi(x, pi_sqrt_x, ctx) - (a - pi_sqrt_x);
                 }
             }
-
-            // if (ctx.memo.get(xa)) |phi_val| {
-            //     ctx.c.memo += 1;
-            //     return phi_val;
-            // }
 
             if (ctx.opt_cb) {
                 if (x < p_a * p_a * p_a) {
@@ -148,7 +150,9 @@ fn phi(x: u64, a: u64, ctx: *const PhiContext) !u64 {
         phi_val -= try phi(x / p_b, b - 1, ctx);
     }
 
-    // try ctx.memo.put(xa, phi_val);
+    if (ctx.opt_memo) {
+        try ctx.memo.put(xa, phi_val);
+    }
 
     return phi_val;
 }
@@ -224,7 +228,7 @@ pub fn main(init: std.process.Init) !void {
     const pis = try pisToY(gpa, y, primes);
     defer gpa.free(pis);
 
-    const ctx: PhiContext = .{ .primes = primes, .pis = pis, .memo = &memo, .c = &c, .nc = &nc, .opt_phi1 = false, .opt_pi = false, .opt_cb = false, .opt_memo = false };
+    const ctx: PhiContext = .{ .primes = primes, .pis = pis, .memo = &memo, .c = &c, .nc = &nc, .opt_phi1 = false, .opt_pi = false, .opt_cb = false, .opt_memo = true };
     const phi_x_y = try phi(x, a, &ctx);
 
     const n_f: f64 = @floatFromInt(c.n);
