@@ -28,6 +28,13 @@ fn phi(x: u64, a: u64, primes: []const u64, pis: []const u64, c: *Counters) u64 
         return x;
     }
 
+    const p_a = primes[a];
+
+    if (x <= p_a) {
+        c.phi1 += 1;
+        return 1;
+    }
+
     var phi_val = x;
 
     for (1..(a + 1)) |b| {
