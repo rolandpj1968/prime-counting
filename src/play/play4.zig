@@ -5,7 +5,7 @@ const assert = std.debug.assert;
 // zig run --dep rs -Mroot=play4.zig -Mrs=../rangesieve.zig
 const rs = @import("rs");
 
-pub const Counters = struct { n: u64 = 0, x0: u64 = 0, a0: u64 = 0, phi1: u64 = 0, pi: u64 = 0, pi_: u64 = 0 };
+pub const Counters = struct { n: u64 = 0, x0: u64 = 0, a0: u64 = 0, phi1: u64 = 0, pi: u64 = 0, pi_: u64 = 0, cb: u64 = 0 };
 
 pub const NodeKey = struct { x: u64, a: u64 };
 pub const NodeCounts = std.AutoHashMap(NodeKey, u64);
@@ -17,6 +17,15 @@ pub fn isqrt(n: u64) u64 {
     while (x * x > n) x -= 1;
     while ((x + 1) * (x + 1) <= n) x += 1;
     return x;
+}
+
+fn icbrt(x: u64) u64 {
+    if (x == 0) return 0;
+    var r: u64 = @intFromFloat(std.math.pow(f64, @floatFromInt(x), 1.0 / 3.0));
+    if (r == 0) r = 1;
+    while (r * r * r > x) r -= 1;
+    while ((r + 1) * (r + 1) * (r + 1) <= x) r += 1;
+    return r;
 }
 
 fn phi(x: u64, a: u64, primes: []const u64, pis: []const u64, c: *Counters, nc: *NodeCounts) !u64 {
@@ -51,6 +60,7 @@ fn phi(x: u64, a: u64, primes: []const u64, pis: []const u64, c: *Counters, nc: 
         assert(x > p_a);
         const sqrt_x = isqrt(x);
         const pi_sqrt_x = pis[sqrt_x];
+        assert(pi_sqrt_x < a);
         if (x < pis.len) {
             c.pi += 1;
             return pis[x] - a + 1;
@@ -60,9 +70,29 @@ fn phi(x: u64, a: u64, primes: []const u64, pis: []const u64, c: *Counters, nc: 
         }
     }
 
+    var b_max = a;
+
     var phi_val = x;
 
-    for (1..(a + 1)) |b| {
+    if (x < p_a * p_a * p_a) {
+        c.cb += 1;
+        assert(x >= p_a * p_a);
+        const cbrt_x = icbrt(x);
+        const pi_cbrt_x = pis[cbrt_x];
+        assert(pi_cbrt_x < a);
+
+        // Brokken... but good fun
+        // phi_val += ((a - pi_cbrt_x) * (a - pi_cbrt_x + 1)) / 2;
+
+        for ((pi_cbrt_x + 1)..(a + 1)) |b| {
+            const p_b = primes[b];
+            phi_val -= try phi(x / p_b, pi_cbrt_x, primes, pis, c, nc) - (b - pi_cbrt_x - 1);
+        }
+
+        b_max = pi_cbrt_x;
+    }
+
+    for (1..(b_max + 1)) |b| {
         const p_b = primes[b];
         phi_val -= try phi(x / p_b, b - 1, primes, pis, c, nc);
     }
