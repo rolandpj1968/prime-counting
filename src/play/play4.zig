@@ -5,10 +5,11 @@ const assert = std.debug.assert;
 // zig run --dep rs -Mroot=play4.zig -Mrs=../rangesieve.zig
 const rs = @import("rs");
 
-pub const Counters = struct { n: u64 = 0, x0: u64 = 0, a0: u64 = 0, phi1: u64 = 0, pi: u64 = 0, pi_: u64 = 0, cb: u64 = 0 };
+pub const Counters = struct { n: u64 = 0, x0: u64 = 0, a0: u64 = 0, phi1: u64 = 0, pi: u64 = 0, pi_: u64 = 0, cb: u64 = 0, cb_: u64 = 0, memo: u64 = 0 };
 
 pub const NodeKey = struct { x: u64, a: u64 };
 pub const NodeCounts = std.AutoHashMap(NodeKey, u64);
+pub const NodeMemo = std.AutoHashMap(NodeKey, u64);
 
 /// floor(sqrt(n)), exact for u64.
 pub fn isqrt(n: u64) u64 {
@@ -28,7 +29,7 @@ fn icbrt(x: u64) u64 {
     return r;
 }
 
-fn phi(x: u64, a: u64, primes: []const u64, pis: []const u64, c: *Counters, nc: *NodeCounts) !u64 {
+fn phi(x: u64, a: u64, primes: []const u64, pis: []const u64, memo: *NodeMemo, c: *Counters, nc: *NodeCounts) !u64 {
     c.n += 1;
 
     const xa = NodeKey{ .x = x, .a = a };
@@ -54,8 +55,6 @@ fn phi(x: u64, a: u64, primes: []const u64, pis: []const u64, c: *Counters, nc: 
         return 1;
     }
 
-    // var b_lim = a;
-
     if (x < p_a * p_a) {
         assert(x > p_a);
         const sqrt_x = isqrt(x);
@@ -66,8 +65,13 @@ fn phi(x: u64, a: u64, primes: []const u64, pis: []const u64, c: *Counters, nc: 
             return pis[x] - a + 1;
         } else {
             c.pi_ += 1;
-            return try phi(x, pi_sqrt_x, primes, pis, c, nc) - (a - pi_sqrt_x);
+            return try phi(x, pi_sqrt_x, primes, pis, memo, c, nc) - (a - pi_sqrt_x);
         }
+    }
+
+    if (memo.get(xa)) |phi_val| {
+        c.memo += 1;
+        return phi_val;
     }
 
     var b_max = a;
@@ -81,12 +85,19 @@ fn phi(x: u64, a: u64, primes: []const u64, pis: []const u64, c: *Counters, nc: 
         const pi_cbrt_x = pis[cbrt_x];
         assert(pi_cbrt_x < a);
 
-        // Brokken... but good fun
-        // phi_val += ((a - pi_cbrt_x) * (a - pi_cbrt_x + 1)) / 2;
+        const n_lim = a - (pi_cbrt_x + 1);
+        phi_val += (n_lim * (n_lim + 1)) / 2;
 
+        const p_pi_cbrt_x = primes[pi_cbrt_x];
+        var x_o_p_bm1: u64 = 0;
         for ((pi_cbrt_x + 1)..(a + 1)) |b| {
             const p_b = primes[b];
-            phi_val -= try phi(x / p_b, pi_cbrt_x, primes, pis, c, nc) - (b - pi_cbrt_x - 1);
+            const x_o_p_b = x / p_b;
+            if (x_o_p_b / p_pi_cbrt_x == x_o_p_bm1 / p_pi_cbrt_x) {
+                c.cb_ += 1;
+            }
+            phi_val -= try phi(x / p_b, pi_cbrt_x, primes, pis, memo, c, nc);
+            x_o_p_bm1 = x_o_p_b;
         }
 
         b_max = pi_cbrt_x;
@@ -94,8 +105,10 @@ fn phi(x: u64, a: u64, primes: []const u64, pis: []const u64, c: *Counters, nc: 
 
     for (1..(b_max + 1)) |b| {
         const p_b = primes[b];
-        phi_val -= try phi(x / p_b, b - 1, primes, pis, c, nc);
+        phi_val -= try phi(x / p_b, b - 1, primes, pis, memo, c, nc);
     }
+
+    try memo.put(xa, phi_val);
 
     return phi_val;
 }
@@ -147,6 +160,9 @@ pub fn main(init: std.process.Init) !void {
     primes[0] = 1;
     @memcpy(primes[1..], primes_tmp);
 
+    var memo = std.AutoHashMap(NodeKey, u64).init(gpa);
+    defer memo.deinit();
+
     const a = primes.len - 1;
 
     var c = Counters{};
@@ -156,12 +172,12 @@ pub fn main(init: std.process.Init) !void {
     const pis = try pisToY(gpa, y, primes);
     defer gpa.free(pis);
 
-    const phi_x_y = try phi(x, a, primes, pis, &c, &nc);
+    const phi_x_y = try phi(x, a, primes, pis, &memo, &c, &nc);
 
     const n_f: f64 = @floatFromInt(c.n);
     const x_f: f64 = @floatFromInt(x);
     const ln_n: f64 = @log(n_f);
     const ln_x = @log(x_f);
 
-    std.debug.print("x: {d:>12} | y: {d:>6} ------ nodes/x: {d:>7.4} ln: {d:5.3} ------- phi(x,y): {d:>12} | {any} | nc: {d:>12}\n", .{ x, y, n_f / x_f, ln_n / ln_x, phi_x_y, c, nc.count() });
+    std.debug.print("x: {d:>12} | y: {d:>6} ------ nodes/x: {d:>7.4} ln: {d:5.3} ------- phi(x,y): {d:>12} | {any} | nc: {d:>12} | mc: {d:>12}\n", .{ x, y, n_f / x_f, ln_n / ln_x, phi_x_y, c, nc.count(), memo.count() });
 }
