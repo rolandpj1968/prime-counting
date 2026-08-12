@@ -5,9 +5,10 @@ const assert = std.debug.assert;
 // zig run --dep rs -Mroot=play4.zig -Mrs=../rangesieve.zig
 const rs = @import("rs");
 
-pub const Counters = struct { n: u64 = 0, x0: u64 = 0, a0: u64 = 0, phi1: u64 = 0, pi: u64 = 0, pi_: u64 = 0, cb: u64 = 0, cb_: u64 = 0, memo: u64 = 0 };
+pub const Counters = struct { n: u64 = 0, x0: u64 = 0, a0: u64 = 0, a1: u64 = 0, phi1: u64 = 0, pi: u64 = 0, pi_: u64 = 0, cb: u64 = 0, cb_: u64 = 0, memo: u64 = 0 };
 
 pub const NodeKey = struct { x: u64, a: u64 };
+
 pub const NodeCounts = std.AutoHashMap(NodeKey, u64);
 pub const NodeMemo = std.AutoHashMap(NodeKey, u64);
 
@@ -46,6 +47,10 @@ fn phi(x: u64, a: u64, primes: []const u64, pis: []const u64, memo: *NodeMemo, c
     if (a == 0) {
         c.a0 += 1;
         return x;
+    }
+    if (a == 1) {
+        c.a1 += 1;
+        return x - x / 2;
     }
 
     const p_a = primes[a];
@@ -103,7 +108,11 @@ fn phi(x: u64, a: u64, primes: []const u64, pis: []const u64, memo: *NodeMemo, c
         b_max = pi_cbrt_x;
     }
 
-    for (1..(b_max + 1)) |b| {
+    assert(b_max >= 1);
+
+    phi_val -= x / 2;
+
+    for (2..(b_max + 1)) |b| {
         const p_b = primes[b];
         phi_val -= try phi(x / p_b, b - 1, primes, pis, memo, c, nc);
     }
@@ -126,6 +135,18 @@ fn pisToY(gpa: std.mem.Allocator, y: u64, primes: []u64) ![]u64 {
         pis[i] = pi;
     }
     return pis;
+}
+
+const NodeCountPair = struct {
+    xa: NodeKey,
+    count: u64,
+};
+
+fn lessThanByNodeCountPair(_: void, lhs: NodeCountPair, rhs: NodeCountPair) bool {
+    if (lhs.xa.x != rhs.xa.x) {
+        return lhs.xa.x < rhs.xa.x;
+    }
+    return lhs.xa.a < rhs.xa.a;
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -180,4 +201,30 @@ pub fn main(init: std.process.Init) !void {
     const ln_x = @log(x_f);
 
     std.debug.print("x: {d:>12} | y: {d:>6} ------ nodes/x: {d:>7.4} ln: {d:5.3} ------- phi(x,y): {d:>12} | {any} | nc: {d:>12} | mc: {d:>12}\n", .{ x, y, n_f / x_f, ln_n / ln_x, phi_x_y, c, nc.count(), memo.count() });
+
+    // var ncs = std.ArrayList(NodeCountPair).empty;
+    // defer ncs.deinit(gpa);
+
+    // var it1 = nc.iterator();
+    // while (it1.next()) |kv| {
+    //     const xa = kv.key_ptr.*;
+    //     const count = kv.value_ptr.*;
+    //     try ncs.append(
+    //         gpa,
+    //         .{
+    //             .xa = xa,
+    //             .count = count,
+    //         },
+    //     );
+    // }
+
+    // std.sort.block(NodeCountPair, ncs.items, {}, lessThanByNodeCountPair);
+
+    // for (ncs.items) |xac| {
+    //     const xa = xac.xa;
+    //     const count = xac.count;
+    //     std.debug.print("    x: {d:>12} | a: {d:>6}    --x-- {d:>6}\n", .{ xa.x, xa.a, count });
+    // }
+    // std.debug.print("\n\n", .{});
+    // std.debug.print("Nodes: \n", .{});
 }
