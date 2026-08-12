@@ -30,7 +30,7 @@ fn icbrt(x: u64) u64 {
     return r;
 }
 
-pub const PhiContext = struct { primes: []const u64, pis: []const u64, memo: *NodeMemo, c: *Counters, nc: *NodeCounts, opt_phi1: bool, opt_pi: bool, opt_cb: bool, opt_memo: bool };
+pub const PhiContext = struct { primes: []const u64, pis: []const u64, memo: *NodeMemo, c: *Counters, nc: *NodeCounts, opt_phi1: bool, opt_pi: bool, opt_pi_cache: bool, opt_cb: bool, opt_cb_invert: bool, opt_memo: bool };
 
 fn phi(x: u64, a: u64, ctx: *const PhiContext) !u64 {
     ctx.c.n += 1;
@@ -80,7 +80,7 @@ fn phi(x: u64, a: u64, ctx: *const PhiContext) !u64 {
                 const sqrt_x = isqrt(x);
                 const pi_sqrt_x = ctx.pis[sqrt_x];
                 assert(pi_sqrt_x < a);
-                if (x < ctx.pis.len) {
+                if (ctx.opt_pi_cache and x < ctx.pis.len) {
                     ctx.c.pi += 1;
                     // pi's are just special-case phi memo-isation
                     return ctx.pis[x] - a + 1;
@@ -101,37 +101,39 @@ fn phi(x: u64, a: u64, ctx: *const PhiContext) !u64 {
                     const n_lim = a - (pi_cbrt_x + 1);
                     phi_val += (n_lim * (n_lim + 1)) / 2;
 
-                    // const p_pi_cbrt_x = ctx.primes[pi_cbrt_x];
-                    // var x_o_p_bm1: u64 = 0;
-                    // for ((pi_cbrt_x + 1)..(a + 1)) |b| {
-                    //     const p_b = ctx.primes[b];
-                    //     const x_o_p_b = x / p_b;
-                    //     if (x_o_p_b / p_pi_cbrt_x == x_o_p_bm1 / p_pi_cbrt_x) {
-                    //         ctx.c.cb_ += 1;
-                    //     }
-                    //     phi_val -= try phi(x / p_b, pi_cbrt_x, ctx);
-                    //     x_o_p_bm1 = x_o_p_b;
-                    // }
+                    if (ctx.opt_cb_invert) {
+                        // Inverted loop, collecting common grandchildren together.
+                        for ((pi_cbrt_x + 1)..(a + 1)) |b| {
+                            const p_b = ctx.primes[b];
+                            phi_val -= x / p_b;
+                        }
+                        for (1..(pi_cbrt_x + 1)) |d| {
+                            const p_d = ctx.primes[d];
 
-                    // Inverted loop, collecting common grandchildren together.
-                    for ((pi_cbrt_x + 1)..(a + 1)) |b| {
-                        const p_b = ctx.primes[b];
-                        phi_val -= x / p_b;
-                    }
-                    for (1..(pi_cbrt_x + 1)) |d| {
-                        const p_d = ctx.primes[d];
+                            var x_o_p_bm1: u64 = 0;
+                            var phi_val_last: u64 = 0;
+                            for ((pi_cbrt_x + 1)..(a + 1)) |b| {
+                                const p_b = ctx.primes[b];
+                                const x_o_p_b = x / p_b;
 
+                                if (x_o_p_bm1 == 0 or x_o_p_bm1 / p_d != x_o_p_b / p_d) {
+                                    phi_val_last = try phi(x_o_p_b / p_d, d - 1, ctx);
+                                }
+                                phi_val += phi_val_last;
+
+                                x_o_p_bm1 = x_o_p_b;
+                            }
+                        }
+                    } else {
+                        const p_pi_cbrt_x = ctx.primes[pi_cbrt_x];
                         var x_o_p_bm1: u64 = 0;
-                        var phi_val_last: u64 = 0;
                         for ((pi_cbrt_x + 1)..(a + 1)) |b| {
                             const p_b = ctx.primes[b];
                             const x_o_p_b = x / p_b;
-
-                            if (x_o_p_bm1 == 0 or x_o_p_bm1 / p_d != x_o_p_b / p_d) {
-                                phi_val_last = try phi(x_o_p_b / p_d, d - 1, ctx);
+                            if (x_o_p_b / p_pi_cbrt_x == x_o_p_bm1 / p_pi_cbrt_x) {
+                                ctx.c.cb_ += 1;
                             }
-                            phi_val += phi_val_last;
-
+                            phi_val -= try phi(x / p_b, pi_cbrt_x, ctx);
                             x_o_p_bm1 = x_o_p_b;
                         }
                     }
@@ -228,7 +230,7 @@ pub fn main(init: std.process.Init) !void {
     const pis = try pisToY(gpa, y, primes);
     defer gpa.free(pis);
 
-    const ctx: PhiContext = .{ .primes = primes, .pis = pis, .memo = &memo, .c = &c, .nc = &nc, .opt_phi1 = false, .opt_pi = false, .opt_cb = false, .opt_memo = true };
+    const ctx: PhiContext = .{ .primes = primes, .pis = pis, .memo = &memo, .c = &c, .nc = &nc, .opt_phi1 = true, .opt_pi = true, .opt_pi_cache = false, .opt_cb = true, .opt_cb_invert = false, .opt_memo = false };
     const phi_x_y = try phi(x, a, &ctx);
 
     const n_f: f64 = @floatFromInt(c.n);
