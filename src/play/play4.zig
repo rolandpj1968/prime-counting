@@ -93,16 +93,39 @@ fn phi(x: u64, a: u64, primes: []const u64, pis: []const u64, memo: *NodeMemo, c
         const n_lim = a - (pi_cbrt_x + 1);
         phi_val += (n_lim * (n_lim + 1)) / 2;
 
-        const p_pi_cbrt_x = primes[pi_cbrt_x];
-        var x_o_p_bm1: u64 = 0;
+        // const p_pi_cbrt_x = primes[pi_cbrt_x];
+        // var x_o_p_bm1: u64 = 0;
+        // for ((pi_cbrt_x + 1)..(a + 1)) |b| {
+        //     const p_b = primes[b];
+        //     const x_o_p_b = x / p_b;
+        //     if (x_o_p_b / p_pi_cbrt_x == x_o_p_bm1 / p_pi_cbrt_x) {
+        //         c.cb_ += 1;
+        //     }
+        //     phi_val -= try phi(x / p_b, pi_cbrt_x, primes, pis, memo, c, nc);
+        //     x_o_p_bm1 = x_o_p_b;
+        // }
+
+        // Inverted loop, collecting common grandchildren together.
         for ((pi_cbrt_x + 1)..(a + 1)) |b| {
             const p_b = primes[b];
-            const x_o_p_b = x / p_b;
-            if (x_o_p_b / p_pi_cbrt_x == x_o_p_bm1 / p_pi_cbrt_x) {
-                c.cb_ += 1;
+            phi_val -= x / p_b;
+        }
+        for (1..(pi_cbrt_x + 1)) |d| {
+            const p_d = primes[d];
+
+            var x_o_p_bm1: u64 = 0;
+            var phi_val_last: u64 = 0;
+            for ((pi_cbrt_x + 1)..(a + 1)) |b| {
+                const p_b = primes[b];
+                const x_o_p_b = x / p_b;
+
+                if (x_o_p_bm1 == 0 or x_o_p_bm1 / p_d != x_o_p_b / p_d) {
+                    phi_val_last = try phi(x_o_p_b / p_d, d - 1, primes, pis, memo, c, nc);
+                }
+                phi_val += phi_val_last;
+
+                x_o_p_bm1 = x_o_p_b;
             }
-            phi_val -= try phi(x / p_b, pi_cbrt_x, primes, pis, memo, c, nc);
-            x_o_p_bm1 = x_o_p_b;
         }
 
         b_max = pi_cbrt_x;
