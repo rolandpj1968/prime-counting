@@ -30,117 +30,125 @@ fn icbrt(x: u64) u64 {
     return r;
 }
 
-fn phi(x: u64, a: u64, primes: []const u64, pis: []const u64, memo: *NodeMemo, c: *Counters, nc: *NodeCounts) !u64 {
-    c.n += 1;
+pub const PhiContext = struct { primes: []const u64, pis: []const u64, memo: *NodeMemo, c: *Counters, nc: *NodeCounts, opt_phi1: bool, opt_pi: bool, opt_cb: bool, opt_memo: bool };
+
+fn phi(x: u64, a: u64, ctx: *const PhiContext) !u64 {
+    ctx.c.n += 1;
 
     const xa = NodeKey{ .x = x, .a = a };
-    const result = try nc.getOrPut(xa);
+    const result = try ctx.nc.getOrPut(xa);
     if (!result.found_existing) {
         result.value_ptr.* = 0;
     }
     result.value_ptr.* += 1;
 
     if (x == 0) {
-        c.x0 += 1;
+        ctx.c.x0 += 1;
         return 0;
     }
     if (a == 0) {
-        c.a0 += 1;
+        ctx.c.a0 += 1;
         return x;
     }
-    if (a == 1) {
-        c.a1 += 1;
-        return x - x / 2;
-    }
-
-    const p_a = primes[a];
-
-    if (x <= p_a) {
-        c.phi1 += 1;
-        return 1;
-    }
-
-    if (x < p_a * p_a) {
-        assert(x > p_a);
-        const sqrt_x = isqrt(x);
-        const pi_sqrt_x = pis[sqrt_x];
-        assert(pi_sqrt_x < a);
-        if (x < pis.len) {
-            c.pi += 1;
-            return pis[x] - a + 1;
-        } else {
-            c.pi_ += 1;
-            return try phi(x, pi_sqrt_x, primes, pis, memo, c, nc) - (a - pi_sqrt_x);
-        }
-    }
-
-    if (memo.get(xa)) |phi_val| {
-        c.memo += 1;
-        return phi_val;
-    }
+    // if (a == 1) {
+    //     ctx.c.a1 += 1;
+    //     return x - x / 2;
+    // }
 
     var b_max = a;
 
     var phi_val = x;
 
-    if (x < p_a * p_a * p_a) {
-        c.cb += 1;
-        assert(x >= p_a * p_a);
-        const cbrt_x = icbrt(x);
-        const pi_cbrt_x = pis[cbrt_x];
-        assert(pi_cbrt_x < a);
+    if (ctx.opt_phi1) {
+        const p_a = ctx.primes[a];
 
-        const n_lim = a - (pi_cbrt_x + 1);
-        phi_val += (n_lim * (n_lim + 1)) / 2;
-
-        // const p_pi_cbrt_x = primes[pi_cbrt_x];
-        // var x_o_p_bm1: u64 = 0;
-        // for ((pi_cbrt_x + 1)..(a + 1)) |b| {
-        //     const p_b = primes[b];
-        //     const x_o_p_b = x / p_b;
-        //     if (x_o_p_b / p_pi_cbrt_x == x_o_p_bm1 / p_pi_cbrt_x) {
-        //         c.cb_ += 1;
-        //     }
-        //     phi_val -= try phi(x / p_b, pi_cbrt_x, primes, pis, memo, c, nc);
-        //     x_o_p_bm1 = x_o_p_b;
-        // }
-
-        // Inverted loop, collecting common grandchildren together.
-        for ((pi_cbrt_x + 1)..(a + 1)) |b| {
-            const p_b = primes[b];
-            phi_val -= x / p_b;
+        if (x <= p_a) {
+            ctx.c.phi1 += 1;
+            return 1;
         }
-        for (1..(pi_cbrt_x + 1)) |d| {
-            const p_d = primes[d];
 
-            var x_o_p_bm1: u64 = 0;
-            var phi_val_last: u64 = 0;
-            for ((pi_cbrt_x + 1)..(a + 1)) |b| {
-                const p_b = primes[b];
-                const x_o_p_b = x / p_b;
-
-                if (x_o_p_bm1 == 0 or x_o_p_bm1 / p_d != x_o_p_b / p_d) {
-                    phi_val_last = try phi(x_o_p_b / p_d, d - 1, primes, pis, memo, c, nc);
+        if (ctx.opt_pi) {
+            if (x < p_a * p_a) {
+                assert(x > p_a);
+                const sqrt_x = isqrt(x);
+                const pi_sqrt_x = ctx.pis[sqrt_x];
+                assert(pi_sqrt_x < a);
+                if (x < ctx.pis.len) {
+                    ctx.c.pi += 1;
+                    // pi's are just special-case phi memo-isation
+                    return ctx.pis[x] - a + 1;
+                } else {
+                    ctx.c.pi_ += 1;
+                    return try phi(x, pi_sqrt_x, ctx) - (a - pi_sqrt_x);
                 }
-                phi_val += phi_val_last;
+            }
 
-                x_o_p_bm1 = x_o_p_b;
+            // if (ctx.memo.get(xa)) |phi_val| {
+            //     ctx.c.memo += 1;
+            //     return phi_val;
+            // }
+
+            if (ctx.opt_cb) {
+                if (x < p_a * p_a * p_a) {
+                    ctx.c.cb += 1;
+                    assert(x >= p_a * p_a);
+                    const cbrt_x = icbrt(x);
+                    const pi_cbrt_x = ctx.pis[cbrt_x];
+                    assert(pi_cbrt_x < a);
+
+                    const n_lim = a - (pi_cbrt_x + 1);
+                    phi_val += (n_lim * (n_lim + 1)) / 2;
+
+                    // const p_pi_cbrt_x = ctx.primes[pi_cbrt_x];
+                    // var x_o_p_bm1: u64 = 0;
+                    // for ((pi_cbrt_x + 1)..(a + 1)) |b| {
+                    //     const p_b = ctx.primes[b];
+                    //     const x_o_p_b = x / p_b;
+                    //     if (x_o_p_b / p_pi_cbrt_x == x_o_p_bm1 / p_pi_cbrt_x) {
+                    //         ctx.c.cb_ += 1;
+                    //     }
+                    //     phi_val -= try phi(x / p_b, pi_cbrt_x, ctx);
+                    //     x_o_p_bm1 = x_o_p_b;
+                    // }
+
+                    // Inverted loop, collecting common grandchildren together.
+                    for ((pi_cbrt_x + 1)..(a + 1)) |b| {
+                        const p_b = ctx.primes[b];
+                        phi_val -= x / p_b;
+                    }
+                    for (1..(pi_cbrt_x + 1)) |d| {
+                        const p_d = ctx.primes[d];
+
+                        var x_o_p_bm1: u64 = 0;
+                        var phi_val_last: u64 = 0;
+                        for ((pi_cbrt_x + 1)..(a + 1)) |b| {
+                            const p_b = ctx.primes[b];
+                            const x_o_p_b = x / p_b;
+
+                            if (x_o_p_bm1 == 0 or x_o_p_bm1 / p_d != x_o_p_b / p_d) {
+                                phi_val_last = try phi(x_o_p_b / p_d, d - 1, ctx);
+                            }
+                            phi_val += phi_val_last;
+
+                            x_o_p_bm1 = x_o_p_b;
+                        }
+                    }
+
+                    b_max = pi_cbrt_x;
+                }
             }
         }
-
-        b_max = pi_cbrt_x;
     }
 
-    assert(b_max >= 1);
+    // assert(b_max >= 1);
+    // phi_val -= x / 2;
 
-    phi_val -= x / 2;
-
-    for (2..(b_max + 1)) |b| {
-        const p_b = primes[b];
-        phi_val -= try phi(x / p_b, b - 1, primes, pis, memo, c, nc);
+    for (1..(b_max + 1)) |b| {
+        const p_b = ctx.primes[b];
+        phi_val -= try phi(x / p_b, b - 1, ctx);
     }
 
-    try memo.put(xa, phi_val);
+    // try ctx.memo.put(xa, phi_val);
 
     return phi_val;
 }
@@ -216,7 +224,8 @@ pub fn main(init: std.process.Init) !void {
     const pis = try pisToY(gpa, y, primes);
     defer gpa.free(pis);
 
-    const phi_x_y = try phi(x, a, primes, pis, &memo, &c, &nc);
+    const ctx: PhiContext = .{ .primes = primes, .pis = pis, .memo = &memo, .c = &c, .nc = &nc, .opt_phi1 = false, .opt_pi = false, .opt_cb = false, .opt_memo = false };
+    const phi_x_y = try phi(x, a, &ctx);
 
     const n_f: f64 = @floatFromInt(c.n);
     const x_f: f64 = @floatFromInt(x);
