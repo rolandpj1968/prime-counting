@@ -111,13 +111,13 @@ fn phil(x: u64, a: u64, primes: []const u64, c: *Counters) u64 {
 
     for (1..(a + 1)) |b| {
         const p_b = primes[b];
-        phi_val -= phi(x / p_b, b - 1, primes, c);
+        phi_val -= phil(x / p_b, b - 1, primes, c);
     }
 
     return phi_val;
 }
 
-fn phil1(x: u64, a: u64, primes: []const u64, c: *Counters) u64 {
+fn phil1(x: u64, a: u64, primes: []const u64, pis: []const u64, c: *Counters) u64 {
     c.n += 1;
 
     if (x == 0) {
@@ -130,13 +130,60 @@ fn phil1(x: u64, a: u64, primes: []const u64, c: *Counters) u64 {
     }
 
     var phi_val = x;
+    // std.debug.print("x: {d:>4} | phi_val: {d:>4} - just x\n", .{ x, phi_val });
+    var max_b = a;
+    const p_a = primes[a];
 
-    for (1..(a + 1)) |b| {
+    if (x <= p_a) {
+        c.phi1 += 1;
+        return 1;
+        // const pi_x, _ = pis_by_phil1(x, primes, pis, c);
+        // std.debug.print("    x: {d:>4} | a: {d:>4} | p_a: {d:>4} | pi_x: {d:>4}\n", .{ x, a, p_a, pi_x });
+        // assert(pi_x < a);
+        // phi_val -= a - pi_x;
+        // max_b = pi_x;
+    }
+
+    const p_am1 = primes[a - 1]; // a > 0
+    if (x <= p_a * p_am1) {
+        _, const pi_sqrt_x = pis_by_phil1(x, primes, pis, c);
+        // std.debug.print("    x: {d:>4} | a: {d:>4} | p_a: {d:>4} | pi_x: {d:>4}\n", .{ x, a, p_a, pi_x });
+        assert(pi_sqrt_x < a);
+        phi_val -= a - pi_sqrt_x;
+        max_b = pi_sqrt_x;
+    }
+
+    // std.debug.print("x: {d:>4} | phi_val: {d:>4} - after 1's elim\n", .{ x, phi_val });
+
+    for (1..(max_b + 1)) |b| {
         const p_b = primes[b];
-        phi_val -= phi(x / p_b, b - 1, primes, c);
+        phi_val -= phil1(x / p_b, b - 1, primes, pis, c);
+        // std.debug.print("x: {d:>4} | phi_val: {d:>4} - after p_b = {d:>4} elim\n", .{ x, phi_val, p_b });
     }
 
     return phi_val;
+}
+
+fn pis_by_phil1(x: u64, primes: []const u64, pis: []const u64, c: *Counters) struct { u64, u64 } {
+    const sqrt_x = isqrt(x);
+    var pi_sqrt_x: u64 = 0;
+    if (sqrt_x < pis.len) {
+        pi_sqrt_x = pis[sqrt_x];
+    } else {
+        c.pi_ += 1;
+        pi_sqrt_x, _ = pis_by_phil1(sqrt_x, primes, pis, c);
+    }
+
+    var pi_x: u64 = 0;
+    if (x < pis.len) {
+        c.pi += 1;
+        pi_x = pis[x];
+    } else {
+        c.pi_ += 1;
+        pi_x = phil1(x, pi_sqrt_x, primes, pis, c) - 1 + pi_sqrt_x;
+    }
+
+    return .{ pi_x, pi_sqrt_x };
 }
 
 fn pisToY(gpa: std.mem.Allocator, y: u64, primes: []u64) ![]u64 {
@@ -198,7 +245,8 @@ pub fn main(init: std.process.Init) !void {
     const pis = try pisToY(gpa, y, primes);
     defer gpa.free(pis);
 
-    const phi_x_y = phi1pi(x, a, primes, pis, &c);
+    // const phi_x_y = phi1pi(x, a, primes, pis, &c);
+    const phi_x_y = phil1(x, a, primes, pis, &c);
 
     const n_f: f64 = @floatFromInt(c.n);
     const x_f: f64 = @floatFromInt(x);
