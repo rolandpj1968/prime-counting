@@ -51,7 +51,13 @@ fn phi(x: u64, a: u64, primes: []const u64, pis: []const u64, c: *Counters, nc: 
         assert(x > p_a);
         const sqrt_x = isqrt(x);
         const pi_sqrt_x = pis[sqrt_x];
-        return try phi(x, pi_sqrt_x, primes, pis, c, nc) - (a - pi_sqrt_x);
+        if (x < pis.len) {
+            c.pi += 1;
+            return pis[x] - a + 1;
+        } else {
+            c.pi_ += 1;
+            return try phi(x, pi_sqrt_x, primes, pis, c, nc) - (a - pi_sqrt_x);
+        }
     }
 
     var phi_val = x;
