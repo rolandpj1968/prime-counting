@@ -30,7 +30,7 @@ fn icbrt(x: u64) u64 {
     return r;
 }
 
-pub const PhiContext = struct { primes: []const u64, pis: []const u64, memo: *NodeMemo, c: *Counters, nc: *NodeCounts, opt_phi1: bool, opt_pi: bool, opt_pi_cache: bool, opt_cb: bool, opt_cb_invert: bool, opt_memo: bool };
+pub const PhiContext = struct { primes: []const u64, pis: []const u64, memo: *NodeMemo, memo_x_limit: u64, c: *Counters, nc: *NodeCounts, opt_phi1: bool, opt_pi: bool, opt_pi_cache: bool, opt_cb: bool, opt_cb_invert: bool, opt_memo: bool };
 
 fn phi(x: u64, a: u64, ctx: *const PhiContext) !u64 {
     ctx.c.n += 1;
@@ -55,7 +55,7 @@ fn phi(x: u64, a: u64, ctx: *const PhiContext) !u64 {
     //     return x - x / 2;
     // }
 
-    if (ctx.opt_memo) {
+    if (ctx.opt_memo and x < ctx.memo_x_limit) {
         if (ctx.memo.get(xa)) |phi_val| {
             ctx.c.memo += 1;
             return phi_val;
@@ -152,7 +152,7 @@ fn phi(x: u64, a: u64, ctx: *const PhiContext) !u64 {
         phi_val -= try phi(x / p_b, b - 1, ctx);
     }
 
-    if (ctx.opt_memo) {
+    if (ctx.opt_memo and x < ctx.memo_x_limit) {
         try ctx.memo.put(xa, phi_val);
     }
 
@@ -230,7 +230,7 @@ pub fn main(init: std.process.Init) !void {
     const pis = try pisToY(gpa, y, primes);
     defer gpa.free(pis);
 
-    const ctx: PhiContext = .{ .primes = primes, .pis = pis, .memo = &memo, .c = &c, .nc = &nc, .opt_phi1 = true, .opt_pi = true, .opt_pi_cache = false, .opt_cb = true, .opt_cb_invert = false, .opt_memo = false };
+    const ctx: PhiContext = .{ .primes = primes, .pis = pis, .memo = &memo, .memo_x_limit = y, .c = &c, .nc = &nc, .opt_phi1 = true, .opt_pi = true, .opt_pi_cache = false, .opt_cb = true, .opt_cb_invert = false, .opt_memo = false };
     const phi_x_y = try phi(x, a, &ctx);
 
     const n_f: f64 = @floatFromInt(c.n);
