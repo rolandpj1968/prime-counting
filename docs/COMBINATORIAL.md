@@ -1010,3 +1010,126 @@ runs should):
 - **Parallel**: piGourdonPar must equal piGourdon exactly; the bucket ring's
   parallel path is covered only from 10¹⁷ up, since bucketing does not engage below
   √z > 69888.
+
+# Below x^(2/3): what the unique-node count is really saying
+
+The recursive-φ playground (`src/play/play4.zig`, `play` branch) counts *distinct*
+nodes `(v, b)` in the truncated φ decomposition, not just visits. Re-measured on
+main's toolchain with the recursive-cbrt cut (`opt_phi1`/`opt_pi`/`opt_cb`,
+y = √x), and with the memo made unbounded so that "work" means DAG edges rather
+than tree visits:
+
+| x | distinct nodes | ratio | memoised work | ratio |
+|---|---|---|---|---|
+| 10⁹ | 173,946 | 3.640 | 1,272,223 | 5.002 |
+| 10¹⁰ | 629,657 | 3.620 | 6,371,311 | 5.008 |
+| 10¹¹ | 2,282,713 | 3.625 | 31,999,146 | 5.022 |
+| 10¹² | 8,318,447 | 3.644 | 161,289,942 | 5.040 |
+| 10¹³ | 30,361,400 | 3.650 | 819,482,499 | 5.081 |
+
+Least squares over 10⁹–10¹³: **nodes x^0.5605, work x^0.7021.**
+
+So the instinct is right and the arithmetic is honest — the *state space* of the
+decomposition is far below x^(2/3) — but the node count is a **lower bound on a
+hypothetical algorithm, not an algorithm**. Memoising collapses the visits to the
+nodes; it does not collapse the *edges*, and the edges are the cost. Each node
+still pays its own fan-out `Σ_{∛v < p ≤ p_a} φ(⌊v/p⌋, π(∛v))`, one term at a
+time, and that sum grows faster than the node count: x^0.70, *worse* than LMO.
+The recursive-cbrt cut is a good state-space compressor and a bad schedule.
+
+The lesson is the one the Beatty work already hinted at: to get under x^(2/3) you
+must stop evaluating the fan-out edge by edge and evaluate it **in bulk**. Two
+published ways to do that:
+
+## x^(3/5): Helfgott–Thompson (2021), for M(x)
+
+Start from the Vaughan/Heath-Brown K=2 identity
+
+    M(x) = 2·M(√x) − Σ_{m₁,m₂ ≤ √x} μ(m₁)μ(m₂)·⌊x/(m₁m₂)⌋
+
+and split at a parameter v: the block m₁,m₂ ≤ v, and the rest. LMO/Deléglise–Rivat
+take v = x^(1/3) and evaluate the block in O(v²) = x^(2/3). HT take
+**v ≈ x^(2/5)** and evaluate the block in *sub*-v² time, by replacing
+(m₁,m₂) ↦ x/(m₁m₂) with **linear approximations** and using Diophantine
+approximation to describe the difference between the model and reality "in terms
+of congruence classes and segments" — computed by table lookup. The balance is
+x/v against the block cost, and it lands at x^(3/5)(log x)^(3/5+ε) time,
+x^(3/10)(log x)^(13/10) space. First exponent improvement for an elementary
+algorithm since 1985.
+
+That "linear approximation + congruence classes and segments" *is* the
+three-distance/Beatty structure measured in the Gourdon leaf sum. The march we
+found empirically is the mechanism of the published 3/5.
+
+The paper is for M(x); it does not claim π(x).
+
+## Õ(√N): Hirsch–Kessler–Mendlovic (2022), for π(N) — and it subsumes 3/5
+
+The stronger result, and the one that also answers "get closer to the analytic
+method". Their Lemma 1 is pure Legendre:
+
+    Σ_{n≤N} (𝟙 * μ_{≤√N})(n) = π(N) − π(√N) + 1
+
+i.e. sieve out every prime ≤ √N by a single Dirichlet convolution with the
+√N-smooth Möbius function. The trick that makes it fast is **log-scale
+segmentation**: bucket every integer by k̄(n) = ⌊log₂n / Δ⌋. Multiplication
+becomes (almost) addition of bucket indices, so Dirichlet convolution becomes
+ordinary array convolution — and therefore FFT. With Δ = log₂N/√N the arrays have
+~√N cells.
+
+Building μ̂_{≤√N} = ∗_{p≤√N} (δ₀ − δ_{k̄(p)}) naively needs π(√N) convolutions;
+instead they write it as Σ_r (−1)^r C_r where C_r counts products of exactly r
+distinct primes, and get the C_r from **Newton's identities**
+`r·C_r = Σ_{r'=1}^{r} (−1)^{r'−1} C_{r−r'} ∗ E_{r'}` with E_r the r-th powers —
+O(log²N) convolutions instead of O(√N).
+
+Rounding k̄ is lossy, so the last phase is an **error correction**: only pairs
+d₁d₂ ∈ (N, N+S] with S = O(ΔN log N) = Õ(√N) can straddle the cut, so you sieve
+that one critical interval, factor it, walk squarefree divisors, and subtract the
+false contributions. Everything is integer — they use NTT, so there is no
+floating-point error budget at all.
+
+Total: **π(N) in O(√N log³N) time, Õ(√N) space**, with a continuous space/time
+trade-off — Õ(∛N) space at Õ(N^(8/15)) time, Õ(N^(2/9)) space at Õ(N^(5/9)) —
+so it asymptotically dominates the combinatorial method in *both* resources.
+They also get Mertens in Õ(√N), beating HT's x^0.6.
+
+## Why this is the bridge to `pistar`
+
+Their §7 makes the connection explicit, and it lands directly on our kernel work.
+Represent f over ℕ as a generalised function f̃(x) = Σ f(n)δ(x − ln n); Dirichlet
+convolution becomes ordinary convolution, and the Fourier transform of 𝟙̃ at
+ξ = kξ₀ is
+
+    Σ_{n≤N} n^(−2πikξ₀) = ζ_N(2πikξ₀)
+
+— the **truncated zeta function sampled on the imaginary axis**. Restricting to
+|ξ| < ξ_max is multiplication by a rectangle, i.e. blurring by
+sinc(ξ_max·x), whose 1/(ξ_max x) tail is exactly the reason the early analytic
+attempts failed; LO87/Galway's fix was to replace sinc with a rapidly decaying
+kernel — the Gaussian we implement as `Gaussian` in `pistar.zig`, and the same
+seam `Logan`/`Slepian` plug into. HKM's segmentation is that same smoothing done
+in the discrete/integer world: log-scale bucketing *is* a kernel choice, the
+critical interval (N, N+S] *is* the error-correction window Δn = N·Δx = Õ(√N),
+and Newton's identities replace Riemann–Siegel.
+
+So the two arcs of this repo are the same algorithm under two smoothings. The
+kernel program (which weight decays fastest for a given window) transfers
+directly: HKM's implicit kernel is the crudest possible one (a hard log-scale
+bucket), and their critical interval is sized by exactly the same logic as our
+certified tail.
+
+## Standing options
+
+1. **Implement HKM basic** (Algorithm 1/2, ~a page): NTT over ~√N cells, Newton
+   iteration for C_r, then the critical-interval sieve we already own in
+   `rangesieve.zig`. Cross-check against the Gourdon ladder at 10¹²–10¹⁶.
+2. **Port the log-scale-segmentation idea back into `pistar`** as a fourth kernel
+   — an all-integer path with no error budget to certify.
+3. **Leave it**: the combinatorial record is still held by an x^(2/3) method
+   (`primecount`), because the √N methods have not yet been driven hard.
+
+Sources: [HT21 arXiv:2101.08773](https://arxiv.org/abs/2101.08773),
+[HKM22 arXiv:2212.09857](https://arxiv.org/abs/2212.09857),
+reference implementation [github.com/PrimeCounting/PrimeCounting](https://github.com/PrimeCounting/PrimeCounting).
+Both PDFs are in the (gitignored) `literature/`.
