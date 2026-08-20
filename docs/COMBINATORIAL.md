@@ -1712,26 +1712,35 @@ randomized — deferred.
 Same machine, same single thread, `./pi <N>` (tuned Gourdon, x^(2/3)) against
 `hkm2` at R6:
 
-| N | HKM Õ(√N) | Gourdon x^(2/3) | ratio |
-|---|---|---|---|
-| 10⁹ | 0.80 s | 0.002 s | 400× |
-| 10¹⁰ | 3.80 s | 0.005 s | 760× |
-| 10¹¹ | 15.63 s | 0.016 s | 977× |
-| 10¹² | 67.47 s | 0.056 s | **1205×** |
+| N | HKM Õ(√N) | Gourdon x^(2/3) | ratio | HKM RSS |
+|---|---|---|---|---|
+| 10⁹ | 0.80 s | 0.002 s | (400×) | — |
+| 10¹⁰ | 3.80 s | 0.005 s | (760×) | — |
+| 10¹¹ | 15.92 s | 0.016 s | 995× | — |
+| 10¹² | 65.22 s | 0.056 s | **1165×** | ~156 MB |
+| 10¹³ | 249.00 s | 0.221 s | **1127×** | 603 MB |
 
-Memory: ~100 MB against 1 MB.
+Gourdon holds ~1 MB throughout. The 10⁹/10¹⁰ ratios are parenthesised because
+2 ms and 5 ms are Gourdon's startup floor, not its algorithm.
 
-**The gap is widening, not closing.** Measured exponents over the range where
-both are reliably timed: HKM **N^0.63** (10¹⁰→10¹²), Gourdon **N^0.57**
-(10¹¹→10¹³, where its times are large enough to trust). The Õ(√N) method's
-*measured* exponent is worse than the x^(2/3) method's, because log³N is
-eating the exponent advantage at every N that fits on a laptop. Asymptotically
-HKM must win; empirically the crossover is not merely far away, it is not
-approaching.
+**Correction to an earlier reading of this table.** With data stopping at
+10¹² the ratio looked like it was widening monotonically (400 → 1205) and this
+document said so. Adding 10¹³ shows that was an artefact of the low end: over
+the range where both timings are trustworthy the ratio is **flat at ~1000–1150
+across 10¹¹–10¹³**, having turned over between 10¹² and 10¹³.
+
+Matched-range exponents, 10¹¹→10¹³ for both: HKM **N^0.597**, Gourdon
+**N^0.570**. Close enough that the ratio grows ~1.06× per decade — flat, as
+measured. HKM's exponent *is* still the worse of the two, so nothing here
+promises a crossover; it says the two curves are running very nearly parallel
+1100× apart, and that log³N is exactly cancelling the exponent advantage over
+the reachable range. Asymptotically HKM must win. Empirically, from these
+data, no crossover is in sight.
 
 That is the honest answer to the question this arc opened with — *is the
 Õ(√N) algorithm the way past x^(2/3) in practice?* On this hardware, at these
-N: no, and not close. `primecount` holding the combinatorial record with an
+N: no, and not close — though "and getting worse" was over-reading a
+three-decade fit whose low end was measuring process startup. `primecount` holding the combinatorial record with an
 x^(2/3) method is not an oversight.
 
 What HKM remains worth doing for, in order:
@@ -1741,10 +1750,9 @@ What HKM remains worth doing for, in order:
    not a constant-factor race, and it is the corner that was interesting from
    the start. It is also the direct bridge to `pistar`: §4.1's identity is
    Riemann's π*(x) = Σ_k π(x^(1/k))/k.
-2. **The scaling law itself** — the ladder above is three decades; 10¹³ and
-   10¹⁴ would make it five and pin the exponent properly.
-3. **Consolidation** — `hkm2` still uses the naive sparse μ̂ build; R5's §3.3
-   is 14% of the profile, already written, and not wired in.
+2. ~~**The scaling law itself**~~ — done; 10¹³ landed at 249.00 s and is in
+   the table above. 10¹⁴ would take ~16 min and ~2 GB if wanted.
+3. ~~**Consolidation**~~ — done; both μ̂ routes now live in `muhat.zig`.
 
 Speed work against Gourdon is parked. Parallelism would buy HKM ~5× on six
 cores, but Gourdon parallelises too, so it does not move the ratio.
@@ -1797,3 +1805,22 @@ t = 2 → 5) because fewer primes are sieved out, and the work moves into the
 higher T_k. The space win comes from the smaller prime set and the coarser Δ
 it permits, not from a smaller sum — which is the trade the Õ(N^(1/4)) corner
 is making.
+
+### R6 ladder, end to end
+
+`hkm2` at R6 with the consolidated μ̂ build. MATCH against the published table
+at every rung.
+
+| N | π(N) | S | μ̂ build | sieve | correction | total | RSS |
+|---|---|---|---|---|---|---|---|
+| 10⁹ | 50,847,534 | 6.6×10⁶ | 0.02 s | 0.26 s | 0.52 s | 0.80 s | — |
+| 10¹⁰ | 455,052,511 | 2.5×10⁷ | 0.12 s | 1.07 s | 2.76 s | 3.96 s | — |
+| 10¹¹ | 4,118,054,813 | 8.8×10⁷ | 1.06 s | 3.71 s | 11.14 s | 15.92 s | — |
+| 10¹² | 37,607,912,018 | 3.3×10⁸ | 4.53 s | 15.38 s | 45.29 s | 65.22 s | 156 MB |
+| 10¹³ | 346,065,536,839 | 1.2×10⁹ | 21.58 s | 59.72 s | 167.62 s | 249.00 s | 603 MB |
+
+At 10¹³ the critical interval is 1.23×10⁹ integers (389×√N) of which **77.2%
+are skipped outright** by the critical-divisor test, and the largest
+contributing n sits 1.98× inside the proven S bound. Profile is stable at
+roughly 9% / 24% / 67% across the top three rungs, so the correction remains
+the thing to attack and the μ̂ work is finished as a fraction of the whole.
