@@ -1851,3 +1851,59 @@ half of the growth.
 Profile across the top three rungs: μ̂ 9% / sieve 24% / correction 67% at 10¹³,
 and 6% / 15% / **79%** at 10¹⁴. The correction is not merely the thing to
 attack — its share is growing.
+
+## R8 — §3.7, the half that applies at reachable N
+
+**Stated before building, since it bounds the payoff.** §3.7 attacks the
+*sieve*, which is 15% of the profile at 10¹⁴. Sieve plus the correction's
+overhead on integers it then discards is ~489 s of 1499.56, so the ceiling is
+~1.5×. And HKM's mechanism — restrict the sieve to numbers with many prime
+factors — only engages past k ≳ 18 log₂log₂N segments, about 100, where 10¹⁴
+has 12. So what follows is the part that applies here, not theirs.
+
+**t(n) is piecewise constant on cells**, and a cell is ~ΔN wide — 4.7×10⁸ at
+10¹⁴, a hundred times the block size. So walk the wall table once per block
+instead of calling `kbar` per integer: 4.2×10⁹ calls, each with a `@log2`,
+gone.
+
+**ω(n) is known before any factor list is written**, so keep/drop can be
+decided there and the ~69% the critical-divisor test discards never gets
+entries filled. This bought less than expected — 1.13× at 10¹² — and the
+reason is worth recording: *skipping the write does not skip the traversal*.
+CSR needs counts before offsets, so the sieve walked every multiple twice.
+
+**One pass, fixed-width rows.** ω(n) for n ≤ N+S is at most the largest r with
+p₁⋯p_r ≤ N+S, so the primorial gives the row width exactly — 10 at 10⁹, 12 at
+10¹², no magic constant and no overflow case. That collapses the two
+traversals into one. The row block is W·BLK·4 bytes (168–201 MB), which does
+not raise the peak: the μ̂ arrays are freed before the sieve starts and are
+larger. BLK is capped at the interval size, because allocating a full block to
+sieve 6.5×10⁶ integers cost more than it saved (10⁹ went 0.65 → 0.70 s before
+that fix).
+
+| N | sieve before → after | total before → after | speedup |
+|---|---|---|---|
+| 10⁹ | 0.26 → 0.18 s | 0.80 → **0.63 s** | 1.27× |
+| 10¹⁰ | 1.07 → 0.56 s | 3.96 → **3.12 s** | 1.27× |
+| 10¹¹ | 3.71 → 1.81 s | 15.92 → **12.93 s** | 1.23× |
+| 10¹² | 15.38 → 6.91 s | 65.22 → **51.93 s** | 1.26× |
+| 10¹³ | 59.72 → 26.62 s | 249.00 → **210.21 s** | 1.18× |
+| 10¹⁴ | 219.53 → 93.58 s | 1499.56 → **1300.89 s** | 1.15× |
+
+MATCH at every rung, with the skip counts unchanged (224,208,191 of
+331,627,232 at 10¹²) — the same work is being identified, just reached more
+cheaply. The sieve itself is 2.2× faster at 10¹².
+
+Against the ~1.5× ceiling this is 1.26× at 10¹² — but the end-to-end speedup
+*decays* with N (1.27, 1.27, 1.23, 1.26, 1.18, 1.15), while the speedup on the
+sieve itself holds at 2.2–2.35× throughout. Nothing is degrading: the sieve is
+simply a shrinking share of a growing total. The gap to the ceiling is the one
+traversal that remains, over Σ_p width/p multiples, irreducible without HKM's
+actual restricted sieve — which does not engage at these N.
+
+**Profile at 10¹⁴ after R8:** μ̂ 88.38 s (6.8%), sieve 93.58 s (7.2%),
+correction 1118.77 s (**86.0%**). RSS unchanged at 2.34 GB, still set by the μ̂
+arrays. Everything except the correction is now noise. §3.8 (the look-up table
+on fractional parts, randomized, worth a log factor) is the only untried
+algorithmic lever aimed at it; parallelism is the other, and would apply to
+~86% of the work.

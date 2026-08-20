@@ -62,6 +62,29 @@
 //! produce a bit-identical correction at every N tested, which is the check
 //! that the prune changes work and not the answer.
 //!
+//! §3.7 (reducing the sieve work), the half that applies at reachable N. HKM
+//! restrict the sieve to numbers with many prime factors, but only past
+//! k >~ 18 log2 log2 N segments — ~100, where 1e14 has 12. Two cheaper things
+//! capture most of the same win here:
+//!
+//!   * t(n) is PIECEWISE CONSTANT on cells, and a cell is ~Delta*N wide —
+//!     4.7e8 at 1e14, a hundred times the block size. So walk the wall table
+//!     once per block instead of calling kbar per integer: 4.2e9 calls with a
+//!     @log2 in each, gone.
+//!   * omega(n) comes out of the counting pass, before any CSR entry is
+//!     written. So decide keep/drop THERE, and never fill entries for the
+//!     ~69% of the interval that the critical-divisor test discards.
+//!
+//! That second one bought less than expected (1.13x at 1e12) because skipping
+//! the WRITE does not skip the TRAVERSAL: CSR needs counts before offsets, so
+//! the sieve walked every multiple twice. omega(n) <= 12 for n <= 1e14 with
+//! primes <= sqrt N (the primorial 2*3*...*41 already exceeds 1e14), so a
+//! fixed row of 16 collapses that to ONE pass. It costs BLK*16*4 = 268 MB,
+//! which does not raise the peak — the mu-hat arrays are freed before the
+//! sieve starts and they are larger. The row width is not a magic constant:
+//! omega(n) for n <= N+S is at most the largest r with p_1...p_r <= N+S, so
+//! the primorial gives it exactly (11 at 1e12, 12 at 1e14).
+//!
 //! Storage is CSR (count, prefix, fill) rather than a fixed [k]u32 per n:
 //! omega is small on average (~ln ln N) but its max grows, and a fixed row
 //! width would pay the max everywhere. The interval is processed in BLOCKS —
@@ -181,69 +204,88 @@ pub fn main(init: std.process.Init) !void {
     // ---- sieve the critical interval in blocks, CSR per block: the distinct
     // smooth primes of each n. Only the SET matters (d is squarefree), so a
     // prime just marks the n it divides — no multiplicities, no dividing out.
-    const BLK: usize = 1 << 22;
+    // 2^22 unless the whole interval is smaller — the fixed-width row block is
+    // BLK*16*4 bytes and allocating 268 MB to sieve 6.5e6 integers costs more
+    // than it saves (measured: 1e9 went 0.65 -> 0.70 s before this).
+    const BLK: usize = @min(@as(usize, 1) << 22, @as(usize, @intCast(S)) + 1);
     var C: i64 = 0;
     var max_hit: u64 = 0;
-    var max_omega_seen: usize = 0;
+    var max_omega_seen: u8 = 0;
     var ns_sieve: u64 = 0;
     var ns_corr: u64 = 0;
     var skipped: u64 = 0;
+    var row_w: usize = 0;
+    var blk_used: usize = 0;
     {
-        const off = try gpa.alloc(u32, BLK + 1);
-        defer gpa.free(off);
-        const fill = try gpa.alloc(u32, BLK);
-        defer gpa.free(fill);
-        var ent = try gpa.alloc(u32, BLK * 4);
-        defer gpa.free(ent);
+        // exact row width: the largest r with the r-th primorial <= N+S
+        var W: usize = 1;
+        {
+            var prod: u128 = 1;
+            for (primes) |p| {
+                prod *= p;
+                if (prod > @as(u128, N) + @as(u128, S)) break;
+                W += 1;
+            }
+        }
+        row_w = W;
+        blk_used = BLK;
+        const cnt = try gpa.alloc(u8, BLK);
+        defer gpa.free(cnt);
+        const tarr = try gpa.alloc(u8, BLK);
+        defer gpa.free(tarr);
+        const rows = try gpa.alloc(u32, BLK * W);
+        defer gpa.free(rows);
 
         var base: u64 = N + 1;
         while (base <= N + S) {
             const hi = @min(base + BLK - 1, N + S);
             const w: usize = @intCast(hi - base + 1);
             const ta = nowNs();
-            @memset(off[0 .. w + 1], 0);
-            for (primes) |p| {
-                var q = ((base + p - 1) / p) * p;
-                while (q <= hi) : (q += p) off[@intCast(q - base)] += 1;
-            }
-            var total: u32 = 0;
-            for (off[0..w]) |*c| {
-                const v = c.*;
-                c.* = total;
-                total += v;
-            }
-            off[w] = total;
-            if (total > ent.len) {
-                gpa.free(ent);
-                ent = try gpa.alloc(u32, total);
-            }
-            @memset(fill[0..w], 0);
+
+            // ONE pass: factor list and omega together, fixed-width rows
+            @memset(cnt[0..w], 0);
             for (primes, 0..) |p, pi| {
                 var q = ((base + p - 1) / p) * p;
                 while (q <= hi) : (q += p) {
                     const s: usize = @intCast(q - base);
-                    ent[off[s] + fill[s]] = @intCast(pi);
-                    fill[s] += 1;
+                    const c = cnt[s];
+                    if (c < W) rows[s * W + c] = @intCast(pi);
+                    cnt[s] = c + 1;
                 }
             }
-            const tb = nowNs();
-            var s: usize = 0;
-            while (s < w) : (s += 1) {
-                const n = base + @as(u64, s);
-                const plist = ent[off[s]..off[s + 1]];
-                if (plist.len > max_omega_seen) max_omega_seen = plist.len;
-                // t(n) = kbar(n) - K - 1, floored at 0, minus the slack
-                var t: usize = 0;
-                if (critical) {
-                    const v = @as(i64, @intCast(g.kbar(n))) - @as(i64, @intCast(g.K)) - crit_off;
-                    if (v > 0) t = @intCast(v);
+
+            // t(n) by walking the wall table: constant on each cell, and a
+            // cell is far wider than a block, so this is O(cells) not O(w)
+            {
+                var lo2 = base;
+                while (lo2 <= hi) {
+                    const kn = g.kbar(lo2);
+                    const cell_end = if (kn + 1 < g.wall.len) @min(hi, g.wall[kn + 1] - 1) else hi;
+                    var t: usize = 0;
+                    if (critical) {
+                        const v = @as(i64, @intCast(kn)) - @as(i64, @intCast(g.K)) - crit_off;
+                        if (v > 0) t = @intCast(v);
+                    }
+                    const tb8: u8 = @intCast(@min(t, 255));
+                    @memset(tarr[@intCast(lo2 - base) .. @as(usize, @intCast(cell_end - base)) + 1], tb8);
+                    lo2 = cell_end + 1;
                 }
-                if (plist.len < t) {
-                    skipped += 1; // cheap half of §3.7
+            }
+
+            const tb = nowNs();
+
+            for (0..w) |s| {
+                const c = cnt[s];
+                if (c > max_omega_seen) max_omega_seen = c;
+                if (c < tarr[s]) {
+                    skipped += 1;
                     continue;
                 }
+                std.debug.assert(c <= W); // primorial bound; violation = truncated factor list
+                const n = base + @as(u64, s);
+                const plist = rows[s * W .. s * W + c];
                 var acc: i64 = 0;
-                corr(&g, n, plist, primes, ks, 0, 1, 0, 0, t, 1, &acc);
+                corr(&g, n, plist, primes, ks, 0, 1, 0, 0, tarr[s], 1, &acc);
                 if (acc != 0) max_hit = n;
                 C += acc;
             }
@@ -270,6 +312,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("\npi({d}) = {d}\nreferee  = {d} ({s})   {s}\n", .{ N, pi_computed, pi_N, if (from_table != null) "published table" else "sieve", if (pi_computed == pi_N) "MATCH" else "MISMATCH" });
     std.debug.print("\nspurious extent: largest contributing n - N = {d}  (S bound {d}, slack {d:.2}x)\n", .{ max_hit - N, S, @as(f64, @floatFromInt(S)) / @as(f64, @floatFromInt(@max(1, max_hit - N))) });
     std.debug.print("max omega in interval = {d}  (omega_max bound {d})\n", .{ max_omega_seen, omega_max });
+    std.debug.print("sieve rows: {d} wide x {d} block = {d:.0} MB\n", .{ row_w, blk_used, @as(f64, @floatFromInt(row_w * blk_used * 4)) / 1e6 });
     std.debug.print("mu-hat route: {s}", .{mstat.route});
     if (mstat.parts != 0) std.debug.print("  ({d} parts, {d} transforms, largest 2^{d})", .{ mstat.parts, mstat.transforms, std.math.log2_int(usize, @max(2, mstat.L_max)) });
     std.debug.print("\ncritical divisors: {s}", .{if (critical) "on" else "OFF"});
