@@ -1706,3 +1706,45 @@ factoring everything. HKM only claim it past k ≳ 18 log₂log₂N, far beyond
 reach here, but the *measured* waste is now 74% of a 22% stage. §3.8
 (look-up table on fractional parts) is a further log factor and is
 randomized — deferred.
+
+## The head-to-head, which is the question the arc opened with
+
+Same machine, same single thread, `./pi <N>` (tuned Gourdon, x^(2/3)) against
+`hkm2` at R6:
+
+| N | HKM Õ(√N) | Gourdon x^(2/3) | ratio |
+|---|---|---|---|
+| 10⁹ | 0.80 s | 0.002 s | 400× |
+| 10¹⁰ | 3.80 s | 0.005 s | 760× |
+| 10¹¹ | 15.63 s | 0.016 s | 977× |
+| 10¹² | 67.47 s | 0.056 s | **1205×** |
+
+Memory: ~100 MB against 1 MB.
+
+**The gap is widening, not closing.** Measured exponents over the range where
+both are reliably timed: HKM **N^0.63** (10¹⁰→10¹²), Gourdon **N^0.57**
+(10¹¹→10¹³, where its times are large enough to trust). The Õ(√N) method's
+*measured* exponent is worse than the x^(2/3) method's, because log³N is
+eating the exponent advantage at every N that fits on a laptop. Asymptotically
+HKM must win; empirically the crossover is not merely far away, it is not
+approaching.
+
+That is the honest answer to the question this arc opened with — *is the
+Õ(√N) algorithm the way past x^(2/3) in practice?* On this hardware, at these
+N: no, and not close. `primecount` holding the combinatorial record with an
+x^(2/3) method is not an oversight.
+
+What HKM remains worth doing for, in order:
+
+1. **§4.1 (fewer exact primes)** — the Õ(∛N)-space / Õ(N^(8/15))-time corner
+   of their trade-off curve. That is a genuinely different *resource profile*,
+   not a constant-factor race, and it is the corner that was interesting from
+   the start. It is also the direct bridge to `pistar`: §4.1's identity is
+   Riemann's π*(x) = Σ_k π(x^(1/k))/k.
+2. **The scaling law itself** — the ladder above is three decades; 10¹³ and
+   10¹⁴ would make it five and pin the exponent properly.
+3. **Consolidation** — `hkm2` still uses the naive sparse μ̂ build; R5's §3.3
+   is 14% of the profile, already written, and not wired in.
+
+Speed work against Gourdon is parked. Parallelism would buy HKM ~5× on six
+cores, but Gourdon parallelises too, so it does not move the ratio.
