@@ -1133,3 +1133,73 @@ Sources: [HT21 arXiv:2101.08773](https://arxiv.org/abs/2101.08773),
 [HKM22 arXiv:2212.09857](https://arxiv.org/abs/2212.09857),
 reference implementation [github.com/PrimeCounting/PrimeCounting](https://github.com/PrimeCounting/PrimeCounting).
 Both PDFs are in the (gitignored) `literature/`.
+
+# HKM implementation log
+
+Rung ladder, each refereed by the one below it. `src/hkm/`.
+
+```
+zig build-exe -O ReleaseFast -mcpu=native --dep rs \
+  -Mroot=hkm0.zig -Mrs=../rangesieve.zig -femit-bin=hkm0
+```
+
+## R0 — segmentation geometry (`hkm0.zig`)
+
+Builds none of the algorithm. It pins the two objects everything else is
+defined against, and measures the raw segmentation error *before any
+correction exists*, so the correction has something to be judged against.
+
+**The thing that is easy to get wrong.** The algorithm does not convolve the
+segmentation of μ. It builds **μ̂**, in which each prime p is replaced by
+2^(k̄(p)Δ) and the index of n is **k̂(n) = Σᵢ k̄(pᵢ) over the factorisation**,
+not k̄(n). In that world 42 = 2·3·7 sits at 2¹·2¹·2² = 16, even though 42 lies
+between 32 and 64. μ̂ ≠ μ̄, and the gap *is* the segmentation error the critical
+interval later repairs. Bucketing the product instead of summing the buckets
+silently builds a different, wrong array — so it is checked by independent
+enumeration, not asserted.
+
+**A — Claim 2 (§2.3.1).** μ̂ by convolving (δ₀ − δ_k̄(p)) over p ≤ √N, against
+μ̂[k] = Σ_{n : k̂(n)=k} μ_{≤√N}(n) by direct subset enumeration. No shared code
+path. MATCH cell-for-cell at every Δ tested, N = 10⁴, 10⁶, 10⁸.
+
+The enumeration is pruned by `k + k̄(p) ≤ cap`, which is exactly "the product
+stays ≤ N in the alternative world", so it costs Ψ-many nodes rather than
+2^π(√N) — the same order as the Legendre DFS, which is why it can referee at
+10⁸ at all (13 s).
+
+**B — Lemma 1 (§2.1).** Σ_{n≤N}(1 ∗ μ_{≤√N})(n) = π(N) − π(√N) + 1. This is
+Legendre's φ(N, π(√N)); evaluated exactly by pruned DFS and refereed against a
+sieve. MATCH at 10⁴ / 10⁶ / 10⁸.
+
+Note μ_{≤√N} means μ restricted to **√N-smooth** n, not to n ≤ √N. For n ≤ N
+the two coincide (if n has a prime factor q > √N it has only one, and the
+cofactor is < √N, so every √N-smooth divisor is automatically ≤ √N) — but only
+the smooth reading generalises to the C_r/Newton construction in R4.
+
+**C — the error R2 exists to kill.** Segmented estimate
+Σ_{k₁+k₂ ≤ k̄(N)} 1̄[k₁]·μ̂[k₂] against B's exact answer, no correction:
+
+| Δ | cells | N = 10⁶ | N = 10⁸ |
+|---|---|---|---|
+| 0.100 | 200 / 266 | −2,865 | −443,365 |
+| 0.050 | 399 / 532 | −1,996 | −163,308 |
+| 0.020 | 997 / 1329 | −443 | −66,148 |
+| 0.010 | 1994 / 2658 | −179 | −37,826 |
+| 0.005 | 3987 / 5316 | −203 | −15,685 |
+| 0.0025| — / 10631 | — | −10,114 |
+
+Monotone and ~linear in Δ at 10⁸ (small-N rows are noisy — the ±1s partly
+cancel by luck). At the designed Δ = Θ(log₂N/√N) — 0.0027 at 10⁸ — the raw
+error is ~0.18 % of the answer. Sign is consistently **negative**: the
+alternative world systematically undercounts.
+
+Truncating μ̂ at k̄(N) throughout is free: 1̄'s indices are ≥ 0, so a μ̂ cell
+beyond k̄(N) can never reach the sum. That truncation, plus Δ = Θ(log₂N/√N),
+is where the O(√N) array size comes from.
+
+**Float seam, flagged not hidden.** The cell walls 2^(kΔ) are irrational, so
+k̄ is inherently an inexact comparison and a prime a hair from a wall can land
+either side. At rung-0 sizes f64 is far more precision than the question
+needs (monotonicity is asserted). When Δ shrinks to Θ(log₂N/√N) at large N
+this needs revisiting — it is the same class of bug as `pistar`'s half-ulp
+band, and it will bite in exactly the same way: silently, and only on some x.
