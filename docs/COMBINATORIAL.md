@@ -1524,10 +1524,9 @@ It was also the worse version, along the wrong axis:
 §3.2's price is padding — arrays grow to O(log²N/Δ) = O(√N log N) so nothing
 wraps — and **§3.3, "Partitioning primes to reduce padding"**, removes that
 log N by applying Newton separately per prime size-interval, where
-r_max = log₂N/log₂p_min is small for the large primes. The memory ceiling
-identified above is **§4.2, "Working only in Fourier space"**.
+r_max = log₂N/log₂p_min is small for the large primes.
 
-So the remaining structure is R5 = §3.2, R6 = §3.3, R7 = §4.2, in that order.
+So the remaining structure on the μ̂ side is R5 = §3.2 + §3.3.
 What is genuinely open is only empirical: whether §3.2's trade — transform
 length ×~log N against R+1 transforms instead of 3R, plus a pointwise scalar
 exp — wins at 10¹³–10¹⁵ on this hardware. The paper settles it
@@ -1587,7 +1586,39 @@ That is the useful outcome. Time was never R4's binding constraint (R2's
 correction is 84% of end-to-end); *memory* was, at a projected ~14 GB at 10¹⁵.
 The advantage widens with N — 2.5× at 10¹², **2.8× at 10¹³** (603 MB against
 1.69 GB) for 1.23× the speed — putting 10¹⁵ around 5–6 GB, i.e. back inside a
-28 GB box. The remaining space work is §4.2, "Working only in Fourier space".
+28 GB box.
+
+**§4.2 is not the next space lever — that was a misreading.** §4.2, "Working
+only in Fourier space", is not about the μ̂ build at all: it is about the
+*final sum*. Computing Σ_{k=0}^{n} B[k] does not need B in the time domain,
+because B[k] = (1/L)Σ_ℓ B̃[ℓ]ζ^(kℓ) makes the prefix sum a geometric series,
+
+  L·Σ_{k=0}^{n} B[k] = (n+1)·B̃[0] + Σ_{ℓ=1}^{L−1} B̃[ℓ]·(ζ^((n+1)ℓ) − 1)/(ζ^ℓ − 1)
+
+— one O(L) pass over the frequency array, no inverse transform, B never
+materialised. That saves the *time-domain* arrays, which here are the small
+ones: the 603 MB peak at 10¹³ is the r_max frequency arrays of the m = 1
+partition (8 × 67 MB at 2²³), against ~25 MB per time-domain array. §4.2 would
+save perhaps 50 MB of 603.
+
+The actual space section is **§4.1, "Using fewer exact primes"**: use only
+primes ≤ N^(1/t) exactly and recover the rest from
+g = log(1 + D_f) = Σ_k (−1)^(k−1) f^(∗k)/k, which is supported on prime powers
+of primes above N^(1/t) with g(p^k) = 1/k, so Σ_{n≤N} g(n) = Σ_k π(N^(1/k))/k.
+Fewer exact primes shrinks every √N-scale structure — that is the mechanism
+behind their Õ(∛N)-space / Õ(N^(8/15))-time trade-off point. §4.2 is a
+supporting trick *for* §4.1, which is why it reads oddly alone.
+
+Worth stopping on: the identity §4.1 lands on is Riemann's
+π*(x) = Σ_k π(x^(1/k))/k with ln ζ(s) = s∫₀^∞ π*(x)x^(−s−1)dx — **exactly**
+what `pistar.zig` computes (rung 3, "integer π(x) via Riemann π* from log ζ",
+with the Möbius unwind π(x) = Σ_m μ(m)/m·π*(x^(1/m)) as its inverse). HKM §4.1
+and `pistar` rung 3 are the same manoeuvre in two representations. The §7
+bridge shows up here as a shared subroutine rather than an analogy.
+
+Corrected ordering of what remains: **§3.6 (+ the cheap half of §3.7)**, since
+the correction is 84% of end-to-end; then **§4.1 + §4.2** together as the
+space / trade-off rung; then NTT micro-optimisation; then parallelism.
 
 Note also that at 10¹³ §3.3 does *more* pointwise work than R4 (4.8×10⁸ vs
 4.4×10⁸) on the *same* largest transform (2²³) with *more* transforms (39 vs
@@ -1595,3 +1626,83 @@ Note also that at 10¹³ §3.3 does *more* pointwise work than R4 (4.8×10⁸ vs
 problems: four of them are small, so most of those 39 transforms are cheap.
 Counting transforms is the wrong summary statistic here — counting
 transform·length is the right one.
+
+## R6 — critical divisors (§3.6), and a saturation bug the earlier rungs hid
+
+The correction was 84% of end-to-end and nothing had touched it. Three of the
+paper's four correction sections turn out to apply here; one was already done.
+
+**§3.4 (shrinking the critical interval) was done at R1.** It replaces
+ω(d) ≤ log₂d with ω(d) = O(log d / log log d) via the primorial, giving
+S = O(ΔN log N / log log N). R1 already computes ω_max by greedily taking the
+smallest k̄(p) while the sum stays ≤ K — which *is* that bound, evaluated
+exactly rather than asymptotically (11 at 10¹², against log₂N = 40).
+
+**§3.6 (critical divisors).** Since k̄(x) ≥ log₂x/Δ − 1 and k̂ is a sum of
+ω(d) such floors, k̄(n/d) + k̂(d) ≥ k̄(n) − 1 − ω(d), so the admission test
+k̄(n/d) + k̂(d) ≤ K can only pass when
+
+  ω(d) ≥ k̄(n) − K − 1 =: t(n)
+
+The interval spans ~10 cells, t is the cell index shifted, so the first cells
+prune nothing and the last admits only ω(d) ≥ 9 — of which there are almost
+none. The DFS carries ω and prunes any branch that cannot reach t(n) even by
+taking every remaining prime; n with ω(n) < t(n) are skipped before the DFS
+starts, which is the cheap half of §3.7 ("in the k-th segment only n with
+ω(n) ≥ k can contribute").
+
+**The bound applies to our integer walls unchanged, and one better.** The
+table in `seg.zig` computes the ideal floor *exactly*: wall[k] = ⌈2^(kΔ)⌉ ≥
+2^(kΔ) gives k̄(x) ≤ ⌊log₂x/Δ⌋, and at k = ⌊log₂x/Δ⌋ we have
+wall[k] < 2^(kΔ) + 1 ≤ x + 1 so wall[k] ≤ x, giving k̄(x) ≥ k. Hence
+**k̄(x) = ⌊log₂x/Δ⌋ on the nose** — which is what the double-double wall
+recurrence buys beyond merely not corrupting the answer. That licenses a
+sharper constant: writing A = k̄(n/d) + k̂(d) and summing ω(d)+1 *strict*
+inequalities ⌊y⌋ > y − 1,
+
+  A > log₂(n)/Δ − (ω(d)+1) ≥ k̄(n) − ω(d) − 1
+
+with A, k̄(n), ω(d) all integers, so A ≥ k̄(n) − ω(d), and admission forces
+**ω(d) ≥ k̄(n) − K**. `--crit-off` exposes the constant; 0 is the default, 1 is
+HKM's. All settings produce a bit-identical correction at every N — the check
+that the prune changes work and not the answer.
+
+### The bug: k̄ saturated, and R0's own comment is what hid it
+
+First run: MATCH, but the correction got *slower* and only 3.9% of the
+interval was skipped. Instrumenting t showed it never exceeded 1 where the
+cell arithmetic says it should reach 9.
+
+Cause: `seg.build` sized the wall table to cover N, and `kbar` saturates at
+the top of the table. R0's comment argued that was harmless — "every k > K is
+equally rejected by the k₁+k₂ ≤ K admission test, so there is no need to size
+the table past it" — which is *true for the admission test* and false for
+§3.6, whose whole content is the value of k̄(n) out to N+S, ten cells past K.
+So the prune silently degraded to a no-op that still paid for its own test.
+
+Fix: size the table 1/Δ cells past K, covering up to 2N — and S < N always, so
+the critical interval is always inside. Cost is 2.5% more table at 10¹².
+Third time this arc that a bound stated for one purpose was reused for
+another; the pattern is worth naming, because it looks nothing like a float
+bug and behaves exactly like one.
+
+| N | correction, no prune | `--crit-off 1` | `--crit-off 0` | skipped | end-to-end |
+|---|---|---|---|---|---|
+| 10⁹ | 1.50 s | 0.66 s | **0.51 s** | 74.1% | 1.78 → **0.80 s** |
+| 10¹¹ | 25.98 s | — | **11.15 s** | — | 29.95 → **15.63 s** |
+| 10¹² | 112.78 s | — | **44.58 s** | 67.6% | 134.53 → **67.47 s** |
+
+MATCH at 10⁶–10¹², with the correction value bit-identical to the unpruned run
+at every N (−1,428,340 at 10¹²).
+
+**What this exposes next.** The profile at 10¹² has moved: correction 44.58 s
+(66%), sieve 13.16 s (20%), μ̂ build 9.71 s (14%) — where it was 84/9/8. Two
+things follow. First, `hkm2` still uses the *naive* sparse μ̂ build; wiring in
+R5's §3.3 would take that 9.71 s to ~4.5 s, a pending integration rather than
+new work. Second, we still factor **all** of (N, N+S] while skipping 67.6% of
+it immediately. That is exactly §3.7's other
+half: restrict the sieve to numbers with many prime factors instead of
+factoring everything. HKM only claim it past k ≳ 18 log₂log₂N, far beyond
+reach here, but the *measured* waste is now 74% of a 22% stage. §3.8
+(look-up table on fractional parts) is a further log factor and is
+randomized — deferred.

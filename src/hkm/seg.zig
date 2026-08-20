@@ -53,8 +53,13 @@ pub const Geom = struct {
     /// The cell of n, by integer comparison against the table. @log2 supplies
     /// a starting guess only — the answer comes from the walls, so the guess
     /// being a hair wrong costs a loop iteration, not correctness.
-    /// Saturates at K+1: every k > K is equally rejected by the k1+k2 <= K
-    /// admission test, so there is no need to size the table past it.
+    /// The table is sized past K by 1/delta cells, i.e. it covers up to 2N,
+    /// so kbar is exact everywhere in the critical interval (N, N+S] — S < N
+    /// always. That matters: the admission test k1+k2 <= K rejects every
+    /// k > K equally, so an earlier version saturated the table just past K,
+    /// but HKM §3.6's critical-divisor bound omega(d) >= kbar(n) - K - 1 needs
+    /// the TRUE kbar(n) out there. Saturating silently pinned it near zero and
+    /// turned the whole prune into a no-op that still cost its test.
     pub fn kbar(g: *const Geom, n: u64) usize {
         const top = g.wall.len - 2;
         var k: usize = @intFromFloat(@floor(@log2(@as(f64, @floatFromInt(n))) / g.delta));
@@ -133,7 +138,7 @@ fn ddCeil(w: [2]f64) u64 {
 pub fn build(gpa: std.mem.Allocator, N: u64, delta: f64) !Geom {
     std.debug.assert(delta > 0 and delta <= 1.0);
     const kest: usize = @intFromFloat(@floor(@log2(@as(f64, @floatFromInt(N))) / delta));
-    const len = kest + 4;
+    const len = kest + 4 + @as(usize, @intFromFloat(@ceil(1.0 / delta)));
     const wall = try gpa.alloc(u64, len);
     const r = twoPowDD(delta);
     var w: [2]f64 = .{ 1, 0 };
