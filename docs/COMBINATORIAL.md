@@ -1264,3 +1264,85 @@ therefore cannot be a count of anything; it has to carry the μ signs, i.e.
 genuinely evaluate (1 ∗ μ_{≤√N}) restricted to the admitted pairs over
 (N, N+S]. That is exactly the per-n factor-and-walk-squarefree-divisors pass
 of §3, and it is why the critical interval has to be *sieved*, not estimated.
+
+## R2 — the critical-interval correction; first end-to-end π(N) (`hkm2.zig`)
+
+R1 proved the error is one-sided and localised, so
+
+  exact LHS = segmented − C,  C = Σ_{n=N+1}^{N+S} Σ_{d|n, d sqfree √N-smooth,
+                                      k̄(n/d)+k̂(d) ≤ K} μ(d)
+
+and π(N) = exact LHS + π(√N) − 1 by Lemma 1. S is taken from R1's **proven**
+bound, not its measured maximum; both are printed so the ~1.5× slack stays
+visible rather than being quietly assumed away.
+
+The sieve is simpler than it first looks: d is squarefree, so only the **set**
+of distinct primes ≤ √N dividing n matters. No multiplicities, no dividing
+out, no rough-part bookkeeping — a prime just marks the n it divides. Primes
+in (√N, √(N+S)] are correctly absent: not √N-smooth, so they can never appear
+in d. Storage is CSR per block, not a fixed row width (ω is ~ln ln N on
+average but its max grows, and a fixed width pays the max everywhere). The
+interval is blocked at 2²² — S is Õ(√N) but its CSR is a few times bigger, and
+Õ(√N) *space* is half the point of the method.
+
+| N | π(N) | S | segmented | correction | total | result |
+|---|---|---|---|---|---|---|
+| 10⁶ | 78,498 | 116,866 | 0.00 s | 0.02 s | 0.03 s | MATCH |
+| 10⁷ | 664,579 | 469,458 | 0.00 s | 0.12 s | 0.13 s | MATCH |
+| 10⁸ | 5,761,455 | 1,671,683 | 0.00 s | 0.48 s | 0.54 s | MATCH |
+| 10⁹ | 50,847,534 | 6,574,956 | 0.02 s | 1.39 s | 1.65 s | MATCH |
+| 10¹⁰ | 455,052,511 | 25,360,542 | 0.12 s | 6.29 s | 7.22 s | MATCH |
+| 10¹¹ | 4,118,054,813 | 88,144,142 | 1.07 s | 25.98 s | 29.95 s | MATCH |
+| 10¹² | 37,607,912,018 | 331,627,232 | 10.19 s | 112.78 s | 134.53 s | MATCH |
+
+Memory is flat at ~78 MB from 10¹⁰ on (~100 MB at 10¹²). Single-threaded; the correction is
+embarrassingly parallel over blocks and nothing has been spent on that yet.
+
+### The seam fired, exactly as predicted — `seg.zig`
+
+10⁶ through 10⁹ were clean. **10¹⁰ came out wrong by +7.** 10¹¹ was clean
+again. Cause: two float paths for the same wall,
+
+  k̄(n) = ⌊log₂n/Δ⌋ via `@log2`   vs   1̄[k] = ⌈2^((k+1)Δ)⌉ − ⌈2^(kΔ)⌉ via exp2
+
+which disagree whenever a wall lands within a rounding error of an integer —
+n is then in cell k by one path and k−1 by the other. Same bug as `pistar`'s
+half-ulp band, same shape: silent, and only at some N. It was flagged in R0's
+source comment as "will bite in exactly the same way" and then bit two rungs
+later.
+
+Fix: `seg.zig` materialises the walls **once** as an integer table, and
+nothing else may compute a wall. The table must satisfy super-multiplicativity
+wall[i]·wall[j] ≥ wall[i+j] — that is exactly what R1's one-sidedness proof
+rests on, and ceiling gives it for free (wall[i]·wall[j] is an integer
+≥ 2^(iΔ)·2^(jΔ) = 2^((i+j)Δ)) *provided the ceiling is the true one*.
+
+A single f64 exp2 cannot decide that ceiling: ~1 ulp is ~10⁻⁴ absolute at a
+wall of 10¹², so any wall with fractional part near 0 or 1 is a coin flip, and
+one that rounds *down* across an integer breaks super-multiplicativity
+silently. An arbitrary upward nudge "fixes" it by corrupting ~10% of the walls
+instead. So the walls come from a **double-double recurrence**: r = 2^Δ to
+~2⁻¹⁰⁶ via the exp series, then w_k = w_{k−1}·r. After K ~ 10⁶ steps the
+relative error is ~10⁻²⁶ — about 10⁻¹⁴ absolute at a wall of 10¹² — so the
+ceiling is decided by eleven orders of magnitude instead of a coin flip. The
+ceiling is then taken exactly off the (hi, lo) pair, including the
+hi-is-an-integer case. `build` also spot-checks super-multiplicativity at
+j = 1 (a full O(K²) sweep is unaffordable at K ~ 10⁶).
+
+Worth recording: the dd table and the crude nudge produce *identical* output at
+Δ = 0.1, where both give wall[10] = 3 rather than the "obvious" 2 — because
+f64's 0.1 is strictly greater than 1/10, so 2^(10Δ) really is 2.000000000000000077.
+The apparent degradation at toy Δ is honest arithmetic, not an artifact.
+
+### What this measurement says about R3/R4
+
+`segmented` builds μ̂ by convolving π(√N) per-prime arrays of length K. That is
+**O(K·π(√N)) = O(N/log N)** — not Õ(√N) at all. Measured, it grows ~9.7× per
+decade (0.02 → 0.12 → 1.07 → 10.19 s at 10⁹–10¹²) against the correction's
+~4.3× (1.39 → 6.29 → 25.98 → 112.78 s). The ratio between them is 24:1 at
+10¹¹ and 11:1 at 10¹², closing 2.2× per decade, so **the naive μ̂ build
+overtakes the correction at ≈10¹⁵** and the whole method reverts to something
+worse than a sieve. That is precisely the gap Newton's identities
+(R4) close, by building μ̂ in O(log²N) convolutions instead of π(√N) of them —
+and why those convolutions have to be NTTs (R3). The motivation is now a
+measured curve rather than a claim in the paper.

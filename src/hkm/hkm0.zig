@@ -30,6 +30,7 @@
 
 const std = @import("std");
 const rs = @import("rs");
+const sg = @import("seg.zig");
 
 /// kbar(n) = floor(log2 n / Delta): the cell of the geometric segmentation
 /// with thresholds 2^{k Delta}. n = 1 gives cell 0, which is exactly why the
@@ -50,12 +51,12 @@ pub fn kbar(n: u64, delta: f64) usize {
 /// primes <= sqrt N. Truncating at `cap` cells is free — 1bar's indices are
 /// >= 0, so a mu-hat cell beyond kbar(N) can never reach the final sum. That
 /// truncation is what makes the array O(sqrt N) once Delta = Theta(log2 N / sqrt N).
-fn muHatConv(gpa: std.mem.Allocator, primes: []const u64, delta: f64, cap: usize) ![]i64 {
+fn muHatConv(gpa: std.mem.Allocator, primes: []const u64, g: *const sg.Geom, cap: usize) ![]i64 {
     const a = try gpa.alloc(i64, cap + 1);
     @memset(a, 0);
     a[0] = 1;
     for (primes) |p| {
-        const j = kbar(p, delta);
+        const j = g.kbar(p);
         if (j > cap) continue; // shifts entirely off the end
         // in place, descending: a[i] -= a[i - j] with a[] the previous array
         var i: usize = cap + 1;
@@ -71,7 +72,7 @@ fn muHatConv(gpa: std.mem.Allocator, primes: []const u64, delta: f64, cap: usize
 /// into cell sum_i kbar(p_i). Independent of the convolution by construction
 /// (no shared code path), which is the point. 2^|primes| subsets, so this
 /// referee only runs at rung-0 sizes.
-fn muHatEnum(gpa: std.mem.Allocator, primes: []const u64, delta: f64, cap: usize) ![]i64 {
+fn muHatEnum(gpa: std.mem.Allocator, primes: []const u64, g: *const sg.Geom, cap: usize) ![]i64 {
     const a = try gpa.alloc(i64, cap + 1);
     @memset(a, 0);
     const R = struct {
@@ -85,7 +86,7 @@ fn muHatEnum(gpa: std.mem.Allocator, primes: []const u64, delta: f64, cap: usize
     };
     const ks = try gpa.alloc(usize, primes.len);
     defer gpa.free(ks);
-    for (primes, 0..) |p, i| ks[i] = kbar(p, delta);
+    for (primes, 0..) |p, i| ks[i] = g.kbar(p);
     R.go(a, ks, 0, 0, 1, cap);
     return a;
 }
@@ -125,12 +126,14 @@ pub fn main(init: std.process.Init) !void {
     defer gpa.free(primes);
 
     // ---- kbar sanity: cell 0 holds n = 1, and the map is non-decreasing.
-    std.debug.assert(kbar(1, 1.0) == 0);
     {
+        var gs = try sg.build(gpa, N, 0.1);
+        defer gs.deinit(gpa);
+        std.debug.assert(gs.kbar(1) == 0);
         var n: u64 = 1;
         var prev: usize = 0;
         while (n <= @min(N, 1 << 20)) : (n += 1) {
-            const k = kbar(n, 0.1);
+            const k = gs.kbar(n);
             std.debug.assert(k >= prev);
             prev = k;
         }
@@ -147,9 +150,11 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("{s:>7} {s:>7} {s:>8} {s:>14} {s:>14} {s:>12}\n", .{ "delta", "cells", "ClaimA", "segmented", "exact", "seg-error" });
     for (deltas.items) |delta| {
-        const cap = kbar(N, delta);
+        var g = try sg.build(gpa, N, delta);
+        defer g.deinit(gpa);
+        const cap = g.K;
 
-        const conv = try muHatConv(gpa, primes, delta, cap);
+        const conv = try muHatConv(gpa, primes, &g, cap);
         defer gpa.free(conv);
 
         // A: the enumeration is pruned by `cap` (k + kbar(p) <= cap is exactly
@@ -157,7 +162,7 @@ pub fn main(init: std.process.Init) !void {
         // Psi-many nodes, not 2^|primes| — the same order as the legendre DFS.
         var claim: []const u8 = "skipped";
         if (primes.len <= 2000) {
-            const enu = try muHatEnum(gpa, primes, delta, cap);
+            const enu = try muHatEnum(gpa, primes, &g, cap);
             defer gpa.free(enu);
             claim = if (std.mem.eql(i64, conv, enu)) "MATCH" else "MISMATCH";
             if (!std.mem.eql(i64, conv, enu)) return error.Claim2Failed;
@@ -169,13 +174,7 @@ pub fn main(init: std.process.Init) !void {
         @memset(one, 0);
         {
             var k: usize = 0;
-            while (k <= cap) : (k += 1) {
-                const lo = std.math.pow(f64, 2.0, @as(f64, @floatFromInt(k)) * delta);
-                const hi = std.math.pow(f64, 2.0, @as(f64, @floatFromInt(k + 1)) * delta);
-                const a: u64 = @intFromFloat(@ceil(lo));
-                const b: u64 = @intFromFloat(@ceil(hi));
-                one[k] = @as(i64, @intCast(b)) - @as(i64, @intCast(a));
-            }
+            while (k <= cap) : (k += 1) one[k] = @intCast(g.cell(k));
         }
 
         // the segmented estimate of Lemma 1's LHS: every (m, d) pair whose

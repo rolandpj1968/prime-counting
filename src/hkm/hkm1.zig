@@ -40,6 +40,7 @@
 const std = @import("std");
 const rs = @import("rs");
 const r0 = @import("hkm0.zig");
+const sg = @import("seg.zig");
 
 const Row = struct {
     err_closed: i64 = 0,
@@ -107,23 +108,19 @@ pub fn main(init: std.process.Init) !void {
 
     for (deltas.items) |delta| {
         std.debug.assert(delta <= 1.0);
-        const K = r0.kbar(N, delta);
+        var g = try sg.build(gpa, N, delta);
+        defer g.deinit(gpa);
+        const K = g.K;
 
         const ks = try gpa.alloc(usize, primes.len);
         defer gpa.free(ks);
-        for (primes, 0..) |p, i| ks[i] = r0.kbar(p, delta);
+        for (primes, 0..) |p, i| ks[i] = g.kbar(p);
 
         const mtab = try gpa.alloc(u64, K + 1);
         defer gpa.free(mtab);
         {
-            var acc: u64 = 0;
             var k: usize = 0;
-            while (k <= K) : (k += 1) {
-                const lo = std.math.pow(f64, 2.0, @as(f64, @floatFromInt(k)) * delta);
-                const hi = std.math.pow(f64, 2.0, @as(f64, @floatFromInt(k + 1)) * delta);
-                acc += @as(u64, @intFromFloat(@ceil(hi))) - @as(u64, @intFromFloat(@ceil(lo)));
-                mtab[k] = acc;
-            }
+            while (k <= K) : (k += 1) mtab[k] = g.upto(k);
         }
 
         var row = Row{};
@@ -145,7 +142,7 @@ pub fn main(init: std.process.Init) !void {
         {
             var k1: usize = 0;
             while (k1 <= K) : (k1 += 1) {
-                const c1: i64 = @intCast(mtab[k1] - (if (k1 == 0) @as(u64, 0) else mtab[k1 - 1]));
+                const c1: i64 = @intCast(g.cell(k1));
                 if (c1 == 0) continue;
                 var k2: usize = 0;
                 while (k1 + k2 <= K) : (k2 += 1) seg += c1 * conv[k2];
