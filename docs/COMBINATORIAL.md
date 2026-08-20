@@ -1719,23 +1719,26 @@ Same machine, same single thread, `./pi <N>` (tuned Gourdon, x^(2/3)) against
 | 10¹¹ | 15.92 s | 0.016 s | 995× | — |
 | 10¹² | 65.22 s | 0.056 s | **1165×** | ~156 MB |
 | 10¹³ | 249.00 s | 0.221 s | **1127×** | 603 MB |
+| 10¹⁴ | 1499.56 s | 0.792 s | **1893×** | 2.34 GB |
 
 Gourdon holds ~1 MB throughout. The 10⁹/10¹⁰ ratios are parenthesised because
 2 ms and 5 ms are Gourdon's startup floor, not its algorithm.
 
-**Correction to an earlier reading of this table.** With data stopping at
-10¹² the ratio looked like it was widening monotonically (400 → 1205) and this
-document said so. Adding 10¹³ shows that was an artefact of the low end: over
-the range where both timings are trustworthy the ratio is **flat at ~1000–1150
-across 10¹¹–10¹³**, having turned over between 10¹² and 10¹³.
+**This table has now been over-read twice, so here is what it does and does
+not support.** At three decades ending 10¹² it looked monotonically widening
+(400 → 1205) and this document said so; adding 10¹³ made it look flat and the
+document said that instead; adding 10¹⁴ breaks flat again. Per-decade ratios
+of HKM to itself are 4.10, 3.82, 6.02 — the last inflated by the S-slack
+effect described below, which has nothing to do with asymptotics. **Single-
+and double-decade fits here are not reliable**, and both earlier readings were
+drawn from them.
 
-Matched-range exponents, 10¹¹→10¹³ for both: HKM **N^0.597**, Gourdon
-**N^0.570**. Close enough that the ratio grows ~1.06× per decade — flat, as
-measured. HKM's exponent *is* still the worse of the two, so nothing here
-promises a crossover; it says the two curves are running very nearly parallel
-1100× apart, and that log³N is exactly cancelling the exponent advantage over
-the reachable range. Asymptotically HKM must win. Empirically, from these
-data, no crossover is in sight.
+What four decades support: over 10¹¹→10¹⁴, HKM is **N^0.658** and Gourdon is
+**N^0.565**. HKM's measured exponent is the worse of the two by ~0.09, i.e.
+the ratio grows ~1.2× per decade, and the ratio itself spans **1000–1900**
+across the range. Asymptotically HKM must win, since 1/2 < 2/3. Empirically,
+across every N reachable here, log³N more than cancels the exponent advantage
+and the gap is not closing.
 
 That is the honest answer to the question this arc opened with — *is the
 Õ(√N) algorithm the way past x^(2/3) in practice?* On this hardware, at these
@@ -1750,8 +1753,8 @@ What HKM remains worth doing for, in order:
    not a constant-factor race, and it is the corner that was interesting from
    the start. It is also the direct bridge to `pistar`: §4.1's identity is
    Riemann's π*(x) = Σ_k π(x^(1/k))/k.
-2. ~~**The scaling law itself**~~ — done; 10¹³ landed at 249.00 s and is in
-   the table above. 10¹⁴ would take ~16 min and ~2 GB if wanted.
+2. ~~**The scaling law itself**~~ — done; 10¹³ at 249.00 s and 10¹⁴ at
+   1499.56 s / 2.34 GB are in the table above.
 3. ~~**Consolidation**~~ — done; both μ̂ routes now live in `muhat.zig`.
 
 Speed work against Gourdon is parked. Parallelism would buy HKM ~5× on six
@@ -1818,9 +1821,33 @@ at every rung.
 | 10¹¹ | 4,118,054,813 | 8.8×10⁷ | 1.06 s | 3.71 s | 11.14 s | 15.92 s | — |
 | 10¹² | 37,607,912,018 | 3.3×10⁸ | 4.53 s | 15.38 s | 45.29 s | 65.22 s | 156 MB |
 | 10¹³ | 346,065,536,839 | 1.2×10⁹ | 21.58 s | 59.72 s | 167.62 s | 249.00 s | 603 MB |
+| 10¹⁴ | 3,204,941,750,802 | 4.2×10⁹ | 88.79 s | 219.53 s | 1191.05 s | 1499.56 s | 2.34 GB |
 
-At 10¹³ the critical interval is 1.23×10⁹ integers (389×√N) of which **77.2%
-are skipped outright** by the critical-divisor test, and the largest
-contributing n sits 1.98× inside the proven S bound. Profile is stable at
-roughly 9% / 24% / 67% across the top three rungs, so the correction remains
-the thing to attack and the μ̂ work is finished as a fraction of the whole.
+### Extrapolating the correction: S is the wrong variable
+
+10¹⁴ was predicted at ~920 s and came in at **1499.56 s**, 63% over. The sieve
+(219.53 s vs 221 predicted) and the μ̂ build (88.79 s vs 97) were essentially
+exact; the whole miss is the correction, 1191.05 s against 620. It was
+extrapolated with S, which grew 3.4×; it actually grew 7.1×.
+
+| N | S bound | true extent | slack | "free" skip | skip *within active* | non-skipped | ns per n |
+|---|---|---|---|---|---|---|---|
+| 10¹³ | 1.23×10⁹ | 6.22×10⁸ | 1.98 | 49.5% | **54.9%** | 2.81×10⁸ | 597 |
+| 10¹⁴ | 4.19×10⁹ | 2.73×10⁹ | 1.53 | 34.8% | **52.3%** | 1.30×10⁹ | 914 |
+
+The headline skip rate falling from 77.2% to 68.9% is *not* the prune
+weakening — it is how loose S happened to be. Everything past the true
+spurious extent is skipped for free, and that free fraction is 1 − 1/slack.
+Measured on the active region alone the critical-divisor prune is **stable at
+~53%**. The slack itself has ranged 1.40–1.98 across the ladder with no clean
+trend; it is a proven upper bound, and how far inside it the true extremal
+pair lands is not something the bound predicts.
+
+So the correction extrapolates on **true extent × per-n cost**, not S:
+4.39 × 1.53 = 6.7× against the measured 7.10×. The per-n cost rising
+597 → 914 ns is the divisor DFS getting deeper, and is the only intrinsic
+half of the growth.
+
+Profile across the top three rungs: μ̂ 9% / sieve 24% / correction 67% at 10¹³,
+and 6% / 15% / **79%** at 10¹⁴. The correction is not merely the thing to
+attack — its share is growing.
