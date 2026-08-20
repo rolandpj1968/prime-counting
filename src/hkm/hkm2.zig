@@ -85,6 +85,37 @@
 //! omega(n) for n <= N+S is at most the largest r with p_1...p_r <= N+S, so
 //! the primorial gives it exactly (11 at 1e12, 12 at 1e14).
 //!
+//! §3.8.1 — the admission test as a fractional-part comparison. With
+//! L(x) = log2(x)/D, working the floors through gives
+//!
+//!   floor(L(n/d)) + sum floor(L(p_i)) <= K
+//!     <=>  floor( {L(n)} - sum_i {L(p_i)} ) <= K - kbar(n)
+//!
+//! since {L(n/d)} = {L(n)} - sum{L(p_i)} mod 1. With S the running sum of
+//! fractional parts over the primes of d, and kd = kbar(n) - K, that is just
+//!
+//!   S > {L(n)} + kd - 1
+//!
+//! one float compare, replacing a u64 division plus a @log2 plus a wall search
+//! PER DIVISOR VISIT. Exact — no epsilon, no table, no randomised Delta.
+//!
+//! (§3.8.2 builds a look-up table on rounded fractional parts. It does not fit
+//! at reachable N: the table is C(k+m,k)*(m+1) with m = 1/eps while the
+//! undetermined fraction is ~4*eps*log2log2N ~ 22 eps at 1e14, so resolving
+//! even half the divisors needs m ~ 44 and C(56,12) = 5.6e12 entries. Any m
+//! small enough to store leaves nothing determined. It is also the half that
+//! needs a randomised Delta and is only proved for a randomized algorithm.)
+//!
+//! THE SEAM, named in advance. {L(p)} is computed as log2(p)/D - kbar(p),
+//! where log2(p)/D reaches K ~ 1e7 at 1e14, so f64 leaves ~2e-9 of absolute
+//! error in each fractional part and ~3e-8 in a sum of twelve. Anything within
+//! that of the threshold is undecidable in f64 — the same shape of bug as the
+//! wall seam and pistar's half-ulp band, and this time it is anticipated
+//! rather than discovered. So the comparison is banded: outside +-TOL the fast
+//! test decides, inside it the exact integer test is run. TOL = 1e-6 is 30x
+//! the error bound, the fallbacks are counted and printed, and the whole thing
+//! is A/B'd against the exact path for a bit-identical correction.
+//!
 //! Storage is CSR (count, prefix, fill) rather than a fixed [k]u32 per n:
 //! omega is small on average (~ln ln N) but its max grows, and a fixed row
 //! width would pay the max everywhere. The interval is processed in BLOCKS —
@@ -111,24 +142,56 @@ fn secs(a: u64, b: u64) f64 {
 /// Walk the squarefree sqrt-N-smooth divisors d of n, accumulating mu(d) over
 /// those the approximation admits. Pruned on khat(d) <= K: past that no m at
 /// all survives, so the whole subtree is dead.
-fn corr(g: *const sg.Geom, n: u64, plist: []const u32, primes: []const u64, ks: []const usize, i: usize, d: u64, khat: usize, w: usize, t: usize, sign: i64, acc: *i64) void {
-    // even taking every prime left, can this branch still reach omega >= t?
-    if (w + (plist.len - i) < t) return;
-    if (w >= t and g.kbar(n / d) + khat <= g.K) acc.* += sign;
-    var j = i;
-    while (j < plist.len) : (j += 1) {
-        const pi = plist[j];
-        if (khat + ks[pi] > g.K) continue;
-        corr(g, n, plist, primes, ks, j + 1, d * primes[pi], khat + ks[pi], w + 1, t, -sign, acc);
+const TOL: f64 = 1e-6; // 30x the f64 error bound on a sum of twelve {L(p)}
+
+const Corr = struct {
+    g: *const sg.Geom,
+    n: u64,
+    plist: []const u32,
+    primes: []const u64,
+    ks: []const usize,
+    fp: []const f64, // {L(p)} per prime index
+    thr: f64, // {L(n)} + kd - 1
+    t: usize, // critical-divisor threshold on omega(d)
+    fast: bool,
+    acc: i64 = 0,
+    fallbacks: u64 = 0,
+
+    fn walk(c: *Corr, i: usize, d: u64, khat: usize, w: usize, S: f64, sign: i64) void {
+        // even taking every prime left, can this branch still reach omega >= t?
+        if (w + (c.plist.len - i) < c.t) return;
+        if (w >= c.t) {
+            var admit: bool = undefined;
+            if (c.fast) {
+                const slack = S - c.thr;
+                if (slack > TOL) {
+                    admit = true;
+                } else if (slack < -TOL) {
+                    admit = false;
+                } else {
+                    c.fallbacks += 1;
+                    admit = c.g.kbar(c.n / d) + khat <= c.g.K;
+                }
+            } else {
+                admit = c.g.kbar(c.n / d) + khat <= c.g.K;
+            }
+            if (admit) c.acc += sign;
+        }
+        var j = i;
+        while (j < c.plist.len) : (j += 1) {
+            const pi = c.plist[j];
+            if (khat + c.ks[pi] > c.g.K) continue;
+            c.walk(j + 1, d * c.primes[pi], khat + c.ks[pi], w + 1, S + c.fp[pi], -sign);
+        }
     }
-}
+};
 
 pub fn main(init: std.process.Init) !void {
     var args = try init.minimal.args.iterateAllocator(init.gpa);
     _ = args.skip();
     const gpa = std.heap.page_allocator;
 
-    const usage = "Usage: hkm2 <N> [delta] [--no-critical] [--crit-off n] [--muhat auto|sparse|fourier]\n";
+    const usage = "Usage: hkm2 <N> [delta] [--no-critical] [--crit-off n] [--muhat auto|sparse|fourier] [--exact-test]\n";
     const n_str = args.next() orelse return std.debug.print(usage, .{});
     const N = try std.fmt.parseInt(u64, n_str, 10);
     const sq: u64 = std.math.sqrt(N);
@@ -136,9 +199,12 @@ pub fn main(init: std.process.Init) !void {
     var delta: f64 = @log2(nf) / @as(f64, @floatFromInt(sq));
     var critical = true;
     var mu_mode: muhat.Mode = .auto;
+    var fast_test = true;
     var crit_off: i64 = 0; // t(n) = kbar(n) - K - crit_off; 0 is proved below
     while (args.next()) |a| {
-        if (std.mem.eql(u8, a, "--no-critical")) {
+        if (std.mem.eql(u8, a, "--exact-test")) {
+            fast_test = false;
+        } else if (std.mem.eql(u8, a, "--no-critical")) {
             critical = false;
         } else if (std.mem.eql(u8, a, "--muhat")) {
             const v = args.next() orelse return std.debug.print(usage, .{});
@@ -159,6 +225,10 @@ pub fn main(init: std.process.Init) !void {
     const ks = try gpa.alloc(usize, primes.len);
     defer gpa.free(ks);
     for (primes, 0..) |p, i| ks[i] = g.kbar(p);
+    // {L(p)} = log2(p)/delta - kbar(p), the per-prime fractional parts of §3.8.1
+    const fp = try gpa.alloc(f64, primes.len);
+    defer gpa.free(fp);
+    for (primes, 0..) |p, i| fp[i] = @log2(@as(f64, @floatFromInt(p))) / delta - @as(f64, @floatFromInt(ks[i]));
 
     // ---- omega_max: the largest number of distinct primes any admissible d
     // can carry, = greedily take the cheapest kbar(p) (i.e. smallest primes)
@@ -214,6 +284,7 @@ pub fn main(init: std.process.Init) !void {
     var ns_sieve: u64 = 0;
     var ns_corr: u64 = 0;
     var skipped: u64 = 0;
+    var fallbacks: u64 = 0;
     var row_w: usize = 0;
     var blk_used: usize = 0;
     {
@@ -261,12 +332,10 @@ pub fn main(init: std.process.Init) !void {
                 while (lo2 <= hi) {
                     const kn = g.kbar(lo2);
                     const cell_end = if (kn + 1 < g.wall.len) @min(hi, g.wall[kn + 1] - 1) else hi;
-                    var t: usize = 0;
-                    if (critical) {
-                        const v = @as(i64, @intCast(kn)) - @as(i64, @intCast(g.K)) - crit_off;
-                        if (v > 0) t = @intCast(v);
-                    }
-                    const tb8: u8 = @intCast(@min(t, 255));
+                    // store kd = kbar(n) - K; the prune threshold is derived
+                    // from it, and §3.8.1's comparison needs kd itself
+                    const kd: usize = kn - g.K;
+                    const tb8: u8 = @intCast(@min(kd, 255));
                     @memset(tarr[@intCast(lo2 - base) .. @as(usize, @intCast(cell_end - base)) + 1], tb8);
                     lo2 = cell_end + 1;
                 }
@@ -277,17 +346,35 @@ pub fn main(init: std.process.Init) !void {
             for (0..w) |s| {
                 const c = cnt[s];
                 if (c > max_omega_seen) max_omega_seen = c;
-                if (c < tarr[s]) {
+                const kd: usize = tarr[s];
+                var t: usize = 0;
+                if (critical) {
+                    const v = @as(i64, @intCast(kd)) - crit_off;
+                    if (v > 0) t = @intCast(v);
+                }
+                if (c < t) {
                     skipped += 1;
                     continue;
                 }
                 std.debug.assert(c <= W); // primorial bound; violation = truncated factor list
                 const n = base + @as(u64, s);
-                const plist = rows[s * W .. s * W + c];
-                var acc: i64 = 0;
-                corr(&g, n, plist, primes, ks, 0, 1, 0, 0, tarr[s], 1, &acc);
-                if (acc != 0) max_hit = n;
-                C += acc;
+                const nf2: f64 = @floatFromInt(n);
+                const fn_ = @log2(nf2) / delta - @as(f64, @floatFromInt(g.K + kd));
+                var cc = Corr{
+                    .g = &g,
+                    .n = n,
+                    .plist = rows[s * W .. s * W + c],
+                    .primes = primes,
+                    .ks = ks,
+                    .fp = fp,
+                    .thr = fn_ + @as(f64, @floatFromInt(kd)) - 1.0,
+                    .t = t,
+                    .fast = fast_test,
+                };
+                cc.walk(0, 1, 0, 0, 0.0, 1);
+                fallbacks += cc.fallbacks;
+                if (cc.acc != 0) max_hit = n;
+                C += cc.acc;
             }
             ns_sieve += tb - ta;
             ns_corr += nowNs() - tb;
@@ -312,7 +399,9 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("\npi({d}) = {d}\nreferee  = {d} ({s})   {s}\n", .{ N, pi_computed, pi_N, if (from_table != null) "published table" else "sieve", if (pi_computed == pi_N) "MATCH" else "MISMATCH" });
     std.debug.print("\nspurious extent: largest contributing n - N = {d}  (S bound {d}, slack {d:.2}x)\n", .{ max_hit - N, S, @as(f64, @floatFromInt(S)) / @as(f64, @floatFromInt(@max(1, max_hit - N))) });
     std.debug.print("max omega in interval = {d}  (omega_max bound {d})\n", .{ max_omega_seen, omega_max });
-    std.debug.print("sieve rows: {d} wide x {d} block = {d:.0} MB\n", .{ row_w, blk_used, @as(f64, @floatFromInt(row_w * blk_used * 4)) / 1e6 });
+    std.debug.print("admission test: {s}", .{if (fast_test) "fractional (3.8.1)" else "exact integer"});
+    if (fast_test) std.debug.print("  — {d} band fallbacks", .{fallbacks});
+    std.debug.print("\nsieve rows: {d} wide x {d} block = {d:.0} MB\n", .{ row_w, blk_used, @as(f64, @floatFromInt(row_w * blk_used * 4)) / 1e6 });
     std.debug.print("mu-hat route: {s}", .{mstat.route});
     if (mstat.parts != 0) std.debug.print("  ({d} parts, {d} transforms, largest 2^{d})", .{ mstat.parts, mstat.transforms, std.math.log2_int(usize, @max(2, mstat.L_max)) });
     std.debug.print("\ncritical divisors: {s}", .{if (critical) "on" else "OFF"});

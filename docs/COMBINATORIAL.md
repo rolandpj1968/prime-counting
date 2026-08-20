@@ -1721,6 +1721,9 @@ Same machine, same single thread, `./pi <N>` (tuned Gourdon, x^(2/3)) against
 | 10¹³ | 249.00 s | 0.221 s | **1127×** | 603 MB |
 | 10¹⁴ | 1499.56 s | 0.792 s | **1893×** | 2.34 GB |
 
+(These are the R6-era numbers. R8 and R9 bring 10¹⁴ to 352.07 s and the ratio
+to 445× — see "Where the arc ended up" below.)
+
 Gourdon holds ~1 MB throughout. The 10⁹/10¹⁰ ratios are parenthesised because
 2 ms and 5 ms are Gourdon's startup floor, not its algorithm.
 
@@ -1907,3 +1910,76 @@ arrays. Everything except the correction is now noise. §3.8 (the look-up table
 on fractional parts, randomized, worth a log factor) is the only untried
 algorithmic lever aimed at it; parallelism is the other, and would apply to
 ~86% of the work.
+
+## R9 — §3.8.1, the admission test as a fractional-part comparison
+
+§3.8 has two halves and they are very different propositions.
+
+**§3.8.2 (look-up tables) does not fit at reachable N.** The table is
+C(k+m, k)·(m+1) with m = 1/ε, while the undetermined fraction is
+~4ε·log₂log₂N ≈ 22ε at 10¹⁴. Resolving even half the divisors needs m ≈ 44,
+and C(56,12) = 5.6×10¹² entries. Any m small enough to store leaves nothing
+determined. It is also the half that requires a randomised Δ and is proved
+only for a randomized algorithm. Not built.
+
+**§3.8.1 is exact, and is the whole prize.** With L(x) = log₂x/Δ, working the
+floors through:
+
+  ⌊L(n/d)⌋ + Σ⌊L(pᵢ)⌋ ≤ K  ⟺  ⌊ {L(n)} − Σᵢ{L(pᵢ)} ⌋ ≤ K − k̄(n)
+
+because {L(n/d)} ≡ {L(n)} − Σ{L(pᵢ)} (mod 1). Writing S for the running sum of
+fractional parts down the DFS and kd = k̄(n) − K, and using ⌊x⌋ ≤ m ⟺ x < m+1:
+
+  **S > {L(n)} + kd − 1**
+
+One float compare, replacing a u64 division plus a `@log2` plus a wall search
+**per divisor visit**. No ε, no table, no randomisation.
+
+**The seam, named in advance for once.** {L(p)} is computed as
+log₂(p)/Δ − k̄(p), and log₂(p)/Δ reaches K ≈ 10⁷ at 10¹⁴, so f64 leaves ~2×10⁻⁹
+of absolute error per fractional part and ~3×10⁻⁸ in a sum of twelve. Anything
+within that of the threshold is undecidable in f64 — the same shape as the wall
+seam and `pistar`'s half-ulp band. So the comparison is **banded**: outside
+±TOL the fast test decides, inside it the exact integer test runs. TOL = 10⁻⁶
+is 30× the error bound; fallbacks are counted and printed (4 at 10⁹, 9,222 at
+10¹²); and `--exact-test` A/Bs the whole thing.
+
+| N | correction exact → fractional | total | speedup |
+|---|---|---|---|
+| 10⁹ | 0.65 → 0.16 s | 0.90 → **0.37 s** | 2.43× |
+| 10¹⁰ | 2.47 → 0.77 s | 3.17 → **1.46 s** | 2.17× |
+| 10¹¹ | 10.06 → 2.92 s | 12.99 → **5.85 s** | 2.22× |
+| 10¹² | 40.35 → 11.19 s | 51.93 → **22.96 s** | 2.26× |
+| 10¹³ | 161.91 → 36.10 s | 210.21 → **84.58 s** | 2.49× |
+| 10¹⁴ | 1118.77 → 169.28 s | 1300.89 → **352.07 s** | 3.70× |
+
+The correction is 3.2–4.1× faster and `correction` is **bit-identical** to the
+exact path at every N (−75,868 / −95,362 / −572,666 / −1,428,340), which is the
+check that the reformulation is a reformulation.
+
+**The profile is balanced for the first time in the arc**: at 10¹² it is μ̂
+4.75 s (21%) / sieve 6.98 s (30%) / correction 11.19 s (49%), and at 10¹⁴ it is
+88.09 s (25%) / 94.53 s (27%) / 169.28 s (48%) — where two rungs ago it was
+7 / 7 / 86. Nothing is now the obvious next target, which is itself the answer
+to "what is left to optimise algorithmically": very little.
+
+### Where the arc ended up
+
+10¹⁴ end to end, across this stretch: **1499.56 s → 1300.89 s (§3.7) → 352.07 s
+(§3.8.1)**, a cumulative **4.26×**, at unchanged 2.34 GB. 10¹² went 134.53 s at
+R2 to **22.96 s**, a cumulative 5.86×.
+
+Head-to-head against tuned Gourdon, restated with the current build:
+
+| N | HKM | Gourdon | ratio |
+|---|---|---|---|
+| 10¹¹ | 5.85 s | 0.016 s | 366× |
+| 10¹² | 22.96 s | 0.056 s | 410× |
+| 10¹³ | 84.58 s | 0.221 s | 383× |
+| 10¹⁴ | 352.07 s | 0.792 s | 445× |
+
+The gap was 995–1893× before these two rungs and is 366–445× now. Matched
+exponents over 10¹¹→10¹⁴: HKM **N^0.593**, Gourdon **N^0.565**. Having
+over-read this table twice already, the only claim made here is the arithmetic:
+the constant improved ~3×, the exponents are within 0.03 of each other over
+three decades, and nothing in the measured range indicates a crossing.
