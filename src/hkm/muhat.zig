@@ -25,6 +25,9 @@ const ntt = @import("ntt.zig");
 pub const Mode = enum { auto, sparse, fourier };
 
 pub const Stats = struct {
+    part_rmax: [16]u32 = [_]u32{0} ** 16,
+    part_L: [16]u32 = [_]u32{0} ** 16,
+    part_n: usize = 0,
     transforms: usize = 0,
     rmax_sum: usize = 0,
     L_max: usize = 0,
@@ -73,6 +76,11 @@ fn factorViaFourier(gpa: std.mem.Allocator, ks: []const usize, K: usize, stat: *
     var L: usize = 1;
     while (L < D + 1) L <<= 1;
     stat.rmax_sum += rmax;
+    if (stat.part_n < 16) {
+        stat.part_rmax[stat.part_n] = @intCast(rmax);
+        stat.part_L[stat.part_n] = @intCast(@min(L, std.math.maxInt(u32)));
+        stat.part_n += 1;
+    }
     stat.L_max = @max(stat.L_max, L);
     stat.work += L * rmax * (rmax + 1) / 2;
 
@@ -121,7 +129,12 @@ fn factorViaFourier(gpa: std.mem.Allocator, ks: []const usize, K: usize, stat: *
 
 /// §3.3: split the primes by size level and convolve the per-level factors.
 /// `one_part` forces a single interval, i.e. §3.2 as written.
-pub fn fourier(gpa: std.mem.Allocator, ks: []const usize, K: usize, one_part: bool, stat: *Stats) ![]i64 {
+/// `ratio` is the size ratio of a §3.3 prime interval: 2.0 is HKM's
+/// [N^(1/2^(m+1)), N^(1/2^m)]. It is the space/time knob. A part needs
+/// L >= D = r_max * max_j ~ K * (log p_hi / log p_lo) = K * ratio, so peak
+/// memory per part falls with the ratio while the number of parts — and hence
+/// the transform count — rises as log(log2 N)/log(ratio).
+pub fn fourierR(gpa: std.mem.Allocator, ks: []const usize, K: usize, one_part: bool, ratio: f64, stat: *Stats) ![]i64 {
     var cuts: [64]usize = undefined;
     var nparts: usize = 0;
     if (one_part or ks.len == 0) {
@@ -131,7 +144,7 @@ pub fn fourier(gpa: std.mem.Allocator, ks: []const usize, K: usize, one_part: bo
         var prev: usize = std.math.maxInt(usize);
         for (ks, 0..) |j, i| {
             const u = @as(f64, @floatFromInt(K)) / @as(f64, @floatFromInt(@max(1, j)));
-            const lvl: usize = @intFromFloat(@max(0.0, @floor(@log2(@max(1.0, u)))));
+            const lvl: usize = @intFromFloat(@max(0.0, @floor(@log(@max(1.0, u)) / @log(ratio))));
             if (lvl != prev) {
                 cuts[nparts] = i;
                 nparts += 1;
@@ -168,6 +181,10 @@ pub fn fourier(gpa: std.mem.Allocator, ks: []const usize, K: usize, one_part: bo
 
 /// Measured crossover: sparse below, fourier above. See the table above.
 pub const AUTO_K = 550_000;
+
+pub fn fourier(gpa: std.mem.Allocator, ks: []const usize, K: usize, one_part: bool, stat: *Stats) ![]i64 {
+    return fourierR(gpa, ks, K, one_part, 2.0, stat);
+}
 
 pub fn build(gpa: std.mem.Allocator, ks: []const usize, K: usize, mode: Mode, stat: *Stats) ![]i64 {
     const use_fourier = switch (mode) {

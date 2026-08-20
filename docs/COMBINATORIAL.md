@@ -1983,3 +1983,53 @@ exponents over 10¹¹→10¹⁴: HKM **N^0.593**, Gourdon **N^0.565**. Having
 over-read this table twice already, the only claim made here is the arithmetic:
 the constant improved ~3×, the exponents are within 0.03 of each other over
 three decades, and nothing in the measured range indicates a crossing.
+
+## Memory beyond 10¹⁴, measured
+
+Peak RSS has gone 156 MB → 603 MB → 2.34 GB at 10¹²/10¹³/10¹⁴, i.e. **×3.88
+per decade** (N^0.589 — √N with r_max creeping up and power-of-two rounding on
+top). Decomposing it at 10¹³, where the μ̂ parts are built and freed
+*sequentially* so the peak is the **largest part, not the sum**:
+
+```
+per-part (r_max x L):  1x2^17=1MB  2x2^19=8MB  9x2^22=302MB  7x2^23=470MB  3x2^23=201MB
+```
+
+470 MB + a 67 MB accumulator against 603 MB measured. The sieve rows (218 MB)
+and wall table (82 MB at 10¹⁴) do not scale with N. So μ̂ is essentially all of
+it, at (r_max+1)·L·8 ≈ **256·√N bytes**, giving ~9 GB at 10¹⁵ and ~35 GB at
+10¹⁶. Time is not the constraint — 10¹⁶ would be ~90 min. **The wall is
+memory, and it sits between 10¹⁵ and 10¹⁶.**
+
+### The partition ratio is the space/time knob
+
+A part needs L ≥ D = r_max·max_j ≈ K·(log p_hi / log p_lo) = K·ratio, so peak
+memory falls with the §3.3 interval ratio while the number of parts — and the
+transform count — rises as log(log₂N)/log(ratio). HKM use ratio 2. Measured at
+10¹³ (`hkm5 --ratio`):
+
+| ratio | parts | transforms | largest L | μ̂ time | peak RSS |
+|---|---|---|---|---|---|
+| 2.0 | 5 | 39 | 2²³ | 21.32 s | 603 MB |
+| 1.6 | 8 | 56 | 2²³ | 28.54 s | 538 MB |
+| **1.4** | 9 | 65 | **2²²** | 27.74 s | **374 MB** |
+| 1.25 | 13 | 89 | 2²² | 38.92 s | 341 MB |
+
+**The knob is discrete, and that is the whole point.** What matters is the
+largest transform length, which is a power of two — so ratio 1.6 buys almost
+nothing (still 2²³, 34% slower for 11% less memory) while 1.4 crosses to 2²²
+and buys **1.61× less memory for 1.30× more time**. Past that, 1.25 pays 1.83×
+time for a further 1.10×. The useful setting is the largest ratio that pushes
+D under the next power of two; anything finer is wasted.
+
+μ̂ MATCHes the sparse build at every ratio tested.
+
+At ratio 1.4 the projection becomes ~1.45 GB at 10¹⁴, ~5.6 GB at 10¹⁵, ~22 GB
+at 10¹⁶ — so **10¹⁵ is comfortable and 10¹⁶ lands right at the edge** of a
+28 GB box, at a cost of ~8% on end-to-end runtime (μ̂ is only ~25% of it). The
+default stays at 2.0, since memory does not bind below 10¹⁵ and the knob is
+there when it does.
+
+Beyond that the levers are §4.1 (fewer exact primes — the real Õ(N^(1/4))
+answer, and a large build), or the sparse μ̂ route, which needs only 8√N bytes
+(800 MB at 10¹⁶) but whose time explodes to an estimated ~64 h there.

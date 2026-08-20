@@ -75,10 +75,14 @@ pub fn main(init: std.process.Init) !void {
     const N = try std.fmt.parseInt(u64, n_str, 10);
     var one_part = false;
     var referee = true;
+    var ratio: f64 = 2.0;
     while (args.next()) |a| {
         if (std.mem.eql(u8, a, "--parts")) {
             const v = args.next() orelse return std.debug.print(usage, .{});
             one_part = std.mem.eql(u8, v, "1");
+        } else if (std.mem.eql(u8, a, "--ratio")) {
+            const v = args.next() orelse return std.debug.print(usage, .{});
+            ratio = try std.fmt.parseFloat(f64, v);
         } else if (std.mem.eql(u8, a, "--no-referee")) referee = false;
     }
 
@@ -98,10 +102,13 @@ pub fn main(init: std.process.Init) !void {
 
     const t0 = nowNs();
     var stat = muhat.Stats{};
-    const acc = try muhat.fourier(gpa, ks, K, one_part, &stat);
+    const acc = try muhat.fourierR(gpa, ks, K, one_part, ratio, &stat);
     defer gpa.free(acc);
     const t_done = nowNs();
 
+    std.debug.print("per-part (r_max x L = MB):", .{});
+    for (0..stat.part_n) |i| std.debug.print(" {d}x2^{d}={d:.0}MB", .{ stat.part_rmax[i], std.math.log2_int(u32, @max(2, stat.part_L[i])), @as(f64, @floatFromInt(stat.part_rmax[i])) * @as(f64, @floatFromInt(stat.part_L[i])) * 8.0 / 1e6 });
+    std.debug.print("\n", .{});
     std.debug.print("parts {d}   transforms {d}   sum of r_max {d}   largest transform 2^{d}   pointwise modmuls {e:.2}\n", .{ stat.parts, stat.transforms, stat.rmax_sum, std.math.log2_int(usize, @max(2, stat.L_max)), @as(f64, @floatFromInt(stat.work)) });
     std.debug.print("time {d:.2}s\n", .{sec(t0, t_done)});
 
