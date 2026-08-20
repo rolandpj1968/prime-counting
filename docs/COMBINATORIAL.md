@@ -1492,10 +1492,43 @@ R-dependent constant of ~450 bytes per unit of √N. Measured 394 MB at 10¹² a
 1.69 GB at 10¹³; projecting, ~7 GB at 10¹⁴ and ~14 GB at 10¹⁵. So on a 28 GB
 box **memory, not time, becomes R4's ceiling somewhere around 10¹⁵**.
 
-That is the natural target for the next structural idea rather than more
-tuning: μ̂ = exp(−Σ_m E_m/m) truncated at K, since ∏(1−x^(j_p)) =
-exp(Σ_p log(1−x^(j_p))). Computing a truncated exp by Newton iteration is
-O(K log K) in **O(1) working arrays** instead of 2R+2, at the cost of ~2 log K
-transforms rather than 3R. Whether that trades favourably at 10¹³–10¹⁵ is a
-measurement, not an argument — but it is the only route on the table that
-removes the R factor from *space*.
+### What R4 is, and what the paper already says about the rest
+
+R4 is **HKM §3.1** ("Applying Newton's identities in the Fourier space"), and
+nothing more. The transform-bound cost and the R-array working set are both
+addressed later in the paper, and it is worth writing down which sections, so
+they are not rediscovered a third time.
+
+An earlier draft of this section proposed μ̂ = exp(−Σ_m E_m/m) truncated at K
+as a fresh idea for removing R from the working set. It is not fresh on any
+level. The identity ∏(1+xᵢt) = exp(Σ(−1)^(r−1) p_r t^r / r) is the exponential
+form of Newton's identities (Macdonald, *Symmetric Functions and Hall
+Polynomials*, §I.2 eq 2.10) — the two are one identity written twice. In this
+setting it is Euler: Σ_m E_m/m over primes *is* log ζ segmented, since
+∏_p(1−p^(−s)) = 1/ζ(s), so "μ̂ = exp(−Σ E_m/m)" is "1/ζ = exp(−log ζ)" in the
+bucketed world — the same ζ_N that §7 identifies as the bridge to `pistar`.
+And **HKM do it already, in §3.2**, citing Hanrot–Zimmermann 2004 for the
+O(1)-FFT exponentiation.
+
+It was also the worse version, along the wrong axis:
+
+* **§3.2** exponentiates in **r**, the Newton index, *pointwise per Fourier
+  coordinate*: at a fixed coordinate r·c_r = Σ c_{r−r'} e_{r'} is a scalar ODE
+  x·c' = e·c, so c = exp(∫e/t). The series has length r_max = O(log N/log log N)
+  — 12 at 10¹³, not K — and being pointwise it needs **no truncation at all**,
+  which is precisely what removes the 3R time-domain round-trips that dominate
+  R4's clock.
+* The k-axis version has series length K ≈ √N and *keeps* the truncation
+  problem it was meant to solve.
+
+§3.2's price is padding — arrays grow to O(log²N/Δ) = O(√N log N) so nothing
+wraps — and **§3.3, "Partitioning primes to reduce padding"**, removes that
+log N by applying Newton separately per prime size-interval, where
+r_max = log₂N/log₂p_min is small for the large primes. The memory ceiling
+identified above is **§4.2, "Working only in Fourier space"**.
+
+So the remaining structure is R5 = §3.2, R6 = §3.3, R7 = §4.2, in that order.
+What is genuinely open is only empirical: whether §3.2's trade — transform
+length ×~log N against R+1 transforms instead of 3R, plus a pointwise scalar
+exp — wins at 10¹³–10¹⁵ on this hardware. The paper settles it
+asymptotically, not on a laptop.
