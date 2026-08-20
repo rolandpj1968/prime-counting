@@ -325,6 +325,17 @@ const GRID = 1 << 22; // eta/mu/nu cumulative-integral grid over [-1, 1]:
 // h^2 table error is the leading shared floor suspect AND the leading
 // cert component; 2^22 puts R_window ~ 0.05 even at 1e19
 
+/// log(n/x) with the integer offset formed EXACTLY. Above 2^53
+/// @floatFromInt(n) rounds n itself (ulp = 2 at 1e16), so every odd n --
+/// i.e. every window prime -- is displaced by +-1 in a fixed arithmetic
+/// pattern (ties-to-even: n-1 if n = 1 mod 4, n+1 if n = 3 mod 4).
+/// Differencing in i64 first removes it; |n - x| <= x*eps stays well
+/// inside 2^53, so the offset is exact and only the divide rounds.
+fn logRatio(n: u64, x: u64, xf: f64) f64 {
+    const d: i64 = @as(i64, @intCast(n)) - @as(i64, @intCast(x));
+    return std.math.log1p(@as(f64, @floatFromInt(d)) / xf);
+}
+
 const LoganButhe = struct {
     x: u64,
     xf: f64,
@@ -488,7 +499,7 @@ const LoganButhe = struct {
 
     /// M_{x,c,eps}(n) per Thm 3.1; odd reflection handles n > x.
     fn bigM(k: *const LoganButhe, n: u64) f64 {
-        const u = std.math.log1p((@as(f64, @floatFromInt(n)) - k.xf) / k.xf); // log(n/x)
+        const u = logRatio(n, k.x, k.xf); // log(n/x), exact integer offset
         // clamp: the lo/hi cushion admits a couple of integers just outside
         // the exact support, where M = 0 — and where an unclamped y would
         // hand lookup a NEGATIVE f (@intFromFloat to usize = UB, garbage
@@ -904,7 +915,7 @@ const Slepian = struct {
     }
 
     fn bigM(k: *const Slepian, n: u64) f64 {
-        const u = std.math.log1p((@as(f64, @floatFromInt(n)) - k.xf) / k.xf);
+        const u = logRatio(n, k.x, k.xf);
         const y = @max(-1.0, @min(1.0, u / k.eps)); // clamp: see LoganButhe
         var mu: f64 = undefined;
         var nu: f64 = undefined;
@@ -1030,6 +1041,7 @@ fn run(comptime K: type, kern: *const K, x: u64, zeros: []const f64, zlo: []cons
         amp1: []f64, // sum |amp|
         amp2: []f64, // sum amp^2
         abst: []f64, // sum |term|
+        sqt: []f64, // sum term^2 -- the L2 quantity Hoeffding actually needs
         fn work(ctx: *@This(), wid: usize) void {
             const n = ctx.zeros.len;
             const chunk = (n + ctx.nt - 1) / ctx.nt;
@@ -1039,6 +1051,7 @@ fn run(comptime K: type, kern: *const K, x: u64, zeros: []const f64, zlo: []cons
             var a1: f64 = 0;
             var a2: f64 = 0;
             var at: f64 = 0;
+            var sq: f64 = 0;
             for (ctx.zeros[a..b], ctx.zlo[a..b]) |g, gl| {
                 if (ctx.kern.cutoff(g)) break; // gammas ascend within a range
                 const th = ddPhase(g, gl, ctx.kern.tc_hi, ctx.kern.tc_lo);
@@ -1048,11 +1061,13 @@ fn run(comptime K: type, kern: *const K, x: u64, zeros: []const f64, zlo: []cons
                 a1 += amp;
                 a2 += amp * amp;
                 at += @abs(t);
+                sq += t * t;
             }
             ctx.sums[wid] = k.val();
             ctx.amp1[wid] = a1;
             ctx.amp2[wid] = a2;
             ctx.abst[wid] = at;
+            ctx.sqt[wid] = sq;
         }
     };
     const WCtx = struct {
@@ -1103,7 +1118,9 @@ fn run(comptime K: type, kern: *const K, x: u64, zeros: []const f64, zlo: []cons
     defer gpa.free(zamp2);
     const zabst = try gpa.alloc(f64, nt);
     defer gpa.free(zabst);
-    var zctx = ZCtx{ .zeros = zeros, .zlo = zlo, .nt = nt, .kern = kern, .sums = zsums, .amp1 = zamp1, .amp2 = zamp2, .abst = zabst };
+    const zsqt = try gpa.alloc(f64, nt);
+    defer gpa.free(zsqt);
+    var zctx = ZCtx{ .zeros = zeros, .zlo = zlo, .nt = nt, .kern = kern, .sums = zsums, .amp1 = zamp1, .amp2 = zamp2, .abst = zabst, .sqt = zsqt };
     {
         const threads = try gpa.alloc(std.Thread, nt);
         defer gpa.free(threads);
@@ -1114,23 +1131,38 @@ fn run(comptime K: type, kern: *const K, x: u64, zeros: []const f64, zlo: []cons
     var s_amp1: f64 = 0;
     var s_amp2: f64 = 0;
     var s_abst: f64 = 0;
+    var s_sqt: f64 = 0;
     for (zsums) |s| zk.add(s);
     for (zamp1) |s| s_amp1 += s;
     for (zamp2) |s| s_amp2 += s;
     for (zabst) |s| s_abst += s;
+    for (zsqt) |s| s_sqt += s;
     const zerosum = zk.val();
-    // dual books: per-term error = amp * dtheta + |term| * ops*u, plus
-    // Neumaier 2u*sum|t|. Worst case adds moduli; the stochastic model
-    // (mean-zero independent, uniform-ish) adds variances. dtheta ~ 6u
-    // covers ddPhase's final adds + one ulp each for sin/cos (with a
-    // text table gamma's own rounding is NOT included — .bin is the
-    // instrument here). MODEL, not certificate, and labeled so.
+    // Three books on the zero-sum float error.
+    //   worst-case: deterministic, adds moduli. per-term error =
+    //     amp*dtheta + |term|*ops*u, plus Neumaier 2u*sum|t| for the Kahan
+    //     accumulation. This is the only column that is a BOUND.
+    //   rms: the stochastic model (delta_i mean-zero independent, uniform on
+    //     [-u,u] so variance u^2/3) adds VARIANCES -> sqrt(sum t^2), NOT
+    //     sum|t|/sqrt(N). |t_i| ~ sqrt(x)/(lam*g_i*L) spans orders of
+    //     magnitude down the table, so the quadratic mean is well above the
+    //     arithmetic mean and the old sum|t|^2/N form understated this.
+    //   hoeffding: rms * lam(eta), the Azuma-Hoeffding / probabilistic
+    //     rounding-error bound (Higham & Mary 2019): |E| <= lam*u*sqrt(sum
+    //     t^2) with probability >= 1 - eta, lam = sqrt(2 ln(2/eta)).
+    // EXCLUDES: the systematic pieces (mu/nu grid h^2 drift, Ei truncation,
+    // Thm 4.1 Theta) are BIASED, not mean-zero, so they get no sqrt(N) and
+    // live in the certified-radius column instead. With a text zero table
+    // gamma's own rounding is also excluded — .bin is the instrument here.
+    // The middle and right columns are a MODEL, not a certificate.
     const uu = 1.1102230246251565e-16;
     const dtheta = 6.0 * uu;
     const ops = 42.0 * uu;
+    const ETA = 1e-12; // stated failure probability for the Hoeffding column
+    const lam_h = @sqrt(2.0 * @log(2.0 / ETA));
     const f_worst = dtheta * s_amp1 + ops * s_abst + 2.0 * uu * s_abst;
-    const f_rms = @sqrt(dtheta * dtheta * s_amp2 / 3.0 + ops * ops * s_abst * s_abst / @max(1.0, @as(f64, @floatFromInt(zeros.len))));
-    std.debug.print("float(zerosum): worst-case {e:.2} | stochastic-model rms {e:.2} | mixing-leverage {d:.0}x\n", .{ f_worst, f_rms, f_worst / @max(f_rms, 1e-300) });
+    const f_rms = @sqrt(dtheta * dtheta * s_amp2 / 3.0 + ops * ops * s_sqt / 3.0);
+    std.debug.print("float(zerosum): worst-case {e:.2} | model rms {e:.2} | hoeffding(eta={e:.0}) {e:.2} | mixing-leverage {d:.0}x\n", .{ f_worst, f_rms, ETA, lam_h * f_rms, f_worst / @max(lam_h * f_rms, 1e-300) });
     const t_zeros = nowNs();
 
     // ---- pole term (smoothed li(x)) and constants — f128 aggregates from

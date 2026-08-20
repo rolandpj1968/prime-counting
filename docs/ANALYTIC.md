@@ -400,11 +400,12 @@ rather than a guess.**
 
 **Measured decay slopes: Logan ≈ e^(−1.25c), prolate ≈ e^(−2.3c) — the
 predicted 2:1, confirmed in the truncation-dominated regime** (10–40×
-error advantage at equal window). Both kernels then land on a *shared*
-error floor (~10⁻⁴ at c≈13 at 10¹⁵, ∝√x: −4.66×10⁻⁴ at 10¹⁶/c=14 where
-the two kernels agree to the printed digit) — kernel-independent
-machinery, suspected next-order dressing beyond m₂; on the worklist. The
-floor compresses the practical window win at loose targets to ~25%, and
+error advantage at equal window). Both kernels then appear to land on a
+*shared* error floor (~10⁻⁴ at c≈13 at 10¹⁵, ∝√x: −4.66×10⁻⁴ at 10¹⁶/c=14
+where the two kernels agree to the printed digit) — kernel-independent
+machinery, suspected next-order dressing beyond m₂. **RETRACTED — there is
+no floor; see "The floor that was a crossing" below.** The apparent floor
+compresses the practical window win at loose targets to ~25%, and
 the sweep's blunt discovery is that the default c = ½ln x + 9 was ~2×
 conservative for both kernels: 10¹⁶ at tuned c=14 runs in 22 s vs 51 s.
 
@@ -463,5 +464,78 @@ band primes.
 Ceiling of the method with existing zeros: Platt's T ≈ 3×10¹⁰ supports
 x ≈ 10²⁴⁻²⁵ (correction window ~x/T·polylog). Beyond that, computing new zeros
 (Odlyzko–Schönhage) becomes its own sub-project — also fleet-friendly.
+
+### The floor that was a crossing
+
+The "shared kernel-independent error floor" does not exist. Three
+falsifications, all against the T = 10⁸ table:
+
+**GRID 2²² → 2²⁴** (table h² ÷ 256), 10¹⁶/c=14: the residual moved by *zero*
+printed digits. The μ/ν interpolation is acquitted as the floor, and demoted
+as the leading suspect in the certified window component too.
+
+**Exact integer window offset.** All three kernels formed the window argument
+as `@floatFromInt(n) - xf`. Above 2⁵³ that rounds *n itself* (ulp = 2 at
+10¹⁶), and since every window prime is odd, ties-to-even displaces **every
+one of them** by ±1 in a fixed arithmetic pattern — n−1 when n ≡ 1 (mod 4),
+n+1 when n ≡ 3. New `logRatio(n, x, xf)` differences in i64 first, where the
+offset |n − x| ≤ xε is exact. Real, but small: −4.66×10⁻⁴ → −4.62×10⁻⁴, about
+1% of the residual. Kept — it costs nothing and removes a genuine systematic.
+(Logan and Slepian only; Gaussian carries no `x: u64`.)
+
+**The kill: sweep c.** Both kernels decay monotonically to *exactly zero*.
+
+| c | Logan 10¹⁶ | Slepian 10¹⁶ | | c | Logan 10¹⁵ | Slepian 10¹⁵ |
+|---:|---:|---:|---|---:|---:|---:|
+| 10 | −1.87×10⁻² | **+5.77×10⁻³** | | 13 | −6.82×10⁻⁴ | **+3.53×10⁻⁴** |
+| 14 | −4.62×10⁻⁴ | −4.63×10⁻⁴ | | 16 | +6.8×10⁻⁵ | +8.1×10⁻⁵ |
+| 18 | −2.6×10⁻⁵ | −1.3×10⁻⁵ | | 19 | +4×10⁻⁶ | +2×10⁻⁶ |
+| 22 | 0.000000 | 0.000000 | | 22 | 0.000000 | 0.000000 |
+
+At low c the two kernels differ by 3× **and in sign**; at high c by 2×. The
+floor was inferred from c = 14 at 10¹⁶ — precisely where the two decay curves
+cross, agreeing to 0.2%. And 10¹⁵ is below 2⁵³, so that sweep exercises the
+*unpatched* path: same clean decay. The patch did not fix it; it was never
+there.
+
+Consequence for the certified column: c_cert ≈ ½ln x + 0.4 gives 18.8 at
+10¹⁶, where the measured residual is 2.6×10⁻⁵. The 1.4× window price of a
+proof is the honest price of Logan's L1 tail — there is no mystery term
+underneath it.
+
+Fourth of the margin-epistemics kills, and the one that generalises: **two
+kernels agreeing at one value of a knob is a crossing, not an invariant.
+Sweep before naming.**
+
+### The float books, corrected
+
+`f_rms` was computing `ops²·(Σ|t|)²/N` — the *arithmetic* mean of |t| where
+the stochastic model needs Σt². Since |tᵢ| ~ √x/(λγᵢL) spans orders of
+magnitude down the zero table, the quadratic mean is well above the
+arithmetic mean, so the model column was optimistic even inside its own
+model. Fixed with an `s_sqt` accumulator (the phase half, via `amp2`, was
+already correct).
+
+A third column now prints the **Hoeffding / Higham–Mary probabilistic
+rounding-error bound**: |E| ≤ λ·u·√(Σt²) with probability ≥ 1 − η, where
+λ = √(2 ln(2/η)) = 7.53 at η = 10⁻¹². That is a bound *with a stated failure
+probability* — not a certificate, and the comment now states its exclusions:
+the biased terms (grid h², Ei truncation, Bühe's Θ) get no √N and belong in
+the certified column instead.
+
+Effect at 10¹⁵: mixing leverage **1022× → 26×**. The claimed cushion was
+wrong by 40×. It does not bind — 1.1×10⁻⁷ against a 0.5 budget — so
+double-double amplitudes stay deferred.
+
+**Why the tail bound cannot be sharpened by sign arguments at all.** Landau's
+formula (Gonek 1993 for uniformity) gives Σ_{0<γ≤T} x^ρ a main term
+−(T/2π)Λ(x) — supported *exactly* on prime powers. The dropped-zero tail's
+coherence near x **is** the arithmetic content; it is the same fact as ψ's
+jump at a prime power, and it is why rung 1's sharp cutoff needed T ~ x ln x.
+So R_tail is at its floor by construction and the only lever is the weight —
+which is why Logan's L1 extremality is the entire certified column. The
+corollary is the split we measured: RMS is available to the empiricist
+because a generic x is not a prime power; L1 is what the prover pays because
+the x you care about might be.
 
 See [README.md](../README.md) for framing and references.
