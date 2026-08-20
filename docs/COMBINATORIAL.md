@@ -1346,3 +1346,72 @@ worse than a sieve. That is precisely the gap Newton's identities
 (R4) close, by building μ̂ in O(log²N) convolutions instead of π(√N) of them —
 and why those convolutions have to be NTTs (R3). The motivation is now a
 measured curve rather than a claim in the paper.
+
+## R3 — the exact-convolution layer (`ntt.zig`, `hkm3.zig`)
+
+**Correction to the plan.** There is no O(K²) convolution here for an NTT to
+replace. R2's segmented sum is already O(K) by prefix sum, and μ̂ is built from
+π(√N) *sparse* two-term convolutions at O(K) each — an NTT makes each of those
+*worse*. Nor does a product tree help: mean k̄(p) ≈ K/2 (the primes near √N
+dominate Σk̄(p)), so truncation bites at the very first level and the tree
+costs π nodes at O(K log K) instead of π nodes at O(K). The NTT earns its
+place only once Newton collapses π(√N) convolutions into O(log²N) of them. So
+R3 is infrastructure, and its job is to be correct, not yet fast.
+
+Goldilocks p = 2⁶⁴ − 2³² + 1: p − 1 = 2³²·3·5·17·257·65537 gives roots of
+unity of every order to 2³², and 2⁶⁴ ≡ 2³² − 1 (mod p) makes reduction a few
+shifts, one 32×32 multiply and two carries — no division. Integers throughout;
+an f64 FFT would hand back the exactness that is the whole reason to prefer
+HKM to the analytic method.
+
+Five referees, all passing:
+
+1. fast reduction vs a u128-remainder reference — 81 edge pairs + 20M random, 0 mismatches
+2. transform round-trip, lengths 2³–2²⁰ — 0 failures
+3. `convolve` vs schoolbook on random *signed* data, 200 trials — 0 failures
+4. **μ̂ two genuinely different ways** — R2's sequential sparse product vs
+   split-halves recombined through one dense NTT — cell-for-cell MATCH at
+   N = 10⁶, 10⁸, 10¹⁰
+5. cost of one convolution, and of one bare transform, at R4's sizes
+
+`convolve` sizes the transform to the **full** product degree and truncates
+afterwards, so discarded terms are discarded rather than aliased back into low
+coefficients. Sizing to maxdeg+1 would fold them in silently.
+
+### The measurement that dictates R4's shape
+
+| K | transform | convolve | one transform | ≈ N |
+|---|---|---|---|---|
+| 524,288 | 2²¹ | 0.437 s | 0.131 s | 2.7×10¹¹ |
+| 1,048,576 | 2²² | 0.951 s | 0.296 s | 1.1×10¹² |
+| 2,097,152 | 2²³ | 2.005 s | 0.631 s | 4.4×10¹² |
+| 8,388,608 | 2²⁵ | 8.767 s | 2.738 s | 7.0×10¹³ |
+
+Newton needs ω(ω+1)/2 products — 66 at ω = 11, i.e. N = 10¹². Written the
+obvious way, as 66 `convolve` calls, that is **66 × 0.951 = 63 s against the
+naive build's 10.19 s** — six times *worse* than the thing it replaces, not
+breaking even until ≈10¹³·⁷.
+
+But a `convolve` call is 2 forward transforms + 1 inverse, and the 66 products
+involve only ~3ω ≈ 33 *distinct* transforms if each E_r' and each C_j is
+transformed once and reused. Then the cost is 33 × 0.296 s ≈ 9.8 s plus 66
+pointwise passes over 2²² cells (~0.5 s) ≈ **10.3 s — on par with the naive
+build at 10¹², and growing ~3.3× per decade against its ~9.7×.**
+
+So **the batched frequency-domain formulation is mandatory, not an
+optimisation**, and R4 must be written that way from the start. Truncation to
+degree K still has to happen in the time domain each round (higher degrees
+would wrap and corrupt low coefficients), which is why the count is 3ω and not
+2ω. The NTT itself is unoptimised — no twiddle tables, branchy modular ops,
+single-threaded — so another 2–4× is sitting there.
+
+### What R3 did *not* answer
+
+max |μ̂| is tiny — 5,726 at N = 10¹⁰, a factor 1.6×10¹⁵ under P/2 — but that is
+μ's cancellation, and it says nothing about whether one Goldilocks prime
+suffices. Newton's intermediates C_r are counts of r-subsets, **all of one
+sign**, so they have no cancellation at all and they are what could overflow.
+Estimating from Ψ(N,√N) ≈ 0.307N spread over K cells, the peak C_r cell should
+land many orders under P/2 even at 10¹⁸ — but that is an estimate, and R4
+measures it. CRT over a second modulus stays unbuilt until it is shown to be
+needed.
