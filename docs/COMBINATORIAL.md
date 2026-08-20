@@ -1415,3 +1415,87 @@ Estimating from Ψ(N,√N) ≈ 0.307N spread over K cells, the peak C_r cell sho
 land many orders under P/2 even at 10¹⁸ — but that is an estimate, and R4
 measures it. CRT over a second modulus stays unbuilt until it is shown to be
 needed.
+
+## R4 — μ̂ by Newton's identities (`hkm4.zig`)
+
+As a polynomial μ̂(x) = ∏_p (1 − x^(j_p)) with j_p = k̄(p). Setting t_p = x^(j_p),
+that is ∏(1 − t_p) = Σ_r (−1)^r e_r(t), so with
+
+  C_r = e_r(t) = Σ over r-subsets of x^(j_{p₁}+…+j_{p_r}),  E_m = Σ_p x^(m·j_p)
+
+Newton's identities give **r·C_r = Σ_{m=1..r} (−1)^(m−1) C_{r−m} ∗ E_m**, and
+μ̂ = Σ_{r=0..R} (−1)^r C_r. R = ω_max: past it every r-subset already exceeds
+degree K, so C_r truncates to zero. R = 11 at 10¹².
+
+**Written in the frequency domain, because R3 said it had to be.** The
+identities need R(R+1)/2 = 66 products; as 66 `convolve` calls that is 63 s
+against the naive build's 10 s. Batched — each E_m and each C_j transformed
+once and reused — it is **3R = 33 transforms** instead of 198. That is the
+difference between the rung working and not working, not an optimisation.
+Truncation to degree K still happens in the time domain once per r (higher
+degrees would wrap the cyclic transform and corrupt low coefficients), which
+is why the count is 3R and not 2R. Ĉ₀ is the transform of δ₀, i.e. all ones,
+so it is never materialised — the m = r term is just Ê_r.
+
+### One modulus is provably enough — R3's open question, closed
+
+Every C_r[k] is a count of r-subsets, all of one sign, so there is no
+cancellation to lean on and this genuinely needed settling. But Σ_r Σ_k C_r[k]
+counts each admissible squarefree √N-smooth n **exactly once**, and R1's bound
+says such an n satisfies n < N·2^(Δ(1+ω)) = N + S. So
+
+  every C_r[k] ≤ N + S < 2N
+
+and a single Goldilocks prime carries the whole computation for any
+N < ~4.6×10¹⁸. Asserted at startup (`error.ModulusTooSmall`), not hoped for.
+No CRT layer exists. Measured headroom is far larger still — the mass spreads
+over K cells and R values of r, so the largest cell seen at 10¹² is 1,506,380
+against a bound of 10¹².
+
+| N | K | π(√N) | R | transform | R4 | naive | speedup | RSS |
+|---|---|---|---|---|---|---|---|---|
+| 10⁶ | 999 | 168 | 7 | 2¹¹ | 0.00 s | 0.00 s | 0.01× | — |
+| 10⁸ | 10,000 | 1,229 | 8 | 2¹⁵ | 0.06 s | 0.00 s | 0.04× | — |
+| 10¹⁰ | 100,000 | 9,592 | 10 | 2¹⁸ | 0.70 s | 0.16 s | 0.22× | — |
+| 10¹² | 1,000,000 | 78,498 | 11 | 2²¹ | **5.28 s** | 9.94 s | **1.88×** | 394 MB |
+| 10¹³ | 3,162,276 | 227,647 | 12 | 2²³ | **26.59 s** | 232.07 s | **8.73×** | 1.69 GB |
+
+μ̂ MATCHes the sequential sparse build cell-for-cell at every N. The crossover
+is just under 10¹²; below that the naive build wins outright, which is what
+the O(K·π(√N)) vs O(R·K log K) curves say and is why the rung is a *swap*, not
+a replacement — R2 should pick whichever is cheaper for the N in hand.
+
+Newton's time splits 3.49 s Newton / 1.79 s building and transforming the E_m,
+and within Newton 3.05 s transforms against 0.42 s pointwise — so the rung is
+transform-bound, and R3's untouched 2–4× (twiddle tables, branch-free modular
+ops, threading) lands directly on the dominant term. At 10¹³ the split is the
+same shape: 16.10 s transforms against 2.07 s pointwise.
+
+### The naive build falls off a cache cliff, which flatters the crossover
+
+R4 grows 5.0× per decade (5.28 → 26.59 s), but the naive build grows **23.3×**
+(9.94 → 232.07 s) — far steeper than the O(K·π(√N)) ≈ 9.2× the exponents
+predict, and steeper than the ~9.7× R2 measured at 10⁹–10¹². The reason is
+that `a[t] -= a[t−j]` walks the whole length-K array once per prime, so at
+K = 10⁶ (8 MB) it is still roughly in L3 and at K = 3.2×10⁶ (25 MB) it is not.
+R2's "~9.7× per decade" was an in-cache measurement and understates the naive
+build's real cost past 10¹². The NTT is bandwidth-friendly by comparison, so
+part of the 8.73× at 10¹³ is a cache effect rather than an asymptotic one —
+worth saying, because it means the *asymptotic* win is smaller than the
+measured one and the measured one is nonetheless what a run actually pays.
+
+### Memory is Õ(√N), but the constant is what bites
+
+The frequency-domain working set is 2R+2 arrays of length L ≈ 2√N, i.e.
+≈ 32(R+1)·√N bytes — genuinely Õ(√N) space as the paper claims, but with an
+R-dependent constant of ~450 bytes per unit of √N. Measured 394 MB at 10¹² and
+1.69 GB at 10¹³; projecting, ~7 GB at 10¹⁴ and ~14 GB at 10¹⁵. So on a 28 GB
+box **memory, not time, becomes R4's ceiling somewhere around 10¹⁵**.
+
+That is the natural target for the next structural idea rather than more
+tuning: μ̂ = exp(−Σ_m E_m/m) truncated at K, since ∏(1−x^(j_p)) =
+exp(Σ_p log(1−x^(j_p))). Computing a truncated exp by Newton iteration is
+O(K log K) in **O(1) working arrays** instead of 2R+2, at the cost of ~2 log K
+transforms rather than 3R. Whether that trades favourably at 10¹³–10¹⁵ is a
+measurement, not an argument — but it is the only route on the table that
+removes the R factor from *space*.
