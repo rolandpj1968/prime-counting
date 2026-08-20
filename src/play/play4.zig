@@ -5,7 +5,7 @@ const assert = std.debug.assert;
 // zig run --dep rs -Mroot=play4.zig -Mrs=../rangesieve.zig
 const rs = @import("rs");
 
-pub const Counters = struct { n: u64 = 0, x0: u64 = 0, a0: u64 = 0, a1: u64 = 0, phi1: u64 = 0, pi: u64 = 0, pi_: u64 = 0, cb: u64 = 0, cb_: u64 = 0, memo: u64 = 0 };
+pub const Counters = struct { n: u64 = 0, x0: u64 = 0, a0: u64 = 0, a1: u64 = 0, phi1: u64 = 0, pi: u64 = 0, pi_: u64 = 0, cb: u64 = 0, cb1: u64 = 0, cb_: u64 = 0, memo: u64 = 0 };
 
 pub const NodeKey = struct { x: u64, a: u64 };
 
@@ -118,6 +118,11 @@ fn phi(x: u64, a: u64, ctx: *const PhiContext) !u64 {
 
                                 if (x_o_p_bm1 == 0 or x_o_p_bm1 / p_d != x_o_p_b / p_d) {
                                     phi_val_last = try phi(x_o_p_b / p_d, d - 1, ctx);
+                                    if (phi_val_last == 1) {
+                                        ctx.c.cb1 += 1;
+                                    } else {
+                                        ctx.c.cb_ += 1;
+                                    }
                                 }
                                 phi_val += phi_val_last;
 
@@ -230,7 +235,7 @@ pub fn main(init: std.process.Init) !void {
     const pis = try pisToY(gpa, y, primes);
     defer gpa.free(pis);
 
-    const ctx: PhiContext = .{ .primes = primes, .pis = pis, .memo = &memo, .memo_x_limit = y, .c = &c, .nc = &nc, .opt_phi1 = true, .opt_pi = true, .opt_pi_cache = false, .opt_cb = true, .opt_cb_invert = false, .opt_memo = false };
+    const ctx: PhiContext = .{ .primes = primes, .pis = pis, .memo = &memo, .memo_x_limit = y, .c = &c, .nc = &nc, .opt_phi1 = true, .opt_pi = true, .opt_pi_cache = true, .opt_cb = true, .opt_cb_invert = true, .opt_memo = true };
     const phi_x_y = try phi(x, a, &ctx);
 
     const n_f: f64 = @floatFromInt(c.n);
