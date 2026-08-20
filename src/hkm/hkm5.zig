@@ -39,6 +39,7 @@ const std = @import("std");
 const rs = @import("rs");
 const sg = @import("seg.zig");
 const ntt = @import("ntt.zig");
+const muhat = @import("muhat.zig");
 
 fn nowNs() u64 {
     var ts: std.os.linux.timespec = undefined;
@@ -63,85 +64,6 @@ fn muHatSparse(gpa: std.mem.Allocator, ks: []const usize, K: usize) ![]i64 {
     }
     return a;
 }
-
-/// §3.2 on one prime interval. `ks` must be ascending. Returns the interval's
-/// mu-hat factor truncated to degree K, in the time domain.
-fn factorViaFourier(gpa: std.mem.Allocator, ks: []const usize, K: usize, stat: *Stats) ![]i64 {
-    // r_max: capped both by how many primes are here and by how many of the
-    // smallest can multiply while staying at degree <= K.
-    var rmax: usize = 0;
-    {
-        var acc: usize = 0;
-        for (ks) |j| {
-            if (acc + j > K) break;
-            acc += j;
-            rmax += 1;
-        }
-    }
-    const out = try gpa.alloc(i64, K + 1);
-    @memset(out, 0);
-    if (rmax == 0) {
-        out[0] = 1;
-        return out;
-    }
-    const maxj = ks[ks.len - 1];
-    const D = rmax * maxj; // strict bound on any degree that can arise
-    var L: usize = 1;
-    while (L < D + 1) L <<= 1;
-    stat.rmax_sum += rmax;
-    stat.L_max = @max(stat.L_max, L);
-    stat.work += L * rmax * (rmax + 1) / 2;
-
-    const E = try gpa.alloc([]u64, rmax + 1);
-    defer gpa.free(E);
-    for (1..rmax + 1) |m| {
-        const e = try gpa.alloc(u64, L);
-        @memset(e, 0);
-        for (ks) |j| {
-            const k = m * j;
-            if (k < L) e[k] = ntt.add(e[k], 1);
-        }
-        ntt.transform(e, false);
-        E[m] = e;
-    }
-    defer for (1..rmax + 1) |m| gpa.free(E[m]);
-    stat.transforms += rmax;
-
-    const rinv = try gpa.alloc(u64, rmax + 1);
-    defer gpa.free(rinv);
-    for (1..rmax + 1) |r| rinv[r] = ntt.inv(@intCast(r));
-
-    const acc = try gpa.alloc(u64, L);
-    defer gpa.free(acc);
-    var c: [64]u64 = undefined;
-    std.debug.assert(rmax < c.len);
-    for (0..L) |w| {
-        c[0] = 1;
-        var sum: u64 = 1; // r = 0 term, sign +
-        for (1..rmax + 1) |r| {
-            var s: u64 = 0;
-            for (1..r + 1) |m| {
-                const t = ntt.mul(c[r - m], E[m][w]);
-                if (m % 2 == 1) s = ntt.add(s, t) else s = ntt.sub(s, t);
-            }
-            c[r] = ntt.mul(s, rinv[r]);
-            if (r % 2 == 1) sum = ntt.sub(sum, c[r]) else sum = ntt.add(sum, c[r]);
-        }
-        acc[w] = sum;
-    }
-    ntt.transform(acc, true);
-    stat.transforms += 1;
-    for (0..@min(K + 1, L)) |k| out[k] = ntt.toSigned(acc[k]);
-    return out;
-}
-
-const Stats = struct {
-    transforms: usize = 0,
-    rmax_sum: usize = 0,
-    L_max: usize = 0,
-    work: usize = 0,
-    parts: usize = 0,
-};
 
 pub fn main(init: std.process.Init) !void {
     var args = try init.minimal.args.iterateAllocator(init.gpa);
@@ -172,65 +94,20 @@ pub fn main(init: std.process.Init) !void {
     defer gpa.free(ks);
     for (primes, 0..) |p, i| ks[i] = g.kbar(p);
 
-    // level m: p in [N^(1/2^(m+1)), N^(1/2^m)), i.e. m = floor(log2(B/log2 p)) - 1
-    const cuts = try gpa.alloc(usize, 40);
-    defer gpa.free(cuts);
-    var nparts: usize = 0;
-    if (one_part) {
-        cuts[0] = 0;
-        nparts = 1;
-    } else {
-        var prev_level: usize = std.math.maxInt(usize);
-        for (primes, 0..) |p, i| {
-            const u = B / @log2(@as(f64, @floatFromInt(p)));
-            const lvl: usize = @intFromFloat(@floor(@log2(u)));
-            if (lvl != prev_level) {
-                cuts[nparts] = i;
-                nparts += 1;
-                prev_level = lvl;
-            }
-        }
-    }
-
-    std.debug.print("N = {d}  K = {d}  pi(sqrt N) = {d}  parts = {d}{s}\n", .{ N, K, primes.len, nparts, if (one_part) "  (section 3.2 as written)" else "  (section 3.3 partition)" });
+    std.debug.print("N = {d}  K = {d}  pi(sqrt N) = {d}{s}\n", .{ N, K, primes.len, if (one_part) "  (section 3.2 as written)" else "  (section 3.3 partition)" });
 
     const t0 = nowNs();
-    var stat = Stats{ .parts = nparts };
-    var acc = try gpa.alloc(i64, K + 1);
+    var stat = muhat.Stats{};
+    const acc = try muhat.fourier(gpa, ks, K, one_part, &stat);
     defer gpa.free(acc);
-    @memset(acc, 0);
-    acc[0] = 1;
-    var first = true;
-    for (0..nparts) |i| {
-        const lo = cuts[i];
-        const hi = if (i + 1 < nparts) cuts[i + 1] else primes.len;
-        const piece = try factorViaFourier(gpa, ks[lo..hi], K, &stat);
-        defer gpa.free(piece);
-        if (first) {
-            @memcpy(acc, piece);
-            first = false;
-            continue;
-        }
-        // combine: acc = acc * piece  mod x^(K+1)
-        const af = try gpa.alloc(u64, K + 1);
-        defer gpa.free(af);
-        const bf = try gpa.alloc(u64, K + 1);
-        defer gpa.free(bf);
-        for (acc, af) |x, *y| y.* = ntt.fromSigned(x);
-        for (piece, bf) |x, *y| y.* = ntt.fromSigned(x);
-        const prod = try ntt.convolve(gpa, af, bf, K);
-        defer gpa.free(prod);
-        stat.transforms += 3;
-        for (prod, 0..) |v, k| acc[k] = ntt.toSigned(v);
-    }
     const t_done = nowNs();
 
-    std.debug.print("transforms {d}   sum of r_max {d}   largest transform 2^{d}   pointwise modmuls {e:.2}\n", .{ stat.transforms, stat.rmax_sum, std.math.log2_int(usize, @max(2, stat.L_max)), @as(f64, @floatFromInt(stat.work)) });
+    std.debug.print("parts {d}   transforms {d}   sum of r_max {d}   largest transform 2^{d}   pointwise modmuls {e:.2}\n", .{ stat.parts, stat.transforms, stat.rmax_sum, std.math.log2_int(usize, @max(2, stat.L_max)), @as(f64, @floatFromInt(stat.work)) });
     std.debug.print("time {d:.2}s\n", .{sec(t0, t_done)});
 
     if (referee) {
         const tr = nowNs();
-        const want = try muHatSparse(gpa, ks, K);
+        const want = try muhat.sparse(gpa, ks, K);
         defer gpa.free(want);
         const ts = nowNs();
         var bad: usize = 0;

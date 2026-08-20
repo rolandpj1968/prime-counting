@@ -73,6 +73,7 @@ const std = @import("std");
 const rs = @import("rs");
 const r0 = @import("hkm0.zig");
 const sg = @import("seg.zig");
+const muhat = @import("muhat.zig");
 const common = @import("common");
 
 fn nowNs() u64 {
@@ -104,17 +105,21 @@ pub fn main(init: std.process.Init) !void {
     _ = args.skip();
     const gpa = std.heap.page_allocator;
 
-    const usage = "Usage: hkm2 <N> [delta] [--no-critical] [--crit-off n]\n";
+    const usage = "Usage: hkm2 <N> [delta] [--no-critical] [--crit-off n] [--muhat auto|sparse|fourier]\n";
     const n_str = args.next() orelse return std.debug.print(usage, .{});
     const N = try std.fmt.parseInt(u64, n_str, 10);
     const sq: u64 = std.math.sqrt(N);
     const nf: f64 = @floatFromInt(N);
     var delta: f64 = @log2(nf) / @as(f64, @floatFromInt(sq));
     var critical = true;
+    var mu_mode: muhat.Mode = .auto;
     var crit_off: i64 = 0; // t(n) = kbar(n) - K - crit_off; 0 is proved below
     while (args.next()) |a| {
         if (std.mem.eql(u8, a, "--no-critical")) {
             critical = false;
+        } else if (std.mem.eql(u8, a, "--muhat")) {
+            const v = args.next() orelse return std.debug.print(usage, .{});
+            mu_mode = if (std.mem.eql(u8, v, "sparse")) .sparse else if (std.mem.eql(u8, v, "fourier")) .fourier else .auto;
         } else if (std.mem.eql(u8, a, "--crit-off")) {
             const v = args.next() orelse return std.debug.print(usage, .{});
             crit_off = try std.fmt.parseInt(i64, v, 10);
@@ -154,19 +159,10 @@ pub fn main(init: std.process.Init) !void {
     // ---- segmented estimate: 1bar convolved with mu-hat, truncated at K.
     // Prefix-summing mu-hat makes this O(K) instead of R0's O(K^2).
     var segmented: i128 = 0;
+    var mstat = muhat.Stats{};
     {
-        const conv = try gpa.alloc(i64, K + 1);
+        const conv = try muhat.build(gpa, ks, K, mu_mode, &mstat);
         defer gpa.free(conv);
-        @memset(conv, 0);
-        conv[0] = 1;
-        for (ks) |j| {
-            if (j > K) continue;
-            var t: usize = K + 1;
-            while (t > j) {
-                t -= 1;
-                conv[t] -= conv[t - j];
-            }
-        }
         const pre = try gpa.alloc(i128, K + 1);
         defer gpa.free(pre);
         var run: i128 = 0;
@@ -274,7 +270,9 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("\npi({d}) = {d}\nreferee  = {d} ({s})   {s}\n", .{ N, pi_computed, pi_N, if (from_table != null) "published table" else "sieve", if (pi_computed == pi_N) "MATCH" else "MISMATCH" });
     std.debug.print("\nspurious extent: largest contributing n - N = {d}  (S bound {d}, slack {d:.2}x)\n", .{ max_hit - N, S, @as(f64, @floatFromInt(S)) / @as(f64, @floatFromInt(@max(1, max_hit - N))) });
     std.debug.print("max omega in interval = {d}  (omega_max bound {d})\n", .{ max_omega_seen, omega_max });
-    std.debug.print("critical divisors: {s}", .{if (critical) "on" else "OFF"});
+    std.debug.print("mu-hat route: {s}", .{mstat.route});
+    if (mstat.parts != 0) std.debug.print("  ({d} parts, {d} transforms, largest 2^{d})", .{ mstat.parts, mstat.transforms, std.math.log2_int(usize, @max(2, mstat.L_max)) });
+    std.debug.print("\ncritical divisors: {s}", .{if (critical) "on" else "OFF"});
     if (critical) std.debug.print(" (offset {d}) — {d} of {d} interval integers skipped outright ({d:.1}%)", .{ crit_off, skipped, S, 100.0 * @as(f64, @floatFromInt(skipped)) / @as(f64, @floatFromInt(S)) });
     std.debug.print("\n", .{});
     std.debug.print("\ntime: setup {d:.2}s  segmented {d:.2}s  sieve {d:.2}s  correction {d:.2}s  = {d:.2}s  | referee {d:.2}s\n", .{ secs(t0, t_setup), secs(t_setup, t_seg), @as(f64, @floatFromInt(ns_sieve)) / 1e9, @as(f64, @floatFromInt(ns_corr)) / 1e9, secs(t0, t_corr), secs(t_corr, t_ref) });
