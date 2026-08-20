@@ -41,7 +41,7 @@ const rs = @import("rs");
 /// the question needs; monotonicity is asserted below. When Delta shrinks to
 /// Theta(log2 N / sqrt N) this needs revisiting — it is the same class of bug
 /// as pistar's half-ulp band.
-fn kbar(n: u64, delta: f64) usize {
+pub fn kbar(n: u64, delta: f64) usize {
     const l = @log2(@as(f64, @floatFromInt(n)));
     return @intFromFloat(@floor(l / delta));
 }
@@ -94,7 +94,7 @@ fn muHatEnum(gpa: std.mem.Allocator, primes: []const u64, delta: f64, cap: usize
 /// mu(d) * floor(N/d), by pruned DFS. This is the left-hand side of Lemma 1
 /// evaluated EXACTLY — the referee for everything the segmented world later
 /// approximates.
-fn legendre(N: u64, primes: []const u64, i: usize, d: u64, sign: i64) i64 {
+pub fn legendre(N: u64, primes: []const u64, i: usize, d: u64, sign: i64) i64 {
     var s: i64 = sign * @as(i64, @intCast(N / d));
     var j = i;
     while (j < primes.len) : (j += 1) {

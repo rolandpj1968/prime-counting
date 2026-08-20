@@ -1203,3 +1203,64 @@ either side. At rung-0 sizes f64 is far more precision than the question
 needs (monotonicity is asserted). When Δ shrinks to Θ(log₂N/√N) at large N
 this needs revisiting — it is the same class of bug as `pistar`'s half-ulp
 band, and it will bite in exactly the same way: silently, and only on some x.
+
+## R1 — where the error lives (`hkm1.zig`)
+
+R0 measured the segmentation error. R1 localises it *exactly*, before any
+correction exists, so R2's correction is refereed by something measured
+rather than by the paper's O(·).
+
+**One-sidedness.** m·d ≤ N ⟹ k̄(m) + k̂(d) ≤ K, where K = k̄(N).
+*Proof:* k̄(x) ≤ log₂x/Δ for every x, and k̂ is a sum of such floors, so
+k̄(m) + k̂(d) ≤ log₂(md)/Δ ≤ log₂N/Δ; the left side is an integer, hence
+≤ ⌊log₂N/Δ⌋ = K. ∎
+
+So **the approximation never drops a true pair.** Every unit of error is a
+*spurious* pair with md > N — the correction is a pure subtraction, and R0's
+consistently negative sign is a statement about μ on the spurious set, not
+about anything being lost. Checked at every Δ (no bracket ever went negative).
+
+**Critical interval.** k̄(x) > log₂x/Δ − 1, so a surviving pair obeys
+K ≥ k̄(m) + k̂(d) > log₂(md)/Δ − (1 + ω(d)), i.e.
+
+  m·d < N · 2^(Δ(1+ω(d)))
+
+ω(d) is capped by the largest primorial surviving the k̂ prune (8 at 10⁸), which
+is where the paper's S = O(ΔN log N) comes from.
+
+**The closed form.** No pair enumeration needed: for fixed d the approximate
+predicate is k̄(m) ≤ K − k̂(d), i.e. m ≤ M(d), while the true one is m ≤ ⌊N/d⌋:
+
+  segmented − exact = Σ_d μ(d)·( M(d) − ⌊N/d⌋ ),  every bracket ≥ 0
+
+Reproducing R0's number from this form is the proof that the localisation is
+**complete** — that nothing outside the critical interval contributes. It does,
+at every Δ and every N tested (`agree = MATCH`; the program returns
+`error.LocalisationIncomplete` otherwise).
+
+*The trap:* d ranges over squarefree √N-smooth d with **k̂(d) ≤ K**, which
+includes some d > N (there ⌊N/d⌋ = 0 but M(d) ≥ 1). Pruning on d ≤ N — the
+natural instinct, and what R0's Legendre walk does — silently drops them.
+
+| N | Δ | error | S measured | S bound | max ω | spurious pairs |
+|---|---|---|---|---|---|---|
+| 10⁶ | 0.0200 | −443 | 45,682 | 117,287 | 7 | 97,709 |
+| 10⁶ | 0.0050 | −203 | 15,245 | 28,114 | 7 | 38,823 |
+| 10⁷ | 0.00735 | −4,745 | 252,515 | 469,191 | 8 | 528,235 |
+| 10⁸ | 0.0100 | −37,826 | 3,769,127 | 6,437,018 | 8 | 8,732,626 |
+| 10⁸ | 0.00270 | −15,240 | 915,850 | 1,698,613 | 8 | 2,121,010 |
+| 10⁹ | 0.00095 | −59,246 | 3,077,168 | 6,606,626 | 9 | 7,480,414 |
+
+(rows at the designed Δ = log₂N/√N are 0.0200, 0.00735, 0.00270, 0.00095)
+
+**S is Õ(√N), with a measured constant.** At the designed Δ,
+S / (√N · ln N · log₂N) = 0.166, 0.213, 0.187, 0.157 across 10⁶–10⁹ — flat over
+three decades, no trend, ±25% scatter. So S ≈ 0.18·√N·ln N·log₂N, about 2.2×
+inside the ω-bound above. That slack is what R2 gets to exploit.
+
+**The fact that constrains R2's design.** At 10⁸ and the designed Δ, **2,121,010
+spurious pairs cancel to a net −15,240** — a ratio of 139:1 (126:1 at 10⁹). The correction
+therefore cannot be a count of anything; it has to carry the μ signs, i.e.
+genuinely evaluate (1 ∗ μ_{≤√N}) restricted to the admitted pairs over
+(N, N+S]. That is exactly the per-n factor-and-walk-squarefree-divisors pass
+of §3, and it is why the critical interval has to be *sieved*, not estimated.
