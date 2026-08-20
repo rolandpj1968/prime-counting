@@ -1748,3 +1748,52 @@ What HKM remains worth doing for, in order:
 
 Speed work against Gourdon is parked. Parallelism would buy HKM ~5× on six
 cores, but Gourdon parallelises too, so it does not move the ratio.
+
+## R7a — Lemma 21 (§4.1, "using fewer exact primes"), refereed
+
+Everything up to here is the **t = 2** case: sieve with every prime up to √N.
+§4.1 generalises to sieving only up to N^(1/t) and recovering the rest
+analytically — the Õ(N^(1/4))-space corner of their trade-off curve, and the
+only remaining item that changes what the method *is* rather than how fast it
+runs.
+
+**Lemma 21.** With f = (1 ∗ μ_{≤N^(1/t)}) − δ₁, the indicator of integers n > 1
+all of whose prime factors exceed N^(1/t),
+
+  π(N) = Σ_{k=1}^{t−1} (−1)^(k−1)/k · T_k + π(N^(1/t))
+         − Σ_{k=2}^{t−1} (1/k)·( π(N^(1/k)) − π(N^(1/t)) )
+
+where T_k = Σ_{n≤N} f^(∗k)(n) counts **ordered** k-tuples of rough integers > 1
+with product ≤ N. The k-sum stops at t−1 because t rough factors already
+exceed N.
+
+This rung builds none of the segmented machinery — it computes every T_k and
+every π(N^(1/k)) by brute force and checks the identity, exactly as R0 did for
+Lemma 1 and for the same reason: an identity is where a sign or an off-by-one
+hides, and it is far cheaper to find here than inside an NTT. The 1/k
+coefficients make it rational, so it is evaluated over lcm(1..t) in i128 with
+the exactness of the division asserted rather than rounded.
+
+| N | t | N^(1/t) | \|rough\| | T₁, T₂, T₃ | identity | |
+|---|---|---|---|---|---|---|
+| 10⁶ | 2 | 1000 | 78,330 | 78,330 | 78,498 | MATCH |
+| 10⁶ | 3 | 100 | 120,759 | 120,759, 84,429 | 78,498 | MATCH |
+| 10⁶ | 4 | 31 | 152,839 | 152,839, 167,109, 27,857 | 78,498 | MATCH |
+| 10⁶ | 5 | 15 | 191,807 | 191,807, 308,613, 130,237 | 78,498 | MATCH |
+
+Also MATCH at 10⁴ for the same t. The t = 2 row is Lemma 1 (78,330 =
+π(N) − π(√N) + 1 − 1, the rough set excluding 1), so the generalisation
+degenerates correctly.
+
+Checked by hand at t = 3 before coding, because the cancellation is the whole
+content: T₁ = π(N) − π(N^(1/3)) + P₂ where P₂ counts pq ≤ N with
+N^(1/3) < p ≤ q; and **both entries of a T₂ pair must be prime**, since a rough
+composite exceeds N^(2/3) and its partner exceeds N^(1/3). So
+T₂ = 2P₂ − (π(√N) − π(N^(1/3))), the P₂ terms cancel against T₁, and what
+survives is exactly π(N).
+
+Note what larger t costs: |rough| *grows* (78,330 → 191,807 at 10⁶ going
+t = 2 → 5) because fewer primes are sieved out, and the work moves into the
+higher T_k. The space win comes from the smaller prime set and the coarser Δ
+it permits, not from a smaller sum — which is the trade the Õ(N^(1/4)) corner
+is making.
