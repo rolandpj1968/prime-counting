@@ -1532,3 +1532,66 @@ What is genuinely open is only empirical: whether §3.2's trade — transform
 length ×~log N against R+1 transforms instead of 3R, plus a pointwise scalar
 exp — wins at 10¹³–10¹⁵ on this hardware. The paper settles it
 asymptotically, not on a laptop.
+
+## R5 — §3.2 pointwise-in-Fourier, and §3.3's partition (`hkm5.zig`)
+
+**§3.2.** At a fixed Fourier coordinate the recurrence r·c_r = Σ(−1)^(m−1)
+c_{r−m} e_m, c₀ = 1 is a scalar recurrence in r alone — every coordinate is
+independent. So run it pointwise, accumulate μ̂̂ = Σ_r (−1)^r c_r as you go, and
+take **one** inverse transform at the end: R+1 transforms instead of R4's 3R.
+
+HKM go further and note x·c′(x) = e(x)·c(x), so c = exp(∫e/t), giving the c_r
+in O(r_max log r_max) instead of O(r_max²). Not implemented: at r_max = 12 a
+length-13 FFT is not worth it. Worth recording that c evaluated at x = −1 is
+exactly μ̂ = exp(−Σ_m E_m/m) — the k-axis and r-axis forms are one identity.
+
+**The prediction, stated before running.** Truncation is what kept degrees
+bounded by K. Without it deg C_r ≤ r·max_p j_p ≈ R·K/2 ≈ 6K, so the arrays
+must be padded ~4× longer to save a factor 3 in transform *count*, with 4× as
+many coordinates each paying the same O(R²/2) recurrence. §3.2 on the whole
+prime set should therefore **lose** to R4. The paper agrees in advance — it
+claims only that this "recovered almost the same complexity", and that its
+value is in enabling §3.3.
+
+**§3.3** runs §3.2 separately on each interval [N^(1/2^(m+1)), N^(1/2^m)] and
+convolves the pieces. On such an interval at most ~2^(m+1) primes can multiply
+to ≤ N while max_j is only K/2^m, so the padding needed is ~2K for **every**
+interval, independent of m. r_max is additionally capped by how many primes
+the interval actually contains, which for the small-prime intervals is tiny
+(the top interval at 10¹² holds 78,209 primes but admits r_max = 4; the
+interval holding only 2 admits r_max = 1). `--parts 1` forces a single
+interval, i.e. §3.2 as written — same code path, one knob.
+
+| N | variant | time | RSS | transforms | largest | pointwise modmuls |
+|---|---|---|---|---|---|---|
+| 10¹⁰ | R4 (§3.1) | 0.46 s | — | 30 | 2¹⁸ | — |
+| 10¹⁰ | §3.2 alone | 0.67 s | 48 MB | 11 | 2¹⁹ | 2.9×10⁷ |
+| 10¹⁰ | §3.3 | **0.40 s** | **17.6 MB** | 33 | 2¹⁸ | 8.1×10⁶ |
+| 10¹² | R4 (§3.1) | 4.97 s | 394 MB | 33 | 2²¹ | 1.3×10⁸ |
+| 10¹² | §3.2 alone | 10.05 s | 812 MB | 12 | 2²³ | 5.5×10⁸ |
+| 10¹² | §3.3 | **4.52 s** | **156 MB** | 38 | 2²¹ | 1.1×10⁸ |
+| 10¹³ | R4 (§3.1) | 26.59 s | 1.69 GB | 36 | 2²³ | 4.4×10⁸ |
+| 10¹³ | §3.3 | **21.54 s** | **603 MB** | 39 | 2²³ | 4.8×10⁸ |
+
+μ̂ MATCHes the sparse build cell-for-cell in every row.
+
+**Prediction confirmed, and the reason it's confirmed is instructive.** §3.2
+alone is 2.0× slower than R4 and uses 2.1× the memory, exactly as the padding
+argument says. And §3.3 wins **not** by the mechanism §3.2 advertises: it uses
+*more* transforms than R4 (38 vs 33), not fewer. The win is padding — largest
+transform back to 2²¹ and pointwise work down 5× from §3.2 — and it shows up
+far more in space than in time: **2.5× less memory at 10¹², for 1.10× the
+speed.**
+
+That is the useful outcome. Time was never R4's binding constraint (R2's
+correction is 84% of end-to-end); *memory* was, at a projected ~14 GB at 10¹⁵.
+The advantage widens with N — 2.5× at 10¹², **2.8× at 10¹³** (603 MB against
+1.69 GB) for 1.23× the speed — putting 10¹⁵ around 5–6 GB, i.e. back inside a
+28 GB box. The remaining space work is §4.2, "Working only in Fourier space".
+
+Note also that at 10¹³ §3.3 does *more* pointwise work than R4 (4.8×10⁸ vs
+4.4×10⁸) on the *same* largest transform (2²³) with *more* transforms (39 vs
+36), and still comes out ahead on time. The five partitions are not five equal
+problems: four of them are small, so most of those 39 transforms are cheap.
+Counting transforms is the wrong summary statistic here — counting
+transform·length is the right one.
