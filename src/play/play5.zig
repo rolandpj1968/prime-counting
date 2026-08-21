@@ -27,6 +27,10 @@ fn to_f(i: u64) f64 {
     return @floatFromInt(i);
 }
 
+fn pc(v: u64, n: u64) f64 {
+    return to_f(v) / to_f(n) * 100.0;
+}
+
 pub fn main(init: std.process.Init) !void {
     var args = try init.minimal.args.iterateAllocator(init.gpa);
     _ = args.skip();
@@ -74,7 +78,7 @@ pub fn main(init: std.process.Init) !void {
         while (i < primes2.len and x / primes2[primes2.len - 1 - i] / p_b < p_b) {
             i += 1;
         }
-        std.debug.print("\n\n{d:>8} out of {d:>8} p <= x^1/2 have 2nd order phi = 1 --- {d:>6.2}%\n", .{ i, primes2.len, to_f(i) / to_f(primes2.len) * 100.0 });
+        std.debug.print("\n\n{d:>8} out of {d:>8} p <= x^1/2 have 2nd order phi = 1 --- {d:>6.2}%\n", .{ i, primes2.len, pc(i, primes2.len) });
 
         const lim = i + 5;
         while (i < lim and i < primes2.len) {
@@ -87,12 +91,18 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("\n", .{});
 
+    var total_nodes: u64 = 0;
+    var total_ones: u64 = 0;
+    var total_pis: u64 = 0;
+    var total_rest: u64 = 0;
+
     var b: usize = primes.len - 1;
-    const b_lim = if (primes.len < 21) 1 else primes.len - 20;
+    var loop_no: usize = 0;
+
     while (true) {
         const p_b = primes[b];
         const p_bm1 = primes[b - 1];
-        const total = primes2.len - b;
+        const total = primes2.len - 1 - b;
 
         var a = primes2.len - 1;
 
@@ -106,7 +116,7 @@ pub fn main(init: std.process.Init) !void {
 
             a -= 1;
         }
-        const non_1s = a - b;
+        const ones_limit = a;
 
         while (b < a) {
             const p_a = primes2[a];
@@ -117,13 +127,28 @@ pub fn main(init: std.process.Init) !void {
 
             a -= 1;
         }
-        const non_pis = a - b;
+        const pis_limit = a;
 
-        std.debug.print("    b: {d:>8} | p_b: {d:>8} | total p_a's {d:>8} | non-1's {d:>8} - {d:>6.2}% | non-pi's {d:>8} - {d:>6.2}%\n", .{ b, p_b, total, non_1s, to_f(non_1s) / to_f(total) * 100.0, non_pis, to_f(non_pis) / to_f(total) * 100.0 });
+        const ones_count = primes2.len - 1 - ones_limit;
+        const pis_count = ones_limit - pis_limit;
+        const rest_count = pis_limit - b;
 
-        if (b == 0 or b <= b_lim) {
+        if (loop_no < 5 or b < 5) {
+            std.debug.print("        b: {d:>8} | p_b: {d:>8} | total p_a's {d:>8} | 1's: {d:>8} - {d:>6.2}% | pi's: {d:>8} - {d:>6.2}% | rest: {d:>8} - {d:>6.2}%\n", .{ b, p_b, total, ones_count, pc(ones_count, total), pis_count, pc(pis_count, total), rest_count, pc(rest_count, total) });
+        }
+
+        total_nodes += total;
+        total_ones += ones_count;
+        total_pis += pis_count;
+        total_rest += rest_count;
+
+        if (b == 1) {
             break;
         }
         b -= 1;
+        loop_no += 1;
     }
+
+    std.debug.print("\n", .{});
+    std.debug.print("x: {d:>16} | pi(x^1/2): {d:>8} | pi(x^1/3): {d:>8} | nodes: {d:>16} | ones: {d:>12} - {d:>6.2}% | pis: {d:>12} - {d:>6.2}% | rest: {d:>12} - {d:>6.2}%\n", .{ x, primes2.len, primes.len, total_nodes, total_ones, pc(total_ones, total_nodes), total_pis, pc(total_pis, total_nodes), total_rest, pc(total_rest, total_nodes) });
 }
