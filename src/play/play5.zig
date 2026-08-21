@@ -23,6 +23,73 @@ fn icbrt(x: u64) u64 {
     return r;
 }
 
+const CHECK_FIND_PRED = true;
+
+// Check predicate is all-true then all-false over the slice
+fn checkFindFirstTruePred(
+    comptime T: type,
+    slice: []const T,
+    ctx: anytype,
+    pred: fn (@TypeOf(ctx), T) bool,
+) void {
+    var found_true = false;
+    var i: usize = 0;
+    while (i < slice.len) {
+        if (pred(ctx, slice[i])) {
+            found_true = true;
+        } else {
+            assert(found_true == false);
+        }
+        i += 1;
+    }
+}
+
+// Assume predicate is all-false then all-true over the slice
+fn findFirstTrueIndex(
+    comptime T: type,
+    slice: []const T,
+    ctx: anytype,
+    pred: fn (@TypeOf(ctx), T) bool,
+) usize {
+    if (CHECK_FIND_PRED) {
+        checkFindFirstTruePred(T, slice, ctx, pred);
+    }
+
+    var i: usize = slice.len;
+    while (i > 0) {
+        i -= 1;
+        if (!pred(ctx, slice[i])) {
+            return i + 1;
+        }
+    }
+    return 0;
+}
+
+const IsUnitCtx = struct {
+    x: u64,
+    b: u64,
+    primes: []const u64,
+    primes2: []const u64,
+};
+
+fn isUnit(ctx: IsUnitCtx, p_a: u64) bool {
+    const x = ctx.x;
+    const b = ctx.b;
+    const p_b = ctx.primes[b];
+    const p_bm1 = ctx.primes[b - 1];
+
+    const x_o_p_a_o_p_b = x / p_a / p_b;
+    assert(x_o_p_a_o_p_b == x / p_b / p_a);
+
+    return x_o_p_a_o_p_b <= p_bm1;
+}
+
+fn findFirstNonUnitIndex(x: u64, b: u64, a_limit: u64, primes: []const u64, primes2: []const u64) usize {
+    const index = findFirstTrueIndex(u64, primes2[b + 1 .. a_limit], IsUnitCtx{ .x = x, .b = b, .primes = primes, .primes2 = primes2 }, isUnit);
+
+    return b + 1 + index;
+}
+
 fn to_f(i: u64) f64 {
     return @floatFromInt(i);
 }
@@ -102,6 +169,8 @@ pub fn main(init: std.process.Init) !void {
     var loop_no: usize = 0;
 
     while (true) {
+        const ones_limit2 = findFirstNonUnitIndex(x, b, primes2.len, primes, primes2);
+
         const p_b = primes[b];
         const p_bm1 = primes[b - 1];
         const total = primes2.len - 1 - b;
@@ -153,6 +222,7 @@ pub fn main(init: std.process.Init) !void {
 
         if (loop_no < 5 or b < 5) {
             std.debug.print("        b: {d:>8} | p_b: {d:>8} | total p_a's {d:>8} | 1's: {d:>8} - {d:>6.2}% | pi's: {d:>8} - {d:>6.2}% | rest: {d:>8} - {d:>6.2}%\n", .{ b, p_b, total, ones_count, pc(ones_count, total), pis_count, pc(pis_count, total), rest_count, pc(rest_count, total) });
+            std.debug.print("                 ones_limit: {d:>8} ones_limit2 {d:>8}\n", .{ ones_limit, ones_limit2 });
         }
 
         total_nodes += total;
