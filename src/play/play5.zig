@@ -94,6 +94,8 @@ pub fn main(init: std.process.Init) !void {
     var total_nodes: u64 = 0;
     var total_ones: u64 = 0;
     var total_pis: u64 = 0;
+    var total_pi_dups: u64 = 0;
+    var total_pi_dups2: u64 = 0;
     var total_rest: u64 = 0;
 
     var b: usize = primes.len - 1;
@@ -109,8 +111,9 @@ pub fn main(init: std.process.Init) !void {
         while (b < a) {
             const p_a = primes2[a];
 
-            assert(x / p_a / p_b == x / p_b / p_a);
-            if (x / p_a / p_b > p_bm1) {
+            const x_o_p_a_o_p_b = x / p_a / p_b;
+            assert(x_o_p_a_o_p_b == x / p_b / p_a);
+            if (x_o_p_a_o_p_b > p_bm1) {
                 break;
             }
 
@@ -118,12 +121,27 @@ pub fn main(init: std.process.Init) !void {
         }
         const ones_limit = a;
 
+        var last_x_o_p_a_o_p_b: u64 = 0;
+        var pi_dups_count: u64 = 0;
+        var pi_dups2_count: u64 = 0;
+
         while (b < a) {
             const p_a = primes2[a];
 
-            if (x / p_a / p_b >= p_bm1 * p_bm1) {
+            const x_o_p_a_o_p_b = x / p_a / p_b;
+            assert(x_o_p_a_o_p_b == x / p_b / p_a);
+            if (x_o_p_a_o_p_b >= p_bm1 * p_bm1) {
                 break;
             }
+
+            if (last_x_o_p_a_o_p_b != 0 and last_x_o_p_a_o_p_b == x_o_p_a_o_p_b) {
+                pi_dups_count += 1;
+            }
+            if (last_x_o_p_a_o_p_b != 0 and (last_x_o_p_a_o_p_b == x_o_p_a_o_p_b or (x_o_p_a_o_p_b % 2 == 0 and last_x_o_p_a_o_p_b == x_o_p_a_o_p_b - 1))) {
+                pi_dups2_count += 1;
+            }
+
+            last_x_o_p_a_o_p_b = x_o_p_a_o_p_b;
 
             a -= 1;
         }
@@ -140,6 +158,8 @@ pub fn main(init: std.process.Init) !void {
         total_nodes += total;
         total_ones += ones_count;
         total_pis += pis_count;
+        total_pi_dups += pi_dups_count;
+        total_pi_dups2 += pi_dups2_count;
         total_rest += rest_count;
 
         if (b == 1) {
@@ -151,4 +171,5 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("\n", .{});
     std.debug.print("x: {d:>16} | pi(x^1/2): {d:>8} | pi(x^1/3): {d:>8} | nodes: {d:>16} | ones: {d:>12} - {d:>6.2}% | pis: {d:>12} - {d:>6.2}% | rest: {d:>12} - {d:>6.2}%\n", .{ x, primes2.len, primes.len, total_nodes, total_ones, pc(total_ones, total_nodes), total_pis, pc(total_pis, total_nodes), total_rest, pc(total_rest, total_nodes) });
+    std.debug.print("    pis: {d:>12} | pi-dups: {d:>12} - {d:>6.2}%| pi-dups2: {d:>12} - {d:>6.2}%\n", .{ total_pis, total_pi_dups, pc(total_pi_dups, total_pis), total_pi_dups2, pc(total_pi_dups2, total_pis) });
 }
