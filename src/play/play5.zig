@@ -23,6 +23,26 @@ fn icbrt(x: u64) u64 {
     return r;
 }
 
+// Generate primes with "natural" phi indices - primes[0] == 1, primes[1] == 2, ...
+fn genPrimesTo(gpa: std.mem.Allocator, x: u64) ![]u64 {
+    // primes0[0] == 2
+    const primes0 = try rs.basePrimes(gpa, x);
+    defer gpa.free(primes0);
+
+    // prepend 1 for natural phi param access
+    const primes = try gpa.alloc(u64, primes0.len + 1);
+    primes[0] = 1;
+    @memcpy(primes[1..], primes0);
+
+    // primes[1] == 2
+    return primes;
+}
+
+// degenerate case - phi(x,a) == 1
+fn isUnitPhi(x: u64, a: u64, primes: []const u64) bool {
+    return x > 0 and x <= primes[a];
+}
+
 const CHECK_FIND_PRED = true;
 
 // Check predicate is all-true then all-false over the slice
@@ -74,6 +94,32 @@ const IsUnitCtx = struct {
 
 fn isUnit(ctx: IsUnitCtx, p_a: u64) bool {
     const x = ctx.x;
+    assert(x > 0);
+    const b = ctx.b;
+    assert(b > 0);
+    const p_b = ctx.primes[b];
+
+    const x_o_p_a_o_p_b = x / p_a / p_b;
+    assert(x_o_p_a_o_p_b == x / p_b / p_a);
+
+    return isUnitPhi(x_o_p_a_o_p_b, b - 1, ctx.primes);
+}
+
+fn findFirstUnitIndex(x: u64, b: u64, a_limit: u64, primes: []const u64, primes2: []const u64) usize {
+    const index = findFirstTrueIndex(u64, primes2[b + 1 .. a_limit], IsUnitCtx{ .x = x, .b = b, .primes = primes, .primes2 = primes2 }, isUnit);
+
+    return b + 1 + index;
+}
+
+const IsPiCtx = struct {
+    x: u64,
+    b: u64,
+    primes: []const u64,
+    primes2: []const u64,
+};
+
+fn isPi(ctx: IsPiCtx, p_a: u64) bool {
+    const x = ctx.x;
     const b = ctx.b;
     const p_b = ctx.primes[b];
     const p_bm1 = ctx.primes[b - 1];
@@ -81,35 +127,16 @@ fn isUnit(ctx: IsUnitCtx, p_a: u64) bool {
     const x_o_p_a_o_p_b = x / p_a / p_b;
     assert(x_o_p_a_o_p_b == x / p_b / p_a);
 
-    return x_o_p_a_o_p_b <= p_bm1;
+    return x_o_p_a_o_p_b < p_bm1 * p_bm1;
 }
 
-fn findFirstNonUnitIndex(x: u64, b: u64, a_limit: u64, primes: []const u64, primes2: []const u64) usize {
-    const index = findFirstTrueIndex(u64, primes2[b + 1 .. a_limit], IsUnitCtx{ .x = x, .b = b, .primes = primes, .primes2 = primes2 }, isUnit);
+fn findFirstPiIndex(x: u64, b: u64, a_limit: u64, primes: []const u64, primes2: []const u64) usize {
+    const index = findFirstTrueIndex(u64, primes2[b + 1 .. a_limit], IsPiCtx{ .x = x, .b = b, .primes = primes, .primes2 = primes2 }, isPi);
 
     return b + 1 + index;
 }
 
-fn to_f(i: u64) f64 {
-    return @floatFromInt(i);
-}
-
-fn pc(v: u64, n: u64) f64 {
-    return to_f(v) / to_f(n) * 100.0;
-}
-
-pub fn main(init: std.process.Init) !void {
-    var args = try init.minimal.args.iterateAllocator(init.gpa);
-    _ = args.skip();
-    const x_str = args.next() orelse {
-        std.debug.print("Usage: zig run play5.zig -- <x>\n", .{});
-        return;
-    };
-    const x = std.fmt.parseInt(u64, x_str, 10) catch |err| {
-        std.debug.print("Error: '{s}' is not a valid u64 number (Error: {any})\n", .{ x_str, err });
-        return;
-    };
-
+fn pi(x: u64) !u64 {
     const y = isqrt(x);
     const z = icbrt(x);
 
@@ -169,7 +196,8 @@ pub fn main(init: std.process.Init) !void {
     var loop_no: usize = 0;
 
     while (true) {
-        const ones_limit2 = findFirstNonUnitIndex(x, b, primes2.len, primes, primes2);
+        const ones_base = findFirstUnitIndex(x, b, primes2.len, primes, primes2);
+        const pis_base = findFirstPiIndex(x, b, ones_base, primes, primes2);
 
         const p_b = primes[b];
         const p_bm1 = primes[b - 1];
@@ -189,6 +217,7 @@ pub fn main(init: std.process.Init) !void {
             a -= 1;
         }
         const ones_limit = a;
+        assert(ones_limit + 1 == ones_base); // Hrmmm, likely off-by-one error.
 
         var last_x_o_p_a_o_p_b: u64 = 0;
         var pi_dups_count: u64 = 0;
@@ -215,14 +244,18 @@ pub fn main(init: std.process.Init) !void {
             a -= 1;
         }
         const pis_limit = a;
+        assert(pis_limit + 1 == pis_base); // Hrmmm, likely off-by-one error.
 
         const ones_count = primes2.len - 1 - ones_limit;
         const pis_count = ones_limit - pis_limit;
         const rest_count = pis_limit - b;
 
-        if (loop_no < 5 or b < 5) {
+        if (true or loop_no < 5 or b < 5) {
             std.debug.print("        b: {d:>8} | p_b: {d:>8} | total p_a's {d:>8} | 1's: {d:>8} - {d:>6.2}% | pi's: {d:>8} - {d:>6.2}% | rest: {d:>8} - {d:>6.2}%\n", .{ b, p_b, total, ones_count, pc(ones_count, total), pis_count, pc(pis_count, total), rest_count, pc(rest_count, total) });
-            std.debug.print("                 ones_limit: {d:>8} ones_limit2 {d:>8}\n", .{ ones_limit, ones_limit2 });
+            if (false) {
+                std.debug.print("                 ones_limit: {d:>8} | ones_base {d:>8}\n", .{ ones_limit, ones_base });
+                std.debug.print("                 pis_limit:  {d:>8} | pis_base  {d:>8}\n", .{ pis_limit, pis_base });
+            }
         }
 
         total_nodes += total;
@@ -242,4 +275,31 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("\n", .{});
     std.debug.print("x: {d:>16} | pi(x^1/2): {d:>8} | pi(x^1/3): {d:>8} | nodes: {d:>16} | ones: {d:>12} - {d:>6.2}% | pis: {d:>12} - {d:>6.2}% | rest: {d:>12} - {d:>6.2}%\n", .{ x, primes2.len, primes.len, total_nodes, total_ones, pc(total_ones, total_nodes), total_pis, pc(total_pis, total_nodes), total_rest, pc(total_rest, total_nodes) });
     std.debug.print("    pis: {d:>12} | pi-dups: {d:>12} - {d:>6.2}%| pi-dups2: {d:>12} - {d:>6.2}%\n", .{ total_pis, total_pi_dups, pc(total_pi_dups, total_pis), total_pi_dups2, pc(total_pi_dups2, total_pis) });
+
+    return 0;
+}
+
+fn to_f(i: u64) f64 {
+    return @floatFromInt(i);
+}
+
+fn pc(v: u64, n: u64) f64 {
+    return to_f(v) / to_f(n) * 100.0;
+}
+
+pub fn main(init: std.process.Init) !void {
+    var args = try init.minimal.args.iterateAllocator(init.gpa);
+    _ = args.skip();
+    const x_str = args.next() orelse {
+        std.debug.print("Usage: zig run play5.zig -- <x>\n", .{});
+        return;
+    };
+    const x = std.fmt.parseInt(u64, x_str, 10) catch |err| {
+        std.debug.print("Error: '{s}' is not a valid u64 number (Error: {any})\n", .{ x_str, err });
+        return;
+    };
+
+    const pi_x = try pi(x);
+
+    std.debug.print("\npi({d}) = {d}\n\n", .{ x, pi_x });
 }
