@@ -101,6 +101,7 @@ fn isUnit(ctx: IsUnitCtx, p_a: u64) bool {
 
     const x_o_p_a_o_p_b = x / p_a / p_b;
     assert(x_o_p_a_o_p_b == x / p_b / p_a);
+    assert(x_o_p_a_o_p_b == x / (p_b * p_a));
 
     return isUnitPhi(x_o_p_a_o_p_b, b - 1, ctx.primes);
 }
@@ -126,6 +127,7 @@ fn isPi(ctx: IsPiCtx, p_a: u64) bool {
 
     const x_o_p_a_o_p_b = x / p_a / p_b;
     assert(x_o_p_a_o_p_b == x / p_b / p_a);
+    assert(x_o_p_a_o_p_b == x / (p_b * p_a));
 
     return x_o_p_a_o_p_b < p_bm1 * p_bm1;
 }
@@ -142,10 +144,10 @@ fn pi(x: u64) !u64 {
 
     const gpa = std.heap.page_allocator;
 
-    const primes2 = try rs.basePrimes(gpa, y);
+    const primes2 = try genPrimesTo(gpa, y);
     defer gpa.free(primes2);
 
-    const primes = try rs.basePrimes(gpa, z);
+    const primes = try genPrimesTo(gpa, z);
     defer gpa.free(primes);
 
     std.debug.print("x: {d:>16} | y = x^1/2: {d:>8} | pi(y): {d:>8} | z = x^1/3: {d:>8} | pi(z): {d:>8}\n\n", .{ x, y, primes2.len, z, primes.len });
@@ -250,7 +252,7 @@ fn pi(x: u64) !u64 {
         const pis_count = ones_limit - pis_limit;
         const rest_count = pis_limit - b;
 
-        if (true or loop_no < 5 or b < 5) {
+        if (false or loop_no < 5 or b < 5) {
             std.debug.print("        b: {d:>8} | p_b: {d:>8} | total p_a's {d:>8} | 1's: {d:>8} - {d:>6.2}% | pi's: {d:>8} - {d:>6.2}% | rest: {d:>8} - {d:>6.2}%\n", .{ b, p_b, total, ones_count, pc(ones_count, total), pis_count, pc(pis_count, total), rest_count, pc(rest_count, total) });
             if (false) {
                 std.debug.print("                 ones_limit: {d:>8} | ones_base {d:>8}\n", .{ ones_limit, ones_base });
