@@ -1,0 +1,420 @@
+//! RPJ playground
+// zig run --dep rs -Mroot=pi-phi-batch.zig -Mrs=../rangesieve.zig -- 100
+
+const std = @import("std");
+const assert = std.debug.assert;
+const rs = @import("rs");
+
+fn to_f(i: u64) f64 {
+    return @floatFromInt(i);
+}
+
+fn pc(v: u64, n: u64) f64 {
+    return to_f(v) / to_f(n) * 100.0;
+}
+
+pub fn isqrt(n: u64) u64 {
+    if (n < 2) return n;
+    var x: u64 = @intFromFloat(@sqrt(@as(f64, @floatFromInt(n))));
+    while (x * x > n) x -= 1;
+    while ((x + 1) * (x + 1) <= n) x += 1;
+    return x;
+}
+
+fn icbrt(x: u64) u64 {
+    if (x == 0) return 0;
+    var r: u64 = @intFromFloat(std.math.pow(f64, @floatFromInt(x), 1.0 / 3.0));
+    if (r == 0) r = 1;
+    while (r * r * r > x) r -= 1;
+    while ((r + 1) * (r + 1) * (r + 1) <= x) r += 1;
+    return r;
+}
+
+// Generate primes with "natural" phi indices - primes[0] == 1, primes[1] == 2, ...
+fn genPrimesTo(gpa: std.mem.Allocator, x: u64) ![]u64 {
+    // primes0[0] == 2
+    const primes0 = try rs.basePrimes(gpa, x);
+    defer gpa.free(primes0);
+
+    // prepend 1 for natural phi param access
+    const primes = try gpa.alloc(u64, primes0.len + 1);
+    primes[0] = 1;
+    @memcpy(primes[1..], primes0);
+
+    // primes[1] == 2
+    return primes;
+}
+
+fn genPisTo(gpa: std.mem.Allocator, y: u64, primes: []u64) ![]u64 {
+    const pis = try gpa.alloc(u64, y + 1);
+
+    var a: u64 = 1;
+    var pi: u64 = 0;
+
+    var i: u64 = 0;
+    while (i <= y) : (i += 1) {
+        if (a < primes.len and primes[a] == i) {
+            pi += 1;
+            a += 1;
+        }
+        pis[i] = pi;
+    }
+    return pis;
+}
+
+pub const PhiCtx = struct { x: u64, primes: []const u64, pis: []const u64 };
+
+fn phiSimple(ctx: PhiCtx, x: u64, a: u64) u64 {
+    if (x == 0) {
+        return 0;
+    }
+
+    if (a == 0) {
+        return x;
+    }
+
+    const p_a = ctx.primes[a];
+
+    return phiSimple(ctx, x, a - 1) - phiSimple(ctx, x / p_a, a - 1);
+}
+
+// degenerate case - phi(x,a) == 1
+fn isUnitPhi(x: u64, a: u64, primes: []const u64) bool {
+    return x > 0 and x <= primes[a];
+}
+
+// Check predicate is all-true then all-false over the slice
+fn checkFindFirstTruePred(
+    comptime T: type,
+    slice: []const T,
+    ctx: anytype,
+    pred: fn (@TypeOf(ctx), T) bool,
+) void {
+    var found_true = false;
+    var i: usize = 0;
+    while (i < slice.len) {
+        if (pred(ctx, slice[i])) {
+            found_true = true;
+        } else {
+            assert(found_true == false);
+        }
+        i += 1;
+    }
+}
+
+// Assume predicate is all-false then all-true over the slice
+fn findFirstTrueIndexBackwards(
+    comptime T: type,
+    slice: []const T,
+    ctx: anytype,
+    pred: fn (@TypeOf(ctx), T) bool,
+) usize {
+    var i: usize = slice.len;
+    while (i > 0) {
+        i -= 1;
+        if (!pred(ctx, slice[i])) {
+            return i + 1;
+        }
+    }
+    return 0;
+}
+
+// Assume predicate is all-false then all-true over the slice
+fn findFirstTrueIndexForwards(
+    comptime T: type,
+    slice: []const T,
+    ctx: anytype,
+    pred: fn (@TypeOf(ctx), T) bool,
+) usize {
+    var i: usize = 0;
+    while (i < slice.len) {
+        if (pred(ctx, slice[i])) {
+            return i;
+        }
+        i += 1;
+    }
+    return slice.len;
+}
+
+// Assume predicate is all-false then all-true over the slice
+fn findFirstTrueIndexBinary(
+    comptime T: type,
+    slice: []const T,
+    ctx: anytype,
+    pred: fn (@TypeOf(ctx), T) bool,
+) usize {
+    var lo: usize = 0;
+    var hi: usize = slice.len;
+
+    while (lo != hi) {
+        assert(lo < hi);
+
+        const mid = (lo + hi) / 2;
+
+        assert(mid < slice.len);
+        assert(lo <= mid);
+        assert(mid < hi);
+
+        if (pred(ctx, slice[mid])) {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+
+    assert(lo == hi);
+    return lo;
+}
+
+const CHECK_FIND_PRED = false;
+const CHECK_FIND_INDEX = false;
+
+fn findFirstTrueIndex(
+    comptime T: type,
+    slice: []const T,
+    ctx: anytype,
+    pred: fn (@TypeOf(ctx), T) bool,
+) usize {
+    if (CHECK_FIND_PRED) {
+        checkFindFirstTruePred(T, slice, ctx, pred);
+    }
+
+    const index = findFirstTrueIndexBinary(T, slice, ctx, pred);
+
+    if (CHECK_FIND_INDEX) {
+        const index1 = findFirstTrueIndexBackwards(T, slice, ctx, pred);
+        const index2 = findFirstTrueIndexForwards(T, slice, ctx, pred);
+
+        assert(index == index1);
+        assert(index == index2);
+    }
+
+    return index;
+}
+
+const IsUnitCtx = struct {
+    x: u64,
+    b: u64,
+    primes: []const u64,
+    primes2: []const u64,
+};
+
+fn isUnit(ctx: IsUnitCtx, p_a: u64) bool {
+    const x = ctx.x;
+    assert(x > 0);
+    const b = ctx.b;
+    assert(b > 0);
+    const p_b = ctx.primes[b];
+
+    const x_o_p_a_o_p_b = x / p_a / p_b;
+    assert(x_o_p_a_o_p_b == x / p_b / p_a);
+    assert(x_o_p_a_o_p_b == x / (p_b * p_a));
+
+    return isUnitPhi(x_o_p_a_o_p_b, b - 1, ctx.primes);
+}
+
+fn findFirstUnitIndex(x: u64, b: u64, a_limit: u64, primes: []const u64, primes2: []const u64) usize {
+    const index = findFirstTrueIndex(u64, primes2[b + 1 .. a_limit], IsUnitCtx{ .x = x, .b = b, .primes = primes, .primes2 = primes2 }, isUnit);
+
+    return b + 1 + index;
+}
+
+const IsPiCtx = struct {
+    x: u64,
+    b: u64,
+    primes: []const u64,
+    primes2: []const u64,
+};
+
+fn isPi(ctx: IsPiCtx, p_a: u64) bool {
+    const x = ctx.x;
+    const b = ctx.b;
+    const p_b = ctx.primes[b];
+    const p_bm1 = ctx.primes[b - 1];
+
+    const x_o_p_a_o_p_b = x / p_a / p_b;
+    assert(x_o_p_a_o_p_b == x / p_b / p_a);
+    assert(x_o_p_a_o_p_b == x / (p_b * p_a));
+
+    return x_o_p_a_o_p_b < p_bm1 * p_bm1;
+}
+
+fn findFirstPiIndex(x: u64, b: u64, a_limit: u64, primes: []const u64, primes2: []const u64) usize {
+    const index = findFirstTrueIndex(u64, primes2[b + 1 .. a_limit], IsPiCtx{ .x = x, .b = b, .primes = primes, .primes2 = primes2 }, isPi);
+
+    return b + 1 + index;
+}
+
+// return sum(a_min <= a < a_lim){ phi(x/p_bs/p_a, b)}
+//fn phi_batch(x: u64, p_bs: u64, b: u64, primes: []const u64, i_min: u64, i_lim: u64) u64 {}
+
+// return phi(x, pi(sqrt(x)))
+fn phiBatchTop(ctx: PhiCtx, x: u64, pi_sqrt_x: u64, pi_cbrt_x: u64) u64 {
+    assert(pi_cbrt_x != 0);
+
+    var phi = x;
+
+    var a = pi_sqrt_x;
+    while (a > 0) : (a -= 1) {
+        const p_a = ctx.primes[a];
+
+        phi -= phiSimple(ctx, x / p_a, a - 1);
+    }
+
+    const CHECK_PHI = true;
+    if (CHECK_PHI) {
+        assert(phi == phiSimple(ctx, x, pi_sqrt_x));
+    }
+
+    return phi;
+}
+
+fn piBatch(gpa: std.mem.Allocator, x: u64) !u64 {
+    const sqrt_x = isqrt(x);
+    const cbrt_x = icbrt(x);
+
+    const primes = try genPrimesTo(gpa, sqrt_x);
+    defer gpa.free(primes);
+
+    const pis = try genPisTo(gpa, sqrt_x, primes);
+    defer gpa.free(pis);
+
+    const pi_sqrt_x = primes.len - 1;
+    assert(pis[sqrt_x] == pi_sqrt_x);
+
+    const primes3 = try genPrimesTo(gpa, cbrt_x);
+    defer gpa.free(primes3);
+
+    const pi_cbrt_x = primes3.len - 1;
+    assert(pis[cbrt_x] == pi_cbrt_x);
+
+    std.debug.print("x: {d:>16} | x^1/2: {d:>8} | pi(x^1/2): {d:>8} | x^1/3: {d:>8} | pi(x^1/3): {d:>8}\n\n", .{ x, sqrt_x, pi_sqrt_x, cbrt_x, pi_cbrt_x });
+
+    std.debug.print("\n", .{});
+
+    const ctx = PhiCtx{ .x = x, .primes = primes, .pis = pis };
+
+    const phi = phiBatchTop(ctx, x, pi_sqrt_x, pi_cbrt_x);
+
+    return phi + pi_sqrt_x - 1;
+    // assert(phi_ctx.x == x);
+    // var total_nodes: u64 = 0;
+    // var total_ones: u64 = 0;
+    // var total_pis: u64 = 0;
+    // var total_pi_dups: u64 = 0;
+    // var total_pi_dups2: u64 = 0;
+    // var total_rest: u64 = 0;
+
+    // var b: usize = primes.len - 1;
+    // var loop_no: usize = 0;
+
+    // while (true) {
+    //     const ones_base = findFirstUnitIndex(x, b, primes2.len, primes, primes2);
+    //     const pis_base = findFirstPiIndex(x, b, ones_base, primes, primes2);
+
+    //     const p_b = primes[b];
+    //     const p_bm1 = primes[b - 1];
+    //     const total = primes2.len - 1 - b;
+
+    //     var a = primes2.len - 1;
+
+    //     while (b < a) {
+    //         const p_a = primes2[a];
+
+    //         const x_o_p_a_o_p_b = x / p_a / p_b;
+    //         assert(x_o_p_a_o_p_b == x / p_b / p_a);
+    //         if (x_o_p_a_o_p_b > p_bm1) {
+    //             break;
+    //         }
+
+    //         a -= 1;
+    //     }
+    //     const ones_limit = a;
+    //     assert(ones_limit + 1 == ones_base); // Hrmmm, likely off-by-one error.
+
+    //     var last_x_o_p_a_o_p_b: u64 = 0;
+    //     var pi_dups_count: u64 = 0;
+    //     var pi_dups2_count: u64 = 0;
+
+    //     while (b < a) {
+    //         const p_a = primes2[a];
+
+    //         const x_o_p_a_o_p_b = x / p_a / p_b;
+    //         assert(x_o_p_a_o_p_b == x / p_b / p_a);
+    //         if (x_o_p_a_o_p_b >= p_bm1 * p_bm1) {
+    //             break;
+    //         }
+
+    //         if (last_x_o_p_a_o_p_b != 0 and last_x_o_p_a_o_p_b == x_o_p_a_o_p_b) {
+    //             pi_dups_count += 1;
+    //         }
+    //         if (last_x_o_p_a_o_p_b != 0 and (last_x_o_p_a_o_p_b == x_o_p_a_o_p_b or (x_o_p_a_o_p_b % 2 == 0 and last_x_o_p_a_o_p_b == x_o_p_a_o_p_b - 1))) {
+    //             pi_dups2_count += 1;
+    //         }
+
+    //         last_x_o_p_a_o_p_b = x_o_p_a_o_p_b;
+
+    //         a -= 1;
+    //     }
+    //     const pis_limit = a;
+    //     assert(pis_limit + 1 == pis_base); // Hrmmm, likely off-by-one error.
+
+    //     const ones_count = primes2.len - 1 - ones_limit;
+    //     const pis_count = ones_limit - pis_limit;
+    //     const rest_count = pis_limit - b;
+
+    //     if (false or loop_no < 5 or b < 5) {
+    //         std.debug.print("        b: {d:>8} | p_b: {d:>8} | total p_a's {d:>8} | 1's: {d:>8} - {d:>6.2}% | pi's: {d:>8} - {d:>6.2}% | rest: {d:>8} - {d:>6.2}%\n", .{ b, p_b, total, ones_count, pc(ones_count, total), pis_count, pc(pis_count, total), rest_count, pc(rest_count, total) });
+    //         if (false) {
+    //             std.debug.print("                 ones_limit: {d:>8} | ones_base {d:>8}\n", .{ ones_limit, ones_base });
+    //             std.debug.print("                 pis_limit:  {d:>8} | pis_base  {d:>8}\n", .{ pis_limit, pis_base });
+    //         }
+    //     }
+
+    //     total_nodes += total;
+    //     total_ones += ones_count;
+    //     total_pis += pis_count;
+    //     total_pi_dups += pi_dups_count;
+    //     total_pi_dups2 += pi_dups2_count;
+    //     total_rest += rest_count;
+
+    //     if (b == 1) {
+    //         break;
+    //     }
+    //     b -= 1;
+    //     loop_no += 1;
+    // }
+
+    // std.debug.print("\n", .{});
+    // std.debug.print("x: {d:>16} | pi(x^1/2): {d:>8} | pi(x^1/3): {d:>8} | nodes: {d:>16} | ones: {d:>12} - {d:>6.2}% | pis: {d:>12} - {d:>6.2}% | rest: {d:>12} - {d:>6.2}%\n", .{ x, primes2.len, primes.len, total_nodes, total_ones, pc(total_ones, total_nodes), total_pis, pc(total_pis, total_nodes), total_rest, pc(total_rest, total_nodes) });
+    // std.debug.print("    pis: {d:>12} | pi-dups: {d:>12} - {d:>6.2}%| pi-dups2: {d:>12} - {d:>6.2}%\n", .{ total_pis, total_pi_dups, pc(total_pi_dups, total_pis), total_pi_dups2, pc(total_pi_dups2, total_pis) });
+
+    // return 0;
+}
+
+pub fn main(init: std.process.Init) !void {
+    var args = try init.minimal.args.iterateAllocator(init.gpa);
+    _ = args.skip();
+    const x_str = args.next() orelse {
+        std.debug.print("Usage: zig run play5.zig -- <x>\n", .{});
+        return;
+    };
+    const x = std.fmt.parseInt(u64, x_str, 10) catch |err| {
+        std.debug.print("Error: '{s}' is not a valid u64 number (Error: {any})\n", .{ x_str, err });
+        return;
+    };
+
+    const gpa = std.heap.page_allocator;
+
+    const pi_x = try piBatch(gpa, x);
+
+    std.debug.print("\npi({d}) = {d}", .{ x, pi_x });
+
+    const CHECK_PI = true;
+    if (CHECK_PI) {
+        const primes_to_x = try genPrimesTo(gpa, x);
+        defer gpa.free(primes_to_x);
+        std.debug.print(" [expecting {d}]", .{primes_to_x.len - 1});
+    }
+    std.debug.print("\n\n", .{});
+}
