@@ -43,8 +43,6 @@ fn isUnitPhi(x: u64, a: u64, primes: []const u64) bool {
     return x > 0 and x <= primes[a];
 }
 
-const CHECK_FIND_PRED = true;
-
 // Check predicate is all-true then all-false over the slice
 fn checkFindFirstTruePred(
     comptime T: type,
@@ -65,6 +63,72 @@ fn checkFindFirstTruePred(
 }
 
 // Assume predicate is all-false then all-true over the slice
+fn findFirstTrueIndexBackwards(
+    comptime T: type,
+    slice: []const T,
+    ctx: anytype,
+    pred: fn (@TypeOf(ctx), T) bool,
+) usize {
+    var i: usize = slice.len;
+    while (i > 0) {
+        i -= 1;
+        if (!pred(ctx, slice[i])) {
+            return i + 1;
+        }
+    }
+    return 0;
+}
+
+// Assume predicate is all-false then all-true over the slice
+fn findFirstTrueIndexForwards(
+    comptime T: type,
+    slice: []const T,
+    ctx: anytype,
+    pred: fn (@TypeOf(ctx), T) bool,
+) usize {
+    var i: usize = 0;
+    while (i < slice.len) {
+        if (pred(ctx, slice[i])) {
+            return i;
+        }
+        i += 1;
+    }
+    return slice.len;
+}
+
+// Assume predicate is all-false then all-true over the slice
+fn findFirstTrueIndexBinary(
+    comptime T: type,
+    slice: []const T,
+    ctx: anytype,
+    pred: fn (@TypeOf(ctx), T) bool,
+) usize {
+    var lo: usize = 0;
+    var hi: usize = slice.len;
+
+    while (lo != hi) {
+        assert(lo < hi);
+
+        const mid = (lo + hi) / 2;
+
+        assert(mid < slice.len);
+        assert(lo <= mid);
+        assert(mid < hi);
+
+        if (pred(ctx, slice[mid])) {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+
+    assert(lo == hi);
+    return lo;
+}
+
+const CHECK_FIND_PRED = false;
+const CHECK_FIND_INDEX = false;
+
 fn findFirstTrueIndex(
     comptime T: type,
     slice: []const T,
@@ -75,14 +139,17 @@ fn findFirstTrueIndex(
         checkFindFirstTruePred(T, slice, ctx, pred);
     }
 
-    var i: usize = slice.len;
-    while (i > 0) {
-        i -= 1;
-        if (!pred(ctx, slice[i])) {
-            return i + 1;
-        }
+    const index = findFirstTrueIndexBinary(T, slice, ctx, pred);
+
+    if (CHECK_FIND_INDEX) {
+        const index1 = findFirstTrueIndexBackwards(T, slice, ctx, pred);
+        const index2 = findFirstTrueIndexForwards(T, slice, ctx, pred);
+
+        assert(index == index1);
+        assert(index == index2);
     }
-    return 0;
+
+    return index;
 }
 
 const IsUnitCtx = struct {
