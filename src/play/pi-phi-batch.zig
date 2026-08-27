@@ -270,13 +270,17 @@ fn findFirstPiIndex(x: u64, b: u64, a_limit: u64, primes: []const u64, primes2: 
 fn phiBatchTop(ctx: PhiCtx, stats: *PhiStats) u64 {
     var phi = ctx.x;
 
+    // Gourdan
+    const top_phi_ones = (ctx.pi_sqrt_x - ctx.pi_cbrt_x - 1) * (ctx.pi_sqrt_x - ctx.pi_cbrt_x) / 2;
+    phi += top_phi_ones;
+
     var a = ctx.pi_sqrt_x;
     while (a > 0) : (a -= 1) {
         const p_a = ctx.primes[a];
 
         if (a > ctx.pi_cbrt_x) {
-            // phi(x/p_a, a-1) = phi(x/p_a, a-2) - phi(x/p_a/p_am1, a-2) = ... = phi(x/p_a, pi(x^1/3)) - (a - pi(x^1/3))
-            phi -= phiSimple(ctx, ctx.x / p_a, ctx.pi_cbrt_x, stats) - (a - ctx.pi_cbrt_x - 1);
+            // Gourdan
+            phi -= phiSimple(ctx, ctx.x / p_a, ctx.pi_cbrt_x, stats);
         } else {
             phi -= phiSimple(ctx, ctx.x / p_a, a - 1, stats);
         }
