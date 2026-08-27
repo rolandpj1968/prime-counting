@@ -62,20 +62,38 @@ fn genPisTo(gpa: std.mem.Allocator, y: u64, primes: []u64) ![]u64 {
     return pis;
 }
 
-pub const PhiCtx = struct { x: u64, primes: []const u64, pis: []const u64 };
+pub const PhiCtx = struct {
+    x: u64,
+    sqrt_x: u64,
+    pi_sqrt_x: u64,
+    cbrt_x: u64,
+    pi_cbrt_x: u64,
+    primes: []const u64,
+    pis: []const u64,
+};
 
-fn phiSimple(ctx: PhiCtx, x: u64, a: u64) u64 {
+pub const PhiStats = struct {
+    phi_simples: u64 = 0,
+    phi_simple_x0s: u64 = 0,
+    phi_simple_a0s: u64 = 0,
+};
+
+fn phiSimple(ctx: PhiCtx, x: u64, a: u64, stats: *PhiStats) u64 {
+    stats.phi_simples += 1;
+
     if (x == 0) {
+        stats.phi_simple_x0s += 1;
         return 0;
     }
 
     if (a == 0) {
+        stats.phi_simple_a0s += 1;
         return x;
     }
 
     const p_a = ctx.primes[a];
 
-    return phiSimple(ctx, x, a - 1) - phiSimple(ctx, x / p_a, a - 1);
+    return phiSimple(ctx, x, a - 1, stats) - phiSimple(ctx, x / p_a, a - 1, stats);
 }
 
 // degenerate case - phi(x,a) == 1
@@ -249,21 +267,20 @@ fn findFirstPiIndex(x: u64, b: u64, a_limit: u64, primes: []const u64, primes2: 
 //fn phi_batch(x: u64, p_bs: u64, b: u64, primes: []const u64, i_min: u64, i_lim: u64) u64 {}
 
 // return phi(x, pi(sqrt(x)))
-fn phiBatchTop(ctx: PhiCtx, x: u64, pi_sqrt_x: u64, pi_cbrt_x: u64) u64 {
-    assert(pi_cbrt_x != 0);
+fn phiBatchTop(ctx: PhiCtx, stats: *PhiStats) u64 {
+    var phi = ctx.x;
 
-    var phi = x;
-
-    var a = pi_sqrt_x;
+    var a = ctx.pi_sqrt_x;
     while (a > 0) : (a -= 1) {
         const p_a = ctx.primes[a];
 
-        phi -= phiSimple(ctx, x / p_a, a - 1);
+        phi -= phiSimple(ctx, ctx.x / p_a, a - 1, stats);
     }
 
     const CHECK_PHI = true;
     if (CHECK_PHI) {
-        assert(phi == phiSimple(ctx, x, pi_sqrt_x));
+        var dummy = PhiStats{};
+        assert(phi == phiSimple(ctx, ctx.x, ctx.pi_sqrt_x, &dummy));
     }
 
     return phi;
@@ -292,9 +309,21 @@ fn piBatch(gpa: std.mem.Allocator, x: u64) !u64 {
 
     std.debug.print("\n", .{});
 
-    const ctx = PhiCtx{ .x = x, .primes = primes, .pis = pis };
+    const ctx = PhiCtx{
+        .x = x,
+        .sqrt_x = sqrt_x,
+        .pi_sqrt_x = pi_sqrt_x,
+        .cbrt_x = cbrt_x,
+        .pi_cbrt_x = pi_cbrt_x,
+        .primes = primes,
+        .pis = pis,
+    };
 
-    const phi = phiBatchTop(ctx, x, pi_sqrt_x, pi_cbrt_x);
+    var stats = PhiStats{};
+
+    const phi = phiBatchTop(ctx, &stats);
+
+    std.debug.print("\n                          {any}\n\n", .{stats});
 
     return phi + pi_sqrt_x - 1;
     // assert(phi_ctx.x == x);
