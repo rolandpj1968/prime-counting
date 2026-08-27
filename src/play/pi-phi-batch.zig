@@ -274,7 +274,12 @@ fn phiBatchTop(ctx: PhiCtx, stats: *PhiStats) u64 {
     while (a > 0) : (a -= 1) {
         const p_a = ctx.primes[a];
 
-        phi -= phiSimple(ctx, ctx.x / p_a, a - 1, stats);
+        if (a > ctx.pi_cbrt_x) {
+            // phi(x/p_a, a-1) = phi(x/p_a, a-2) - phi(x/p_a/p_am1, a-2) = ... = phi(x/p_a, pi(x^1/3)) - (a - pi(x^1/3))
+            phi -= phiSimple(ctx, ctx.x / p_a, ctx.pi_cbrt_x, stats) - (a - ctx.pi_cbrt_x - 1);
+        } else {
+            phi -= phiSimple(ctx, ctx.x / p_a, a - 1, stats);
+        }
     }
 
     const CHECK_PHI = true;
@@ -326,99 +331,6 @@ fn piBatch(gpa: std.mem.Allocator, x: u64) !u64 {
     std.debug.print("\n                          {any}\n\n", .{stats});
 
     return phi + pi_sqrt_x - 1;
-    // assert(phi_ctx.x == x);
-    // var total_nodes: u64 = 0;
-    // var total_ones: u64 = 0;
-    // var total_pis: u64 = 0;
-    // var total_pi_dups: u64 = 0;
-    // var total_pi_dups2: u64 = 0;
-    // var total_rest: u64 = 0;
-
-    // var b: usize = primes.len - 1;
-    // var loop_no: usize = 0;
-
-    // while (true) {
-    //     const ones_base = findFirstUnitIndex(x, b, primes2.len, primes, primes2);
-    //     const pis_base = findFirstPiIndex(x, b, ones_base, primes, primes2);
-
-    //     const p_b = primes[b];
-    //     const p_bm1 = primes[b - 1];
-    //     const total = primes2.len - 1 - b;
-
-    //     var a = primes2.len - 1;
-
-    //     while (b < a) {
-    //         const p_a = primes2[a];
-
-    //         const x_o_p_a_o_p_b = x / p_a / p_b;
-    //         assert(x_o_p_a_o_p_b == x / p_b / p_a);
-    //         if (x_o_p_a_o_p_b > p_bm1) {
-    //             break;
-    //         }
-
-    //         a -= 1;
-    //     }
-    //     const ones_limit = a;
-    //     assert(ones_limit + 1 == ones_base); // Hrmmm, likely off-by-one error.
-
-    //     var last_x_o_p_a_o_p_b: u64 = 0;
-    //     var pi_dups_count: u64 = 0;
-    //     var pi_dups2_count: u64 = 0;
-
-    //     while (b < a) {
-    //         const p_a = primes2[a];
-
-    //         const x_o_p_a_o_p_b = x / p_a / p_b;
-    //         assert(x_o_p_a_o_p_b == x / p_b / p_a);
-    //         if (x_o_p_a_o_p_b >= p_bm1 * p_bm1) {
-    //             break;
-    //         }
-
-    //         if (last_x_o_p_a_o_p_b != 0 and last_x_o_p_a_o_p_b == x_o_p_a_o_p_b) {
-    //             pi_dups_count += 1;
-    //         }
-    //         if (last_x_o_p_a_o_p_b != 0 and (last_x_o_p_a_o_p_b == x_o_p_a_o_p_b or (x_o_p_a_o_p_b % 2 == 0 and last_x_o_p_a_o_p_b == x_o_p_a_o_p_b - 1))) {
-    //             pi_dups2_count += 1;
-    //         }
-
-    //         last_x_o_p_a_o_p_b = x_o_p_a_o_p_b;
-
-    //         a -= 1;
-    //     }
-    //     const pis_limit = a;
-    //     assert(pis_limit + 1 == pis_base); // Hrmmm, likely off-by-one error.
-
-    //     const ones_count = primes2.len - 1 - ones_limit;
-    //     const pis_count = ones_limit - pis_limit;
-    //     const rest_count = pis_limit - b;
-
-    //     if (false or loop_no < 5 or b < 5) {
-    //         std.debug.print("        b: {d:>8} | p_b: {d:>8} | total p_a's {d:>8} | 1's: {d:>8} - {d:>6.2}% | pi's: {d:>8} - {d:>6.2}% | rest: {d:>8} - {d:>6.2}%\n", .{ b, p_b, total, ones_count, pc(ones_count, total), pis_count, pc(pis_count, total), rest_count, pc(rest_count, total) });
-    //         if (false) {
-    //             std.debug.print("                 ones_limit: {d:>8} | ones_base {d:>8}\n", .{ ones_limit, ones_base });
-    //             std.debug.print("                 pis_limit:  {d:>8} | pis_base  {d:>8}\n", .{ pis_limit, pis_base });
-    //         }
-    //     }
-
-    //     total_nodes += total;
-    //     total_ones += ones_count;
-    //     total_pis += pis_count;
-    //     total_pi_dups += pi_dups_count;
-    //     total_pi_dups2 += pi_dups2_count;
-    //     total_rest += rest_count;
-
-    //     if (b == 1) {
-    //         break;
-    //     }
-    //     b -= 1;
-    //     loop_no += 1;
-    // }
-
-    // std.debug.print("\n", .{});
-    // std.debug.print("x: {d:>16} | pi(x^1/2): {d:>8} | pi(x^1/3): {d:>8} | nodes: {d:>16} | ones: {d:>12} - {d:>6.2}% | pis: {d:>12} - {d:>6.2}% | rest: {d:>12} - {d:>6.2}%\n", .{ x, primes2.len, primes.len, total_nodes, total_ones, pc(total_ones, total_nodes), total_pis, pc(total_pis, total_nodes), total_rest, pc(total_rest, total_nodes) });
-    // std.debug.print("    pis: {d:>12} | pi-dups: {d:>12} - {d:>6.2}%| pi-dups2: {d:>12} - {d:>6.2}%\n", .{ total_pis, total_pi_dups, pc(total_pi_dups, total_pis), total_pi_dups2, pc(total_pi_dups2, total_pis) });
-
-    // return 0;
 }
 
 pub fn main(init: std.process.Init) !void {
