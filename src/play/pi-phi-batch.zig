@@ -73,6 +73,8 @@ pub const PhiCtx = struct {
 };
 
 pub const PhiStats = struct {
+    phi_batches: u64 = 0,
+    phi_batch_1s: u64 = 0,
     phi_simples: u64 = 0,
     phi_simple_x0s: u64 = 0,
     phi_simple_a0s: u64 = 0,
@@ -104,8 +106,8 @@ fn isUnitPhi(x: u64, a: u64, primes: []const u64) bool {
 // Check predicate is all-true then all-false over the slice
 fn checkFindFirstTruePred(
     comptime T: type,
-    slice: []const T,
     ctx: anytype,
+    slice: []const T,
     pred: fn (@TypeOf(ctx), T) bool,
 ) void {
     var found_true = false;
@@ -121,27 +123,10 @@ fn checkFindFirstTruePred(
 }
 
 // Assume predicate is all-false then all-true over the slice
-fn findFirstTrueIndexBackwards(
-    comptime T: type,
-    slice: []const T,
-    ctx: anytype,
-    pred: fn (@TypeOf(ctx), T) bool,
-) usize {
-    var i: usize = slice.len;
-    while (i > 0) {
-        i -= 1;
-        if (!pred(ctx, slice[i])) {
-            return i + 1;
-        }
-    }
-    return 0;
-}
-
-// Assume predicate is all-false then all-true over the slice
 fn findFirstTrueIndexForwards(
     comptime T: type,
-    slice: []const T,
     ctx: anytype,
+    slice: []const T,
     pred: fn (@TypeOf(ctx), T) bool,
 ) usize {
     var i: usize = 0;
@@ -157,8 +142,8 @@ fn findFirstTrueIndexForwards(
 // Assume predicate is all-false then all-true over the slice
 fn findFirstTrueIndexBinary(
     comptime T: type,
-    slice: []const T,
     ctx: anytype,
+    slice: []const T,
     pred: fn (@TypeOf(ctx), T) bool,
 ) usize {
     var lo: usize = 0;
@@ -184,27 +169,23 @@ fn findFirstTrueIndexBinary(
     return lo;
 }
 
-const CHECK_FIND_PRED = false;
-const CHECK_FIND_INDEX = false;
+const CHECK_FIND_PRED = true;
+const CHECK_FIND_INDEX = true;
 
 fn findFirstTrueIndex(
     comptime T: type,
-    slice: []const T,
     ctx: anytype,
+    slice: []const T,
     pred: fn (@TypeOf(ctx), T) bool,
 ) usize {
     if (CHECK_FIND_PRED) {
-        checkFindFirstTruePred(T, slice, ctx, pred);
+        checkFindFirstTruePred(T, ctx, slice, pred);
     }
 
-    const index = findFirstTrueIndexBinary(T, slice, ctx, pred);
+    const index = findFirstTrueIndexBinary(T, ctx, slice, pred);
 
     if (CHECK_FIND_INDEX) {
-        const index1 = findFirstTrueIndexBackwards(T, slice, ctx, pred);
-        const index2 = findFirstTrueIndexForwards(T, slice, ctx, pred);
-
-        assert(index == index1);
-        assert(index == index2);
+        assert(index == findFirstTrueIndexForwards(T, ctx, slice, pred));
     }
 
     return index;
@@ -214,7 +195,6 @@ const IsUnitCtx = struct {
     x: u64,
     b: u64,
     primes: []const u64,
-    primes2: []const u64,
 };
 
 fn isUnit(ctx: IsUnitCtx, p_a: u64) bool {
@@ -231,67 +211,28 @@ fn isUnit(ctx: IsUnitCtx, p_a: u64) bool {
     return isUnitPhi(x_o_p_a_o_p_b, b - 1, ctx.primes);
 }
 
-fn findFirstUnitIndex(x: u64, b: u64, a_limit: u64, primes: []const u64, primes2: []const u64) usize {
-    const index = findFirstTrueIndex(u64, primes2[b + 1 .. a_limit], IsUnitCtx{ .x = x, .b = b, .primes = primes, .primes2 = primes2 }, isUnit);
-
-    return b + 1 + index;
+fn findFirstUnitA(ctx: PhiCtx, b: u64, a_min: u64, a_lim: u64) usize {
+    const index = findFirstTrueIndex(u64, IsUnitCtx{ .x = ctx.x, .b = b, .primes = ctx.primes }, ctx.primes[a_min..a_lim], isUnit);
+    return a_min + index;
 }
-
-const IsPiCtx = struct {
-    x: u64,
-    b: u64,
-    primes: []const u64,
-    primes2: []const u64,
-};
-
-fn isPi(ctx: IsPiCtx, p_a: u64) bool {
-    const x = ctx.x;
-    const b = ctx.b;
-    const p_b = ctx.primes[b];
-    const p_bm1 = ctx.primes[b - 1];
-
-    const x_o_p_a_o_p_b = x / p_a / p_b;
-    assert(x_o_p_a_o_p_b == x / p_b / p_a);
-    assert(x_o_p_a_o_p_b == x / (p_b * p_a));
-
-    return x_o_p_a_o_p_b < p_bm1 * p_bm1;
-}
-
-fn findFirstPiIndex(x: u64, b: u64, a_limit: u64, primes: []const u64, primes2: []const u64) usize {
-    const index = findFirstTrueIndex(u64, primes2[b + 1 .. a_limit], IsPiCtx{ .x = x, .b = b, .primes = primes, .primes2 = primes2 }, isPi);
-
-    return b + 1 + index;
-}
-
-// return sum(a_min <= a < a_lim){ phi(x/p_bs/p_a, b)}
-//fn phi_batch(x: u64, p_bs: u64, b: u64, primes: []const u64, i_min: u64, i_lim: u64) u64 {}
 
 fn phiBatch(ctx: PhiCtx, b: u64, a_min: u64, a_lim: u64, stats: *PhiStats) u64 {
-    var phi_sum: u64 = 0;
+    stats.phi_batches += 1;
+
+    const first_unit_index = findFirstUnitA(ctx, b, a_min, a_lim);
+
+    stats.phi_batch_1s += a_lim - first_unit_index;
+
+    var phi_sum: u64 = a_lim - first_unit_index;
 
     const p_b = ctx.primes[b];
 
     var a = a_min;
-    while (a < a_lim) : (a += 1) {
+    while (a < first_unit_index) : (a += 1) {
         const p_a = ctx.primes[a];
 
         phi_sum += phiSimple(ctx, ctx.x / p_a / p_b, b - 1, stats);
     }
-
-    return phi_sum;
-}
-
-fn phiBatch1(ctx: PhiCtx, b: u64, a_min: u64, a_lim: u64, stats: *PhiStats) u64 {
-    var phi_sum: u64 = 0;
-
-    var a = a_min;
-    while (a < a_lim) : (a += 1) {
-        const p_a = ctx.primes[a];
-
-        phi_sum += phiSimple(ctx, ctx.x / p_a, b - 1, stats);
-    }
-
-    phi_sum -= phiBatch(ctx, b, a_min, a_lim, stats);
 
     return phi_sum;
 }
@@ -320,7 +261,7 @@ fn phiBatchTop(ctx: PhiCtx, stats: *PhiStats) u64 {
 
     phi -= base_phi_sum - batch_phi_sum;
 
-    const CHECK_PHI = true;
+    const CHECK_PHI = false;
     if (CHECK_PHI) {
         var dummy = PhiStats{};
         assert(phi == phiSimple(ctx, ctx.x, ctx.pi_sqrt_x, &dummy));
