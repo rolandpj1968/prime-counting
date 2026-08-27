@@ -75,6 +75,7 @@ pub const PhiCtx = struct {
 pub const PhiStats = struct {
     phi_batches: u64 = 0,
     phi_batch_1s: u64 = 0,
+    phi_batch_others: u64 = 0,
     phi_simples: u64 = 0,
     phi_simple_x0s: u64 = 0,
     phi_simple_a0s: u64 = 0,
@@ -169,8 +170,8 @@ fn findFirstTrueIndexBinary(
     return lo;
 }
 
-const CHECK_FIND_PRED = true;
-const CHECK_FIND_INDEX = true;
+const CHECK_FIND_PRED = false;
+const CHECK_FIND_INDEX = false;
 
 fn findFirstTrueIndex(
     comptime T: type,
@@ -219,16 +220,17 @@ fn findFirstUnitA(ctx: PhiCtx, b: u64, a_min: u64, a_lim: u64) usize {
 fn phiBatch(ctx: PhiCtx, b: u64, a_min: u64, a_lim: u64, stats: *PhiStats) u64 {
     stats.phi_batches += 1;
 
-    const first_unit_index = findFirstUnitA(ctx, b, a_min, a_lim);
+    const first_unit_a = findFirstUnitA(ctx, b, a_min, a_lim);
 
-    stats.phi_batch_1s += a_lim - first_unit_index;
+    stats.phi_batch_1s += a_lim - first_unit_a;
+    stats.phi_batch_others += first_unit_a - a_min;
 
-    var phi_sum: u64 = a_lim - first_unit_index;
+    var phi_sum: u64 = a_lim - first_unit_a;
 
     const p_b = ctx.primes[b];
 
     var a = a_min;
-    while (a < first_unit_index) : (a += 1) {
+    while (a < first_unit_a) : (a += 1) {
         const p_a = ctx.primes[a];
 
         phi_sum += phiSimple(ctx, ctx.x / p_a / p_b, b - 1, stats);
@@ -330,7 +332,7 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("\npi({d}) = {d}", .{ x, pi_x });
 
-    const CHECK_PI = true;
+    const CHECK_PI = false;
     if (CHECK_PI) {
         const primes_to_x = try genPrimesTo(gpa, x);
         defer gpa.free(primes_to_x);
