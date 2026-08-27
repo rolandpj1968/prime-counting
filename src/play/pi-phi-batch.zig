@@ -266,17 +266,23 @@ fn findFirstPiIndex(x: u64, b: u64, a_limit: u64, primes: []const u64, primes2: 
 // return sum(a_min <= a < a_lim){ phi(x/p_bs/p_a, b)}
 //fn phi_batch(x: u64, p_bs: u64, b: u64, primes: []const u64, i_min: u64, i_lim: u64) u64 {}
 
+// fn phiBatch(ctx: PhiCtx, b: u64, a_min: u64, a_lim: u64, stats: *PhiStats) u64 {
+//     const p_b = ctx.primes[b];
+// }
+
 fn phiBatch1(ctx: PhiCtx, b: u64, a_min: u64, a_lim: u64, stats: *PhiStats) u64 {
-    var phi: u64 = 0;
+    var phi_sum: u64 = 0;
+
+    const p_b = ctx.primes[b];
 
     var a = a_min;
     while (a < a_lim) : (a += 1) {
         const p_a = ctx.primes[a];
 
-        phi += phiSimple(ctx, ctx.x / p_a, b, stats);
+        phi_sum += phiSimple(ctx, ctx.x / p_a, b - 1, stats) - phiSimple(ctx, ctx.x / p_a / p_b, b - 1, stats);
     }
 
-    return phi;
+    return phi_sum;
 }
 
 // return phi(x, pi(sqrt(x)))
