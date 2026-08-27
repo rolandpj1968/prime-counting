@@ -304,15 +304,21 @@ fn phiBatchTop(ctx: PhiCtx, stats: *PhiStats) u64 {
     const top_phi_ones = (ctx.pi_sqrt_x - ctx.pi_cbrt_x - 1) * (ctx.pi_sqrt_x - ctx.pi_cbrt_x) / 2;
     phi += top_phi_ones;
 
-    // First batch - still need to invert one level
-    phi -= phiBatch1(ctx, ctx.pi_cbrt_x, ctx.pi_cbrt_x + 1, ctx.pi_sqrt_x + 1, stats);
-
-    var a = ctx.pi_cbrt_x;
-    while (a > 0) : (a -= 1) {
+    var base_phi_sum: u64 = 0;
+    var a: u64 = 1;
+    while (a <= ctx.pi_sqrt_x) : (a += 1) {
         const p_a = ctx.primes[a];
 
-        phi -= phiSimple(ctx, ctx.x / p_a, a - 1, stats);
+        base_phi_sum += ctx.x / p_a;
     }
+
+    var batch_phi_sum: u64 = 0;
+    var b: u64 = 1;
+    while (b <= ctx.pi_cbrt_x) : (b += 1) {
+        batch_phi_sum += phiBatch(ctx, b, b + 1, ctx.pi_sqrt_x + 1, stats);
+    }
+
+    phi -= base_phi_sum - batch_phi_sum;
 
     const CHECK_PHI = true;
     if (CHECK_PHI) {
