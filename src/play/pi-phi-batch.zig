@@ -266,6 +266,19 @@ fn findFirstPiIndex(x: u64, b: u64, a_limit: u64, primes: []const u64, primes2: 
 // return sum(a_min <= a < a_lim){ phi(x/p_bs/p_a, b)}
 //fn phi_batch(x: u64, p_bs: u64, b: u64, primes: []const u64, i_min: u64, i_lim: u64) u64 {}
 
+fn phiBatch1(ctx: PhiCtx, b: u64, a_min: u64, a_lim: u64, stats: *PhiStats) u64 {
+    var phi: u64 = 0;
+
+    var a = a_min;
+    while (a < a_lim) : (a += 1) {
+        const p_a = ctx.primes[a];
+
+        phi += phiSimple(ctx, ctx.x / p_a, b, stats);
+    }
+
+    return phi;
+}
+
 // return phi(x, pi(sqrt(x)))
 fn phiBatchTop(ctx: PhiCtx, stats: *PhiStats) u64 {
     var phi = ctx.x;
@@ -274,16 +287,14 @@ fn phiBatchTop(ctx: PhiCtx, stats: *PhiStats) u64 {
     const top_phi_ones = (ctx.pi_sqrt_x - ctx.pi_cbrt_x - 1) * (ctx.pi_sqrt_x - ctx.pi_cbrt_x) / 2;
     phi += top_phi_ones;
 
-    var a = ctx.pi_sqrt_x;
+    // First batch - still need to invert one level
+    phi -= phiBatch1(ctx, ctx.pi_cbrt_x, ctx.pi_cbrt_x + 1, ctx.pi_sqrt_x + 1, stats);
+
+    var a = ctx.pi_cbrt_x;
     while (a > 0) : (a -= 1) {
         const p_a = ctx.primes[a];
 
-        if (a > ctx.pi_cbrt_x) {
-            // Gourdan
-            phi -= phiSimple(ctx, ctx.x / p_a, ctx.pi_cbrt_x, stats);
-        } else {
-            phi -= phiSimple(ctx, ctx.x / p_a, a - 1, stats);
-        }
+        phi -= phiSimple(ctx, ctx.x / p_a, a - 1, stats);
     }
 
     const CHECK_PHI = true;
