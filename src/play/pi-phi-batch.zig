@@ -76,6 +76,7 @@ pub const PhiStats = struct {
     phi_batches: u64 = 0,
     phi_batch_1s: u64 = 0,
     phi_batch_others: u64 = 0,
+    phi_batch_uniques: u64 = 0,
     phi_simples: u64 = 0,
     phi_simple_x0s: u64 = 0,
     phi_simple_a0s: u64 = 0,
@@ -194,6 +195,7 @@ fn findFirstTrueIndex(
 
 const IsUnitCtx = struct {
     x: u64,
+    p_prod: u64,
     b: u64,
     primes: []const u64,
 };
@@ -201,26 +203,77 @@ const IsUnitCtx = struct {
 fn isUnit(ctx: IsUnitCtx, p_a: u64) bool {
     const x = ctx.x;
     assert(x > 0);
+    const p_prod = ctx.p_prod;
+    assert(p_prod > 0);
     const b = ctx.b;
     assert(b > 0);
     const p_b = ctx.primes[b];
 
-    const x_o_p_a_o_p_b = x / p_a / p_b;
-    assert(x_o_p_a_o_p_b == x / p_b / p_a);
-    assert(x_o_p_a_o_p_b == x / (p_b * p_a));
+    const x_o_p_a_o_p_prod_o_p_b = x / p_a / p_prod / p_b;
+    assert(x_o_p_a_o_p_prod_o_p_b == x / p_prod / p_b / p_a);
+    assert(x_o_p_a_o_p_prod_o_p_b == x / (p_prod * p_b * p_a));
 
-    return isUnitPhi(x_o_p_a_o_p_b, b - 1, ctx.primes);
+    return isUnitPhi(x_o_p_a_o_p_prod_o_p_b, b - 1, ctx.primes);
 }
 
-fn findFirstUnitA(ctx: PhiCtx, b: u64, a_min: u64, a_lim: u64) usize {
-    const index = findFirstTrueIndex(u64, IsUnitCtx{ .x = ctx.x, .b = b, .primes = ctx.primes }, ctx.primes[a_min..a_lim], isUnit);
+fn findFirstUnitA(ctx: PhiCtx, p_prod: u64, b: u64, a_min: u64, a_lim: u64) usize {
+    const index = findFirstTrueIndex(u64, IsUnitCtx{ .x = ctx.x, .p_prod = p_prod, .b = b, .primes = ctx.primes }, ctx.primes[a_min..a_lim], isUnit);
     return a_min + index;
 }
 
-fn phiBatch(ctx: PhiCtx, b: u64, a_min: u64, a_lim: u64, stats: *PhiStats) u64 {
+fn phiBatchSplit(ctx: PhiCtx, p_prod: u64, b: u64, a_min: u64, a_lim: u64, stats: *PhiStats) u64 {
+    if (true) {
+        const p_b = ctx.primes[b];
+        std.debug.print("\n---------------- phiBatchSplit -----------------\n", .{});
+        var a = a_min;
+        while (a < a_lim) : (a += 1) {
+            const p_a = ctx.primes[a];
+            const x_o_p_a_o_p_prod = ctx.x / p_a / p_prod;
+            const sqrt_x_o_p_a_o_p_prod = isqrt(x_o_p_a_o_p_prod);
+            std.debug.print("    phi({}, {}) p_b = {} - only need b = {} for x^1/2 = {}\n", .{ x_o_p_a_o_p_prod, b, p_b, ctx.pis[sqrt_x_o_p_a_o_p_prod], sqrt_x_o_p_a_o_p_prod });
+        }
+        std.debug.print("------------------------------------------------\n\n", .{});
+    }
+
+    var phi_sum: u64 = 0;
+
+    var a = a_min;
+    var last_x_o_p_a_o_p_prod: u64 = 0;
+    var last_phi: u64 = 0;
+    while (a < a_lim) : (a += 1) {
+        const p_a = ctx.primes[a];
+
+        const x_o_p_a_o_p_prod = ctx.x / p_a / p_prod;
+        if (last_x_o_p_a_o_p_prod != 0 and last_x_o_p_a_o_p_prod == x_o_p_a_o_p_prod) {
+            phi_sum += last_phi;
+            continue;
+        } else {
+            stats.phi_batch_uniques += 1;
+            last_x_o_p_a_o_p_prod = x_o_p_a_o_p_prod;
+        }
+        const sqrt_x_o_p_a_o_p_prod = isqrt(x_o_p_a_o_p_prod);
+        const pi_sqrt_x_o_p_a_o_p_prod = ctx.pis[sqrt_x_o_p_a_o_p_prod];
+        var phi: u64 = 0;
+        if (true and pi_sqrt_x_o_p_a_o_p_prod < b) {
+            const phi2 = phiSimple(ctx, x_o_p_a_o_p_prod, pi_sqrt_x_o_p_a_o_p_prod, stats);
+            phi = phi2 + pi_sqrt_x_o_p_a_o_p_prod - b;
+        } else {
+            phi = phiSimple(ctx, x_o_p_a_o_p_prod, b, stats);
+        }
+        last_phi = phi;
+
+        phi_sum += phi;
+    }
+
+    return phi_sum;
+}
+
+fn phiBatch(ctx: PhiCtx, p_prod: u64, b: u64, a_min: u64, a_lim: u64, stats: *PhiStats) u64 {
+    assert(b > 0);
+
     stats.phi_batches += 1;
 
-    const first_unit_a = findFirstUnitA(ctx, b, a_min, a_lim);
+    const first_unit_a = findFirstUnitA(ctx, p_prod, b, a_min, a_lim);
 
     stats.phi_batch_1s += a_lim - first_unit_a;
     stats.phi_batch_others += first_unit_a - a_min;
@@ -229,12 +282,22 @@ fn phiBatch(ctx: PhiCtx, b: u64, a_min: u64, a_lim: u64, stats: *PhiStats) u64 {
 
     const p_b = ctx.primes[b];
 
-    var a = a_min;
-    while (a < first_unit_a) : (a += 1) {
-        const p_a = ctx.primes[a];
+    phi_sum += phiBatchSplit(ctx, p_b, b - 1, a_min, first_unit_a, stats);
+    // var a = a_min;
+    // var last_x_o_p_a_o_p_prod_o_p_b: u64 = 0;
+    // while (a < first_unit_a) : (a += 1) {
+    //     const p_a = ctx.primes[a];
 
-        phi_sum += phiSimple(ctx, ctx.x / p_a / p_b, b - 1, stats);
-    }
+    //     const x_o_p_a_o_p_prod_o_p_b = ctx.x / p_a / p_prod / p_b;
+    //     if (last_x_o_p_a_o_p_prod_o_p_b != 0 and last_x_o_p_a_o_p_prod_o_p_b == x_o_p_a_o_p_prod_o_p_b) {
+    //         // do something
+    //     } else {
+    //         stats.phi_batch_uniques += 1;
+    //         last_x_o_p_a_o_p_prod_o_p_b = x_o_p_a_o_p_prod_o_p_b;
+    //     }
+    //     const phi = phiSimple(ctx, x_o_p_a_o_p_prod_o_p_b, b - 1, stats);
+    //     phi_sum += phi;
+    // }
 
     return phi_sum;
 }
@@ -255,10 +318,11 @@ fn phiBatchTop(ctx: PhiCtx, stats: *PhiStats) u64 {
         base_phi_sum += ctx.x / p_a;
     }
 
+    const p_prod_top: u64 = 1;
     var batch_phi_sum: u64 = 0;
     var b: u64 = 1;
     while (b <= ctx.pi_cbrt_x) : (b += 1) {
-        batch_phi_sum += phiBatch(ctx, b, b + 1, ctx.pi_sqrt_x + 1, stats);
+        batch_phi_sum += phiBatch(ctx, p_prod_top, b, b + 1, ctx.pi_sqrt_x + 1, stats);
     }
 
     phi -= base_phi_sum - batch_phi_sum;
