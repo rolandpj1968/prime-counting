@@ -82,6 +82,7 @@ fn genPisTo(gpa: std.mem.Allocator, y: u64, primes: []u64) ![]u64 {
 const Ctx = struct {
     x: u64,
     sqrt_x: u64,
+    tab: u64, // pi table bound L: pi(n) known for n <= L only
     primes: []const u64,
     pis: []const u64,
 };
@@ -125,7 +126,7 @@ const GROUPED = false; // fewer ops, but slower wall-clock: pis[] random access 
 
 fn runEnd(ctx: Ctx, N: u64, q: u64, a1: u64) u64 {
     const lim = N / q;
-    if (lim >= ctx.sqrt_x) return a1;
+    if (lim >= ctx.tab) return a1; // only valid for tab == sqrt x (all p_a <= sqrt x)
     return @min(a1, ctx.pis[lim] + 1);
 }
 
@@ -216,8 +217,8 @@ fn evalSet(ctx: Ctx, P: u64, c: u64, a0: u64, a1_in: u64, depth: u64, st: *Stats
     var sum: u64 = a1 - a_one;
     st.ones += a1 - a_one;
 
-    // everything below is table-bound: u <= sqrt x
-    const a_root = firstBelow(ctx, P, a0, a_one, ctx.sqrt_x + 1, st);
+    // everything below is table-bound: u <= L
+    const a_root = firstBelow(ctx, P, a0, a_one, ctx.tab + 1, st);
     // [a_pi, a_one): u < p^2  =>  phi = pi(u) - c + 1
     const a_pi = @max(a_root, firstBelow(ctx, P, a0, a_one, p *| p, st));
     // [a_p2, a_pi): p^2 <= u < p^3  =>  P2 formula
@@ -242,11 +243,11 @@ fn evalSet(ctx: Ctx, P: u64, c: u64, a0: u64, a1_in: u64, depth: u64, st: *Stats
     return sum;
 }
 
-fn piSets(gpa: std.mem.Allocator, x: u64, st: *Stats) !u64 {
+fn piSets(gpa: std.mem.Allocator, x: u64, tab: u64, st: *Stats) !u64 {
     const sqrt_x = isqrt(x);
     const primes = try genPrimesTo(gpa, sqrt_x);
     defer gpa.free(primes);
-    const pis = try genPisTo(gpa, sqrt_x, primes);
+    const pis = try genPisTo(gpa, tab, primes);
     defer gpa.free(pis);
     const A = primes.len - 1;
     // primes[A + 1] is read as p_{c+1} when c == A - 1; extend by one sentinel
@@ -254,7 +255,7 @@ fn piSets(gpa: std.mem.Allocator, x: u64, st: *Stats) !u64 {
     defer gpa.free(ext);
     @memcpy(ext[0..primes.len], primes);
     ext[primes.len] = std.math.maxInt(u64);
-    const ctx = Ctx{ .x = x, .sqrt_x = sqrt_x, .primes = ext, .pis = pis };
+    const ctx = Ctx{ .x = x, .sqrt_x = sqrt_x, .tab = tab, .primes = ext, .pis = pis };
 
     var phi: u64 = x;
     var a: u64 = 1;
@@ -271,8 +272,14 @@ pub fn main(init: std.process.Init) !void {
     _ = args.skip();
     const x_str = args.next() orelse return std.debug.print("Usage: pi-phi-sets <x>\n", .{});
     const x = try std.fmt.parseInt(u64, x_str, 10);
+    // optional pi-table exponent e: L = x^e, clamped to [1, sqrt x]
+    const e: f64 = if (args.next()) |s| try std.fmt.parseFloat(f64, s) else 0.5;
+    const sqrt_x = isqrt(x);
+    var tab: u64 = @intFromFloat(@floor(std.math.pow(f64, to_f(x), e)));
+    tab = @max(1, @min(tab, sqrt_x));
+    if (GROUPED and tab != sqrt_x) return std.debug.print("GROUPED needs the full sqrt x table\n", .{});
     var st = Stats{};
-    const pi_x = try piSets(std.heap.page_allocator, x, &st);
+    const pi_x = try piSets(std.heap.page_allocator, x, tab, &st);
 
     var check: []const u8 = "";
     var p10: u64 = 1;
@@ -283,6 +290,7 @@ pub fn main(init: std.process.Init) !void {
     const x23 = std.math.pow(f64, to_f(x), 2.0 / 3.0);
     const touches = st.pi_touches + st.c0_touches;
     std.debug.print("pi({d}) = {d}{s}\n", .{ x, pi_x, check });
+    std.debug.print("pi table L = {d} (x^{d:.3}), prime list to sqrt x = {d}\n", .{ tab, e, sqrt_x });
     std.debug.print("sets {d} ({d:.3} x^2/3)  searches {d}  touches {d} ({d:.3} x^2/3: pi {d}, c0 {d})  bulk ones {d}  zeros {d}  max depth {d}\n", .{ st.sets, to_f(st.sets) / x23, st.searches, touches, to_f(touches) / x23, st.pi_touches, st.c0_touches, st.ones, st.zeros, st.max_depth });
     if (GROUPED) std.debug.print("grouped: runs {d} ({d:.3} x^2/3: pi {d}, c0 {d}) vs {d} element touches = {d:.1}x fewer\n", .{ st.pi_runs + st.c0_runs, to_f(st.pi_runs + st.c0_runs) / x23, st.pi_runs, st.c0_runs, touches, to_f(touches) / to_f(st.pi_runs + st.c0_runs) });
     std.debug.print("P2 case: {d} elements in {d} runs, {d} pi lookups ({d:.3} x^2/3)   head elements descended: {d}\n", .{ st.p2_elems, st.p2_runs, st.p2_lookups, to_f(st.p2_lookups) / x23, st.head_elems });
