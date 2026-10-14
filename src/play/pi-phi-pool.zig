@@ -101,7 +101,47 @@ const Stats = struct {
     top_pi: u64 = 0,
     top_p2: u64 = 0,
     max_live: u64 = 0,
+    // representation census (REP_STATS), summed over levels
+    rep_live: u64 = 0, // nonzero entries at level start
+    rep_adj_runs: u64 = 0, // maximal runs of consecutive floor-quotient indices
+    rep_const_runs: u64 = 0, // ... further split where the count changes
+    rep_unit: u64 = 0, // |k| == 1
+    rep_small: u64 = 0, // 2 <= |k| <= 8
+    rep_max_k: u64 = 0,
+    rep_big_u: u64 = 0, // entries with u > sqrt x (the "hi" half)
 };
+
+// Representation census: is the per-level count vector compressible?
+const REP_STATS = false; // sorts every level: instrumentation only
+
+// position of u in the increasing floor-quotient order
+fn qIndex(ctx: Ctx, u: u64) u64 {
+    return if (u <= ctx.sqrt_x) u else 2 * ctx.sqrt_x + 1 - ctx.x / u;
+}
+
+fn repCensus(gpa: std.mem.Allocator, ctx: Ctx, pool: *Pool, st: *Stats) !void {
+    var es: std.ArrayList([2]i64) = .empty;
+    defer es.deinit(gpa);
+    for (pool.touched.items) |u| {
+        const k = pool.slot(ctx, u).*;
+        if (k != 0) try es.append(gpa, .{ @intCast(qIndex(ctx, u)), k });
+        if (k != 0 and u > ctx.sqrt_x) st.rep_big_u += 1;
+    }
+    std.mem.sort([2]i64, es.items, {}, struct {
+        fn lt(_: void, a: [2]i64, b: [2]i64) bool {
+            return a[0] < b[0];
+        }
+    }.lt);
+    for (es.items, 0..) |e, i| {
+        const ak = @abs(e[1]);
+        if (ak == 1) st.rep_unit += 1 else if (ak <= 8) st.rep_small += 1;
+        st.rep_max_k = @max(st.rep_max_k, ak);
+        const adj = i > 0 and es.items[i - 1][0] + 1 == e[0];
+        if (!adj) st.rep_adj_runs += 1;
+        if (!adj or es.items[i - 1][1] != e[1]) st.rep_const_runs += 1;
+    }
+    st.rep_live += es.items.len;
+}
 
 // Dense pool over the floor-quotient set, with a touched list.
 const Pool = struct {
@@ -234,6 +274,7 @@ fn piPool(gpa: std.mem.Allocator, x: u64, tab: u64, st: *Stats) !u64 {
         // top-level set b = c + 1 feeds level c
         if (c + 1 <= pc3) total += try topSet(gpa, ctx, c + 1, A, &cur, st);
 
+        if (REP_STATS) try repCensus(gpa, ctx, &cur, st);
         st.live += cur.touched.items.len;
         st.max_live = @max(st.max_live, cur.touched.items.len);
         for (cur.touched.items) |u| {
@@ -285,5 +326,6 @@ pub fn main(init: std.process.Init) !void {
     const x23 = std.math.pow(f64, to_f(x), 2.0 / 3.0);
     std.debug.print("pi({d}) = {d}{s}\n", .{ x, pi_x, check });
     std.debug.print("L = {d}  inserted {d}  live {d} ({d:.3} x^2/3, max/level {d})  steps {d}  cancelled {d}\n", .{ tab, st.inserted, st.live, to_f(st.live) / x23, st.max_live, st.steps, st.cancelled });
+    if (REP_STATS) std.debug.print("rep: live {d}  adjacent-runs {d} ({d:.2}/run)  constant-count runs {d} ({d:.2}/run)  |k|=1 {d:.1}%  2..8 {d:.1}%  max |k| {d}  u > sqrt x {d:.1}%\n", .{ st.rep_live, st.rep_adj_runs, to_f(st.rep_live) / to_f(st.rep_adj_runs), st.rep_const_runs, to_f(st.rep_live) / to_f(st.rep_const_runs), pc(st.rep_unit, st.rep_live), pc(st.rep_small, st.rep_live), st.rep_max_k, pc(st.rep_big_u, st.rep_live) });
     std.debug.print("resolved: one {d}  pi {d}  p2 {d}  c0 {d}   p2 lookups {d} ({d:.3} x^2/3)   top: pi {d} p2 {d}\n", .{ st.r_one, st.r_pi, st.r_p2, st.r_c0, st.p2_lookups, to_f(st.p2_lookups) / x23, st.top_pi, st.top_p2 });
 }
