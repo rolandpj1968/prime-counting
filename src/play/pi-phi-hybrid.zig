@@ -106,7 +106,17 @@ const Stats = struct {
     dense_tails: u64 = 0, // tails with N > range (more elements than u-values)
     dense_elems: u64 = 0,
     dense_range: u64 = 0,
+    // rough-walk census (ROUGH_STATS): per inserted tail (u_last, u_first]
+    rw_tails: u64 = 0,
+    rw_elems: u64 = 0, // E: elements (current insert cost)
+    rw_range: u64 = 0, // R: u-values in (u_last, u_first]
+    rw_rough: u64 = 0, // W: c-rough n in (u_last, u_first] (rough-walk lookups)
+    rw_union: u64 = 0, // c-rough n in the union of a level's intervals
+    rw_pred: f64 = 0, // Mertens: sum range * prod_{p <= p_c} (1 - 1/p)
 };
+
+// Rough-walk census: what would walking c-rough n (instead of elements) cost?
+const ROUGH_STATS = false; // O(T) per level: instrumentation only
 
 const Pool = struct {
     k: []i64,
@@ -151,7 +161,7 @@ fn resolve(ctx: Ctx, u: u64, c: u64, st: *Stats) ?u64 {
 }
 
 // one set at level c; children for level c-1 appended to `next`
-fn stepSet(gpa: std.mem.Allocator, ctx: Ctx, s: Set, c: u64, pool: *Pool, next: *std.ArrayList(Set), st: *Stats) !i64 {
+fn stepSet(gpa: std.mem.Allocator, ctx: Ctx, s: Set, c: u64, pool: *Pool, next: *std.ArrayList(Set), ivals: *std.ArrayList([2]u64), st: *Stats) !i64 {
     st.sets += 1;
     const P = s.P;
     const a1 = firstBelow(ctx, P, s.a0, s.a1, 1);
@@ -178,6 +188,8 @@ fn stepSet(gpa: std.mem.Allocator, ctx: Ctx, s: Set, c: u64, pool: *Pool, next: 
         const n = a_one - a_t;
         const rng = ctx.x / P / ctx.primes[a_t] - ctx.x / P / ctx.primes[a_one - 1] + 1;
         st.ins_range += @min(n, rng);
+        if (ROUGH_STATS) try ivals.append(gpa, .{ ctx.x / P / ctx.primes[a_one - 1], ctx.x / P / ctx.primes[a_t] });
+        st.rw_elems += n;
         st.ins_tails += 1;
         if (n > rng) {
             st.dense_tails += 1;
@@ -206,6 +218,43 @@ fn stepSet(gpa: std.mem.Allocator, ctx: Ctx, s: Set, c: u64, pool: *Pool, next: 
     return s.sign * sum;
 }
 
+// For level c: rough[v] = #{1 <= n <= v : n has no prime factor <= p_c}.
+fn roughLevel(gpa: std.mem.Allocator, ctx: Ctx, c: u64, lpf: []const u32, rough: []u32, mert: f64, ivals: *std.ArrayList([2]u64), st: *Stats) !void {
+    _ = gpa;
+    const p_c = ctx.primes[c];
+    var cnt: u32 = 0;
+    rough[0] = 0;
+    var v: u64 = 1;
+    while (v <= ctx.thr) : (v += 1) {
+        if (v == 1 or lpf[v] > p_c) cnt += 1;
+        rough[v] = cnt;
+    }
+    const iv = ivals.items;
+    for (iv) |e| {
+        st.rw_tails += 1;
+        st.rw_range += e[1] - e[0];
+        st.rw_rough += rough[e[1]] - rough[e[0]];
+        st.rw_pred += to_f(e[1] - e[0]) * mert;
+    }
+    std.mem.sort([2]u64, iv, {}, struct {
+        fn lt(_: void, a: [2]u64, b: [2]u64) bool {
+            return a[0] < b[0];
+        }
+    }.lt);
+    var lo = iv[0][0];
+    var hi = iv[0][1];
+    for (iv[1..]) |e| {
+        if (e[0] <= hi) {
+            hi = @max(hi, e[1]);
+        } else {
+            st.rw_union += rough[hi] - rough[lo];
+            lo = e[0];
+            hi = e[1];
+        }
+    }
+    st.rw_union += rough[hi] - rough[lo];
+}
+
 fn piHybrid(gpa: std.mem.Allocator, x: u64, tab: u64, thr: u64, st: *Stats) !u64 {
     const sqrt_x = isqrt(x);
     const primes = try genPrimesTo(gpa, sqrt_x);
@@ -225,6 +274,27 @@ fn piHybrid(gpa: std.mem.Allocator, x: u64, tab: u64, thr: u64, st: *Stats) !u64
     @memset(nxt.k, 0);
     var sets: std.ArrayList(Set) = .empty;
     var next_sets: std.ArrayList(Set) = .empty;
+    var ivals: std.ArrayList([2]u64) = .empty;
+
+    // rough-walk census support: least prime factor to T, per-level prefix
+    // counts of c-rough n, Mertens product per level
+    const lpf = try gpa.alloc(u32, thr + 1);
+    const rough = try gpa.alloc(u32, thr + 1);
+    const mertens = try gpa.alloc(f64, A + 2);
+    if (ROUGH_STATS) {
+        @memset(lpf, 0);
+        var i: u64 = 2;
+        while (i <= thr) : (i += 1) {
+            if (lpf[i] != 0) continue;
+            var j = i;
+            while (j <= thr) : (j += i) {
+                if (lpf[j] == 0) lpf[j] = @intCast(i);
+            }
+        }
+        mertens[0] = 1;
+        var cc: u64 = 1;
+        while (cc <= A) : (cc += 1) mertens[cc] = mertens[cc - 1] * (1.0 - 1.0 / to_f(primes[cc]));
+    }
 
     var total: i64 = @intCast(x);
     var a: u64 = 1;
@@ -241,7 +311,9 @@ fn piHybrid(gpa: std.mem.Allocator, x: u64, tab: u64, thr: u64, st: *Stats) !u64
     while (true) {
         if (c + 1 <= pc3 and c + 2 <= A + 1) try sets.append(gpa, .{ .P = primes[c + 1], .a0 = c + 2, .a1 = A + 1, .sign = 1 });
         st.max_sets_level = @max(st.max_sets_level, sets.items.len);
-        for (sets.items) |s| total += try stepSet(gpa, ctx, s, c, &cur, &next_sets, st);
+        for (sets.items) |s| total += try stepSet(gpa, ctx, s, c, &cur, &next_sets, &ivals, st);
+        if (ROUGH_STATS and ivals.items.len > 0) try roughLevel(gpa, ctx, c, lpf, rough, mertens[c], &ivals, st);
+        ivals.clearRetainingCapacity();
         sets.clearRetainingCapacity();
         std.mem.swap(std.ArrayList(Set), &sets, &next_sets);
 
@@ -292,6 +364,7 @@ pub fn main(init: std.process.Init) !void {
     const x23 = std.math.pow(f64, xf, 2.0 / 3.0);
     const elem = st.set_pi + st.set_p2 + st.set_c0;
     std.debug.print("pi({d}) = {d}{s}\n", .{ x, pi_x, check });
+    if (ROUGH_STATS) std.debug.print("rough walk: {d} tails  E elements {d}  R u-range {d}  W rough n {d} (Mertens {d:.0}, ratio {d:.3})  W-union {d}  |  E/W {d:.2}x  R/W {d:.2}x  W/W-union {d:.1}x\n", .{ st.rw_tails, st.rw_elems, st.rw_range, st.rw_rough, st.rw_pred, to_f(st.rw_rough) / @max(1.0, st.rw_pred), st.rw_union, to_f(st.rw_elems) / @max(1.0, to_f(st.rw_rough)), to_f(st.rw_range) / @max(1.0, to_f(st.rw_rough)), to_f(st.rw_rough) / @max(1.0, to_f(st.rw_union)) });
     std.debug.print("compactness: {d} tails, {d} elements over {d} u-slots ({d:.1} elems/slot); dense tails (N > range) {d}: {d} elems over {d} slots ({d:.1}x); overlap: {d} slots -> {d} live ({d:.1}x)\n", .{ st.ins_tails, st.inserted, st.ins_range, to_f(st.inserted) / @max(1.0, to_f(st.ins_range)), st.dense_tails, st.dense_elems, st.dense_range, to_f(st.dense_elems) / @max(1.0, to_f(st.dense_range)), st.ins_range, st.live, to_f(st.ins_range) / @max(1.0, to_f(st.live)) });
     std.debug.print("T = {d}  L = {d}  sets {d} (max/level {d})  set elementwise {d} (pi {d} p2 {d} c0 {d})  inserted {d} merged {d} ({d:.1}%)  pool live {d} steps {d}  p2 lookups {d}  [x^2/3 = {e:.2}]\n", .{ thr, tab, st.sets, st.max_sets_level, elem, st.set_pi, st.set_p2, st.set_c0, st.inserted, st.merged, pc(st.merged, @max(st.inserted, 1)), st.live, st.steps, st.p2_lookups, x23 });
 }
