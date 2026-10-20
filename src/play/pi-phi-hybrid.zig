@@ -113,6 +113,9 @@ const Stats = struct {
     rw_rough: u64 = 0, // W: c-rough n in (u_last, u_first] (rough-walk lookups)
     rw_union: u64 = 0, // c-rough n in the union of a level's intervals
     rw_pred: f64 = 0, // Mertens: sum range * prod_{p <= p_c} (1 - 1/p)
+    rw_levels: u64 = 0, // levels with any pooled tail
+    rw_tau_w: u64 = 0, // sum_c tails_c * W-union_c: plain S_c(x/n) query over all tails
+    rw_max_tau: u64 = 0,
 };
 
 // Rough-walk census: what would walking c-rough n (instead of elements) cost?
@@ -230,6 +233,12 @@ fn roughLevel(gpa: std.mem.Allocator, ctx: Ctx, c: u64, lpf: []const u32, rough:
         rough[v] = cnt;
     }
     const iv = ivals.items;
+    const union0 = st.rw_union;
+    defer {
+        st.rw_levels += 1;
+        st.rw_tau_w += iv.len * (st.rw_union - union0);
+        st.rw_max_tau = @max(st.rw_max_tau, iv.len);
+    }
     for (iv) |e| {
         st.rw_tails += 1;
         st.rw_range += e[1] - e[0];
@@ -365,6 +374,7 @@ pub fn main(init: std.process.Init) !void {
     const elem = st.set_pi + st.set_p2 + st.set_c0;
     std.debug.print("pi({d}) = {d}{s}\n", .{ x, pi_x, check });
     if (ROUGH_STATS) std.debug.print("rough walk: {d} tails  E elements {d}  R u-range {d}  W rough n {d} (Mertens {d:.0}, ratio {d:.3})  W-union {d}  |  E/W {d:.2}x  R/W {d:.2}x  W/W-union {d:.1}x\n", .{ st.rw_tails, st.rw_elems, st.rw_range, st.rw_rough, st.rw_pred, to_f(st.rw_rough) / @max(1.0, st.rw_pred), st.rw_union, to_f(st.rw_elems) / @max(1.0, to_f(st.rw_rough)), to_f(st.rw_range) / @max(1.0, to_f(st.rw_rough)), to_f(st.rw_rough) / @max(1.0, to_f(st.rw_union)) });
+    if (ROUGH_STATS) std.debug.print("plain query: {d} levels, max tails/level {d}, sum tails*W-union {d}  vs E {d} ({d:.3}x)  vs W {d} ({d:.3}x)\n", .{ st.rw_levels, st.rw_max_tau, st.rw_tau_w, st.rw_elems, to_f(st.rw_tau_w) / @max(1.0, to_f(st.rw_elems)), st.rw_rough, to_f(st.rw_tau_w) / @max(1.0, to_f(st.rw_rough)) });
     std.debug.print("compactness: {d} tails, {d} elements over {d} u-slots ({d:.1} elems/slot); dense tails (N > range) {d}: {d} elems over {d} slots ({d:.1}x); overlap: {d} slots -> {d} live ({d:.1}x)\n", .{ st.ins_tails, st.inserted, st.ins_range, to_f(st.inserted) / @max(1.0, to_f(st.ins_range)), st.dense_tails, st.dense_elems, st.dense_range, to_f(st.dense_elems) / @max(1.0, to_f(st.dense_range)), st.ins_range, st.live, to_f(st.ins_range) / @max(1.0, to_f(st.live)) });
     std.debug.print("T = {d}  L = {d}  sets {d} (max/level {d})  set elementwise {d} (pi {d} p2 {d} c0 {d})  inserted {d} merged {d} ({d:.1}%)  pool live {d} steps {d}  p2 lookups {d}  [x^2/3 = {e:.2}]\n", .{ thr, tab, st.sets, st.max_sets_level, elem, st.set_pi, st.set_p2, st.set_c0, st.inserted, st.merged, pc(st.merged, @max(st.inserted, 1)), st.live, st.steps, st.p2_lookups, x23 });
 }
