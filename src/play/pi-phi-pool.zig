@@ -109,7 +109,32 @@ const Stats = struct {
     rep_small: u64 = 0, // 2 <= |k| <= 8
     rep_max_k: u64 = 0,
     rep_big_u: u64 = 0, // entries with u > sqrt x (the "hi" half)
+    // node census (NODE_STATS)
+    top_nodes: u64 = 0, // distinct (u, c) resolved inside top-level sets
+    uniq_u: u64 = 0, // distinct u over all levels (<= 2 sqrt x + 1)
+    band_arr: [64]u64 = [_]u64{0} ** 64, // pool arrivals at level c, by log2 p_c
+    band_live: [64]u64 = [_]u64{0} ** 64,
+    band_step: [64]u64 = [_]u64{0} ** 64,
+    runs: u64 = 0, // per u, maximal runs of consecutive levels with the same nonzero count
 };
+
+// Node census: distinct phi nodes, distinct u, and where arrivals collide.
+const NODE_STATS = false; // instrumentation only
+var seen: []bool = &.{};
+var prev_k: []i64 = &.{};
+var prev_c: []u64 = &.{};
+
+fn markSeen(ctx: Ctx, u: u64, st: *Stats) void {
+    const i = qIndex(ctx, u);
+    if (!seen[i]) {
+        seen[i] = true;
+        st.uniq_u += 1;
+    }
+}
+
+fn band(ctx: Ctx, c: u64) usize {
+    return if (c == 0) 0 else std.math.log2_int(u64, ctx.primes[c]);
+}
 
 // Representation census: is the per-level count vector compressible?
 const REP_STATS = false; // sorts every level: instrumentation only
@@ -231,14 +256,33 @@ fn topSet(gpa: std.mem.Allocator, ctx: Ctx, b: u64, A: u64, pool: *Pool, st: *St
     const a_pi = @max(a_root, firstBelow(ctx, P, a0, a_one, p *| p));
     const a_p2 = @max(a_root, firstBelow(ctx, P, a0, a_pi, p *| p *| p));
     var a = a_pi;
-    while (a < a_one) : (a += 1) sum += @intCast(ctx.pis[ctx.x / P / ctx.primes[a]] + 1 - c);
+    var last_u: u64 = 0;
+    while (a < a_one) : (a += 1) {
+        const u = ctx.x / P / ctx.primes[a];
+        if (NODE_STATS and u != last_u) {
+            st.top_nodes += 1;
+            markSeen(ctx, u, st);
+            last_u = u;
+        }
+        sum += @intCast(ctx.pis[u] + 1 - c);
+    }
     st.top_pi += a_one - a_pi;
     a = a_p2;
-    while (a < a_pi) : (a += 1) sum += @intCast(phiP2(ctx, ctx.x / P / ctx.primes[a], c, st));
+    last_u = 0;
+    while (a < a_pi) : (a += 1) {
+        const u = ctx.x / P / ctx.primes[a];
+        if (NODE_STATS and u != last_u) {
+            st.top_nodes += 1;
+            markSeen(ctx, u, st);
+            last_u = u;
+        }
+        sum += @intCast(phiP2(ctx, u, c, st));
+    }
     st.top_p2 += a_pi - a_p2;
     a = a0;
     while (a < a_p2) : (a += 1) try pool.add(gpa, ctx, ctx.x / P / ctx.primes[a], 1);
     st.inserted += a_p2 - a0;
+    if (NODE_STATS) st.band_arr[band(ctx, c)] += a_p2 - a0;
     return sum;
 }
 
@@ -257,6 +301,14 @@ fn piPool(gpa: std.mem.Allocator, x: u64, tab: u64, st: *Stats) !u64 {
 
     var cur = try Pool.init(gpa, sqrt_x);
     var nxt = try Pool.init(gpa, sqrt_x);
+    if (NODE_STATS) {
+        seen = try gpa.alloc(bool, 2 * sqrt_x + 2);
+        @memset(seen, false);
+        prev_k = try gpa.alloc(i64, 2 * sqrt_x + 2);
+        @memset(prev_k, 0);
+        prev_c = try gpa.alloc(u64, 2 * sqrt_x + 2);
+        @memset(prev_c, std.math.maxInt(u64));
+    }
 
     var total: i64 = @intCast(x);
     var a: u64 = 1;
@@ -277,6 +329,10 @@ fn piPool(gpa: std.mem.Allocator, x: u64, tab: u64, st: *Stats) !u64 {
         if (REP_STATS) try repCensus(gpa, ctx, &cur, st);
         st.live += cur.touched.items.len;
         st.max_live = @max(st.max_live, cur.touched.items.len);
+        if (NODE_STATS) {
+            st.band_live[band(ctx, c)] += cur.touched.items.len;
+            for (cur.touched.items) |u| markSeen(ctx, u, st);
+        }
         for (cur.touched.items) |u| {
             const s = cur.slot(ctx, u);
             const k = s.*;
@@ -284,6 +340,12 @@ fn piPool(gpa: std.mem.Allocator, x: u64, tab: u64, st: *Stats) !u64 {
             if (k == 0) {
                 st.cancelled += 1;
                 continue;
+            }
+            if (NODE_STATS) {
+                const i = qIndex(ctx, u);
+                if (!(prev_k[i] == k and prev_c[i] == c + 1)) st.runs += 1;
+                prev_k[i] = k;
+                prev_c[i] = c;
             }
             if (resolve(ctx, u, c, st)) |phi| {
                 total += k * @as(i64, @intCast(phi));
@@ -294,6 +356,10 @@ fn piPool(gpa: std.mem.Allocator, x: u64, tab: u64, st: *Stats) !u64 {
             try nxt.add(gpa, ctx, u, k);
             const v = u / ctx.primes[c];
             if (v > 0) try nxt.add(gpa, ctx, v, -k);
+            if (NODE_STATS) {
+                st.band_step[band(ctx, c)] += 1;
+                st.band_arr[band(ctx, c - 1)] += if (v > 0) 2 else 1;
+            }
         }
         cur.touched.clearRetainingCapacity();
         if (c == 0) break;
@@ -327,5 +393,16 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("pi({d}) = {d}{s}\n", .{ x, pi_x, check });
     std.debug.print("L = {d}  inserted {d}  live {d} ({d:.3} x^2/3, max/level {d})  steps {d}  cancelled {d}\n", .{ tab, st.inserted, st.live, to_f(st.live) / x23, st.max_live, st.steps, st.cancelled });
     if (REP_STATS) std.debug.print("rep: live {d}  adjacent-runs {d} ({d:.2}/run)  constant-count runs {d} ({d:.2}/run)  |k|=1 {d:.1}%  2..8 {d:.1}%  max |k| {d}  u > sqrt x {d:.1}%\n", .{ st.rep_live, st.rep_adj_runs, to_f(st.rep_live) / to_f(st.rep_adj_runs), st.rep_const_runs, to_f(st.rep_live) / to_f(st.rep_const_runs), pc(st.rep_unit, st.rep_live), pc(st.rep_small, st.rep_live), st.rep_max_k, pc(st.rep_big_u, st.rep_live) });
+    if (NODE_STATS) {
+        const sq = to_f(sqrt_x);
+        const nodes = st.live + st.top_nodes;
+        std.debug.print("nodes: distinct (u,c) {d} = pool {d} + top-resolved {d}  ({d:.3} sqrt x, {d:.4} x^2/3)  stepped (interior) {d} ({d:.3} sqrt x)  distinct u {d} ({d:.3} sqrt x of max 2)\n", .{ nodes, st.live, st.top_nodes, to_f(nodes) / sq, to_f(nodes) / x23, st.steps, to_f(st.steps) / sq, st.uniq_u, to_f(st.uniq_u) / sq });
+        std.debug.print("  coefficient runs over levels: {d} ({d:.3} sqrt x) vs live nodes {d}: {d:.1} levels per run\n", .{ st.runs, to_f(st.runs) / sq, st.live, to_f(st.live) / @max(1.0, to_f(st.runs)) });
+        std.debug.print("  log2 p_c |   arrivals       live   arr/live    stepped\n", .{});
+        for (0..64) |k| {
+            if (st.band_arr[k] == 0 and st.band_live[k] == 0) continue;
+            std.debug.print("  {d:>8} | {d:>10} {d:>10} {d:>9.2}x {d:>10}\n", .{ k, st.band_arr[k], st.band_live[k], to_f(st.band_arr[k]) / @max(1.0, to_f(st.band_live[k])), st.band_step[k] });
+        }
+    }
     std.debug.print("resolved: one {d}  pi {d}  p2 {d}  c0 {d}   p2 lookups {d} ({d:.3} x^2/3)   top: pi {d} p2 {d}\n", .{ st.r_one, st.r_pi, st.r_p2, st.r_c0, st.p2_lookups, to_f(st.p2_lookups) / x23, st.top_pi, st.top_p2 });
 }
