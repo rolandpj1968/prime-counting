@@ -118,6 +118,12 @@ const Stats = struct {
     runs: u64 = 0, // per u, maximal runs of consecutive levels with the same nonzero count
 };
 
+// Per-level live profile (LEVEL_STATS): which levels and which u hold the peak.
+const LEVEL_STATS = false; // instrumentation only
+const LEVEL_DUMP = false; // one ROW line per level
+const LevelRow = struct { c: u64, p: u64, live: u64, le3: u64, le2: u64, hi: u64, from_top: u64 };
+var level_rows: std.ArrayList(LevelRow) = .empty;
+
 // Node census: distinct phi nodes, distinct u, and where arrivals collide.
 const NODE_STATS = false; // instrumentation only
 var seen: []bool = &.{};
@@ -324,9 +330,21 @@ fn piPool(gpa: std.mem.Allocator, x: u64, tab: u64, st: *Stats) !u64 {
 
     while (true) {
         // top-level set b = c + 1 feeds level c
+        const ins0 = st.inserted;
         if (c + 1 <= pc3) total += try topSet(gpa, ctx, c + 1, A, &cur, st);
+        const top_in = st.inserted - ins0;
 
         if (REP_STATS) try repCensus(gpa, ctx, &cur, st);
+        if (LEVEL_STATS) {
+            const c3 = icbrt(x);
+            var row = LevelRow{ .c = c, .p = ctx.primes[@max(c, 1)], .live = 0, .le3 = 0, .le2 = 0, .hi = 0, .from_top = top_in };
+            for (cur.touched.items) |u| {
+                if (cur.slot(ctx, u).* == 0) continue;
+                row.live += 1;
+                if (u <= c3) row.le3 += 1 else if (u <= sqrt_x) row.le2 += 1 else row.hi += 1;
+            }
+            try level_rows.append(gpa, row);
+        }
         st.live += cur.touched.items.len;
         st.max_live = @max(st.max_live, cur.touched.items.len);
         if (NODE_STATS) {
@@ -365,6 +383,31 @@ fn piPool(gpa: std.mem.Allocator, x: u64, tab: u64, st: *Stats) !u64 {
         if (c == 0) break;
         std.mem.swap(Pool, &cur, &nxt);
         c -= 1;
+    }
+    if (LEVEL_STATS) {
+        const rows = level_rows.items;
+        var mx: LevelRow = rows[0];
+        var s_live: u64 = 0;
+        for (rows) |r| {
+            if (r.live > mx.live) mx = r;
+            s_live += r.live;
+        }
+        const c3f = to_f(icbrt(x));
+        std.debug.print("levels {d} (c from {d} down to 0), x^1/3 = {d:.0}, sqrt x = {d}\n", .{ rows.len, rows[0].c, c3f, sqrt_x });
+        std.debug.print("peak level c = {d} (p_c = {d}): live {d} = {d:.2} sqrt x = {d:.1} x^1/3   [u <= x^1/3: {d}, x^1/3 < u <= sqrt x: {d}, u > sqrt x: {d}]\n", .{ mx.c, mx.p, mx.live, to_f(mx.live) / to_f(sqrt_x), to_f(mx.live) / c3f, mx.le3, mx.le2, mx.hi });
+        std.debug.print("     c       p_c        live  /x^1/3   u<=x^1/3  x^1/3..sqrtx   u>sqrt x   top-inserts\n", .{});
+        // a profile: ~16 rows spread over the level range, plus the peak
+        const step = @max(1, rows.len / 16);
+        var i: usize = 0;
+        while (i < rows.len) : (i += step) {
+            const r = rows[i];
+            std.debug.print("  {d:>5} {d:>8} {d:>11} {d:>7.1} {d:>10} {d:>13} {d:>10} {d:>12}\n", .{ r.c, r.p, r.live, to_f(r.live) / c3f, r.le3, r.le2, r.hi, r.from_top });
+        }
+        if (LEVEL_DUMP) {
+            for (rows) |rr| std.debug.print("ROW {d} {d} {d} {d} {d} {d}\n", .{ rr.c, rr.p, rr.live, rr.le3, rr.le2, rr.hi });
+        }
+        const r = rows[rows.len - 1];
+        std.debug.print("  {d:>5} {d:>8} {d:>11} {d:>7.1} {d:>10} {d:>13} {d:>10} {d:>12}\n", .{ r.c, r.p, r.live, to_f(r.live) / c3f, r.le3, r.le2, r.hi, r.from_top });
     }
     return @as(u64, @intCast(total)) + A - 1;
 }
