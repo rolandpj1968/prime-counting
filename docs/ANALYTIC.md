@@ -340,7 +340,8 @@ float geometry disagreeing about the edge of a set.
 Next kernel experiments: the Slepian/prolate plug (exploratory, above),
 and the open niche the sweep exposed — nobody has solved the
 Beurling–Selberg extremal problem in the 1/log-weighted norm that π*/li
-actually lives in.
+actually lives in. (Attacked numerically in rung 7 below: Logan already holds
+it, and no kernel can do better than an additive constant in c.)
 
 ## Rung 6: the Slepian/prolate kernel — new territory, measured
 
@@ -537,5 +538,92 @@ which is why Logan's L1 extremality is the entire certified column. The
 corollary is the split we measured: RMS is available to the empiricist
 because a generic x is not a prime power; L1 is what the prover pays because
 the x you care about might be.
+
+## Rung 7: the extremal problem in the true functional — solved numerically, and capped
+
+The open niche from rung 5: Logan minimises the plain L1 tail ∫_c^∞ |η̂(u)|/u,
+the prolate maximises in-band L2 energy, and neither is the functional
+`pistar` actually pays. That functional can be written down exactly. Every
+kernel is an even bump η on [−1, 1], ∫η = 1, dilated to the window
+|log(n/x)| ≤ ε with ε = c/T; zero γ gets weight η̂(εγ), so the dropped zeros
+are exactly u = εγ > c. A dropped pair contributes ≈ 2√x·η̂(u)/(γL), and zeros
+arrive with density log(γ/2π)/2π. With w(u) = log(u/(2πε)):
+
+```
+certified   R1 = √x/(πL) · J1,          J1 = ∫_c^∞ |η̂(u)| w(u)/u  du
+RMS         R2 = √(x ε/(π L²) · J2),    J2 = ∫_c^∞  η̂(u)² w(u)/u² du
+```
+
+J1 is Logan's problem with the zero-density weight switched on (the
+"log-weighted" norm); J2 is the empiricist's, random phases on the dropped
+zeros. Neither needs a single zero to evaluate, so the whole study runs
+offline (`kernel-opt.py`, numpy/scipy). Kernels are expanded in normalized
+even Legendre polynomials — the same basis as the Slepian plug — where
+η̂ is an exact spherical-Bessel sum and ∫η = 1 is one linear constraint on
+a₀. J2 is then a quadratic form: its optimum is one linear solve. J1 is a
+weighted L1 problem: a sparse LP (HiGHS) on the full u-grid to 40c, with the
+tail beyond priced through η(1).
+
+**The model is calibrated against the rung 6 c-sweep** (x = 10¹⁵, T = 1.01×10⁸):
+
+| c | Logan measured | Logan R2 | Slepian measured | Slepian R2 |
+|---:|---:|---:|---:|---:|
+| 8 | −0.352 | 0.174 | −0.104 | 0.125 |
+| 10 | −0.033 | 0.024 | −0.0042 | 0.017 |
+| 12 | −0.0027 | 0.0034 | +0.0008 | 0.0023 |
+
+Right order everywhere, single realisations against an RMS. The model puts
+*both* kernels on e^(−c) with prolate ahead by a constant 1.45×; the steeper
+e^(−2.3c) read off four Slepian points in rung 6 sits inside the same scatter
+that produced the floor-that-was-a-crossing, and is not a slope to build on.
+
+**Results, the c each kernel needs** (log-interpolated over c = 6…20; window ∝ c):
+
+| target | Logan | prolate | J2-optimal | J1-optimal |
+|---|---:|---:|---:|---:|
+| R2 ≤ 0.05 | 9.27 | 8.91 | **8.66** | 9.23 |
+| R2 ≤ 0.01 | 10.90 | 10.52 | **10.23** | 10.88 |
+| R2 ≤ 0.001 | 13.23 | 12.83 | **12.52** | 13.19 |
+| R1 ≤ 0.5 | **16.82** | 16.89 | — | — |
+
+- **Certified: Logan already holds the weighted problem.** The J1 optimum lands
+  within 0.1–1.3% of Logan's J1 at every c = 8…14 and never below it; past
+  c ≈ 16 the LP's ~10⁻⁷ tolerances meet J1 ~ 10⁻⁶ and it stops resolving. The
+  density weight varies only from log(T/2π) ≈ 16.6 at the band edge to ~20 at
+  40c — a perturbation Logan's extremal absorbs.
+- **RMS: there is a better kernel than prolate, and it is worth 0.3 in c.**
+  The J2 optimum saves 0.29–0.31 over prolate and 0.67–0.71 over Logan:
+  ~2.8% and ~6% of the window at c ≈ 10.5. Its price is a jump at the window
+  edge (η(1) ≈ 0.1) and negative lobes, which push its certified tail 4–5×
+  above Logan's. An empiricist's kernel only, like the prolate before it.
+
+**Two solver traps, both of the "bound reused for another purpose" family.**
+The first J1 LP ran on a subsampled grid and came out *worse* than Logan —
+impossible, since Logan is in the search space: the LP had parked its zeros
+on the samples and oscillated freely between them. On the full grid but cut
+at U = 20c it then read 15–20% *better* than Logan — the optimum had hidden
+mass beyond U, where only the η(1) tail term could see it. Extending to 40c
+took the gain to 3–5%, and the final full-grid run to under 1.3% and never
+below. Every row is re-evaluated on a 5× finer grid than the one solved on.
+Separately, J2 is solved in f64 and floors near 10⁻¹⁶ from c ≈ 20, so those
+rows measure the solver, not the kernel; none of the targets above reach them.
+
+**Why the gain is capped — and it is a theorem, not a tuning result.** η
+supported on [−1, 1] makes η̂ entire of exponential type 1, and by Logan's
+own theorem its tail beyond c is at least 2·log((1+e^(−c))/(1−e^(−c))) ≈ 4e^(−c).
+So for *every* admissible kernel the error is √x·e^(−c)·(kernel constant),
+and the c a target δ needs is ½ ln x + ln(1/δ) + O(1). The kernel moves only
+the O(1) — and the table measures how far it can move: ~0.3 below prolate on
+the RMS side, nothing below Logan on the certified side. Equivalently, the
+window is fixed by the uncertainty principle at ≈ 2x·(½ ln x + ln(1/δ))/T.
+
+That closes the kernel program as a source of large wins. What can still move
+the window: more zeros (T — the Odlyzko–Schönhage sub-project), and a cheaper
+cost per window integer (the window sieve is still a bool-per-integer sieve,
+≥97% of runtime from 10¹⁸, with the repo's own wheel/bit-packed/bucket sieving
+not yet applied to it). And one place where the kernel is nowhere near this
+cap: HKM's hard log-scale bucket (see [COMBINATORIAL.md](COMBINATORIAL.md),
+"Why this is the bridge to `pistar`") — there a smoother weight could move
+more than an additive constant, if exactness survives it.
 
 See [README.md](../README.md) for framing and references.
